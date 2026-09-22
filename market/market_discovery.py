@@ -2,32 +2,49 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Optional
 
-from broker.alpaca_client import AlpacaClient
+from broker.alpaca_client import (
+    AlpacaClient,
+    get_alpaca_client,
+)
 
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+class MarketDiscoveryError(RuntimeError):
+    """
+    Raised when JALWE cannot safely build
+    the tradable US equity universe.
+    """
+
+
+@dataclass(frozen=True)
 class MarketCandidate:
     symbol: str
-    exchange: str = ""
+    exchange: str
+
     tradable: bool = True
     shortable: bool = False
     fractionable: bool = False
+    marginable: bool = False
+    easy_to_borrow: bool = False
 
 
 class MarketDiscovery:
     """
-    JALWE V4 - Market Discovery Engine
+    JALWE AI TRADER V4
+    Market Discovery Engine.
 
-    مسؤول عن بناء قائمة الأسهم التي يسمح للنظام بتحليلها.
+    مسؤول عن اكتشاف الأسهم الأمريكية
+    القابلة للتداول من Alpaca.
 
-    هذه الطبقة لا تعطي إشارة شراء أو بيع.
-    وظيفتها فقط اكتشاف الأسهم الصالحة للانتقال
-    إلى مراحل التحليل التالية.
+    هذه الطبقة:
+    - لا تحلل السهم.
+    - لا تعطي BUY / SELL.
+    - لا تنفذ صفقات.
+    - لا تستخدم قائمة ثابتة كبديل.
     """
 
     ALLOWED_EXCHANGES = {
@@ -38,106 +55,259 @@ class MarketDiscovery:
         "BATS",
     }
 
+    BLOCKED_SYMBOL_CHARACTERS = {
+        "/",
+        "^",
+        "=",
+        " ",
+    }
+
     def __init__(
         self,
         broker: Optional[AlpacaClient] = None,
         max_symbols: Optional[int] = None,
-    ):
-        self.broker = broker or AlpacaClient()
+    ) -> None:
+
+        self.broker = broker or get_alpaca_client()
+
+        if (
+            max_symbols is not None
+            and max_symbols <= 0
+        ):
+            raise ValueError(
+                "max_symbols must be greater than zero."
+            )
+
         self.max_symbols = max_symbols
 
-    @staticmethod
-    def _clean_symbol(symbol: str) -> str:
-        return str(symbol or "").strip().upper()
+    # ========================================================
+    # NORMALIZATION
+    # ========================================================
 
     @staticmethod
-    def _is_common_stock_symbol(symbol: str) -> bool:
+    def _enum_value(value) -> str:
         """
-        فلتر أولي بسيط لاستبعاد الرموز غير المناسبة.
+        Safely normalize Alpaca Enum/string values.
 
-        لا نعتمد عليه وحده لتحديد نوع الأصل.
+        Examples:
+        AssetStatus.ACTIVE -> ACTIVE
+        AssetExchange.NASDAQ -> NASDAQ
         """
+
+        if value is None:
+            return ""
+
+        raw_value = getattr(
+            value,
+            "value",
+            value,
+        )
+
+        return str(
+            raw_value
+        ).strip().upper()
+
+    @staticmethod
+    def _clean_symbol(
+        symbol: str,
+    ) -> str:
+
+        return str(
+            symbol or ""
+        ).strip().upper()
+
+    def _symbol_is_valid(
+        self,
+        symbol: str,
+    ) -> bool:
+        """
+        Basic symbol sanity validation.
+
+        This is not used to decide trade quality.
+        """
+
         if not symbol:
             return False
 
-        if len(symbol) > 10:
+        if len(symbol) > 12:
             return False
 
-        blocked_chars = {"/", "^", "="}
-
-        if any(char in symbol for char in blocked_chars):
+        if any(
+            character in symbol
+            for character
+            in self.BLOCKED_SYMBOL_CHARACTERS
+        ):
             return False
 
         return True
 
-    def _asset_to_candidate(self, asset) -> Optional[MarketCandidate]:
-        symbol = self._clean_symbol(getattr(asset, "symbol", ""))
+    # ========================================================
+    # ASSET FILTERING
+    # ========================================================
 
-        if not self._is_common_stock_symbol(symbol):
+    def _asset_to_candidate(
+        self,
+        asset,
+    ) -> Optional[MarketCandidate]:
+
+        symbol = self._clean_symbol(
+            getattr(
+                asset,
+                "symbol",
+                "",
+            )
+        )
+
+        if not self._symbol_is_valid(symbol):
             return None
 
-        status = str(getattr(asset, "status", "")).lower()
+        # Exact status comparison.
+        # This prevents INACTIVE from accidentally
+        # matching ACTIVE.
+        status = self._enum_value(
+            getattr(
+                asset,
+                "status",
+                None,
+            )
+        )
 
-        if status and "active" not in status:
+        if status != "ACTIVE":
             return None
 
-        tradable = bool(getattr(asset, "tradable", False))
+        tradable = bool(
+            getattr(
+                asset,
+                "tradable",
+                False,
+            )
+        )
 
         if not tradable:
             return None
 
-        exchange = str(getattr(asset, "exchange", "")).upper()
+        exchange = self._enum_value(
+            getattr(
+                asset,
+                "exchange",
+                None,
+            )
+        )
 
-        if exchange and exchange not in self.ALLOWED_EXCHANGES:
+        if exchange not in self.ALLOWED_EXCHANGES:
             return None
 
         return MarketCandidate(
             symbol=symbol,
             exchange=exchange,
-            tradable=tradable,
-            shortable=bool(getattr(asset, "shortable", False)),
-            fractionable=bool(getattr(asset, "fractionable", False)),
+            tradable=True,
+
+            shortable=bool(
+                getattr(
+                    asset,
+                    "shortable",
+                    False,
+                )
+            ),
+
+            fractionable=bool(
+                getattr(
+                    asset,
+                    "fractionable",
+                    False,
+                )
+            ),
+
+            marginable=bool(
+                getattr(
+                    asset,
+                    "marginable",
+                    False,
+                )
+            ),
+
+            easy_to_borrow=bool(
+                getattr(
+                    asset,
+                    "easy_to_borrow",
+                    False,
+                )
+            ),
         )
 
-    def discover_candidates(self) -> List[MarketCandidate]:
-        """
-        يجلب الأصول من الوسيط ثم ينظفها ويعيد قائمة المرشحين.
+    # ========================================================
+    # DISCOVERY
+    # ========================================================
 
-        مهم:
-        لا توجد قائمة أسهم ثابتة كخطة بديلة.
-        إذا فشل مصدر البيانات نعيد قائمة فارغة حتى لا يعمل
-        النظام على بيانات غير مؤكدة.
+    def discover_candidates(
+        self,
+    ) -> list[MarketCandidate]:
         """
+        Build the clean tradable stock universe.
+
+        Important:
+        If Alpaca fails, JALWE raises an error instead
+        of using a fake or hardcoded fallback universe.
+        """
+
         try:
             assets = self.broker.list_assets()
-        except Exception:
-            logger.exception("Market discovery failed while loading assets.")
-            return []
 
-        candidates: List[MarketCandidate] = []
+        except Exception as exc:
+            logger.exception(
+                "Unable to load market universe from Alpaca."
+            )
+
+            raise MarketDiscoveryError(
+                "Market discovery unavailable."
+            ) from exc
+
+        # Dictionary prevents duplicate symbols.
+        candidates_by_symbol: dict[
+            str,
+            MarketCandidate,
+        ] = {}
 
         for asset in assets:
-            candidate = self._asset_to_candidate(asset)
+
+            candidate = self._asset_to_candidate(
+                asset
+            )
 
             if candidate is None:
                 continue
 
-            candidates.append(candidate)
+            candidates_by_symbol[
+                candidate.symbol
+            ] = candidate
 
-        candidates.sort(key=lambda item: item.symbol)
+        candidates = sorted(
+            candidates_by_symbol.values(),
+            key=lambda item: item.symbol,
+        )
 
         if self.max_symbols is not None:
-            candidates = candidates[: self.max_symbols]
+            candidates = candidates[
+                : self.max_symbols
+            ]
 
         logger.info(
-            "Market discovery completed: %s tradable symbols found.",
+            "Market discovery completed | "
+            "tradable_symbols=%s",
             len(candidates),
         )
 
         return candidates
 
-    def discover_symbols(self) -> List[str]:
+    def discover_symbols(
+        self,
+    ) -> list[str]:
+        """
+        Return only ticker symbols.
+        """
+
         return [
             candidate.symbol
-            for candidate in self.discover_candidates()
+            for candidate
+            in self.discover_candidates()
         ]

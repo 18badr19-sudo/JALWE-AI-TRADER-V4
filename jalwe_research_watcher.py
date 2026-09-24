@@ -492,12 +492,9 @@ def should_process(
     )
 
     verdict = str(
-        metadata.get(
-            "apex_verdict",
-            "",
-        )
-        or
-        ""
+        metadata.get("apex_verdict")
+        or metadata.get("verdict")
+        or ""
     ).strip().upper()
 
     if (

@@ -6,6 +6,7 @@ from typing import Optional
 
 import pandas as pd
 
+from alpaca.common.enums import Sort
 from alpaca.data.enums import DataFeed
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import (
@@ -30,9 +31,11 @@ class MarketData:
     """
     Central market-data service for JALWE AI TRADER V4.
 
-    Current mode:
+    Rules:
     - Real Alpaca data only.
-    - Explicit IEX feed.
+    - IEX or SIP according to configuration.
+    - Latest bars requested first.
+    - Returned DataFrame sorted oldest -> newest.
     - No synthetic/random fallback.
     """
 
@@ -48,7 +51,17 @@ class MarketData:
             settings.ALPACA_DATA_FEED
         )
 
+        logger.info(
+            "MarketData initialized | feed=%s",
+            self.get_feed_name(),
+        )
+
+    # ========================================================
+    # CONFIGURATION
+    # ========================================================
+
     def _validate_configuration(self) -> None:
+
         if not settings.ALPACA_API_KEY:
             raise RuntimeError(
                 "ALPACA_API_KEY is missing."
@@ -63,12 +76,6 @@ class MarketData:
     def _resolve_feed(
         feed_name: str,
     ) -> DataFeed:
-        """
-        Resolve configured stock-data feed.
-
-        JALWE currently defaults to IEX so the
-        project works without a SIP subscription.
-        """
 
         normalized = str(
             feed_name or "iex"
@@ -81,31 +88,68 @@ class MarketData:
             return DataFeed.SIP
 
         raise ValueError(
-            f"Unsupported stock data feed: {feed_name}"
+            f"Unsupported ALPACA_DATA_FEED: {feed_name}"
         )
+
+    def get_feed_name(self) -> str:
+
+        value = getattr(
+            self.feed,
+            "value",
+            self.feed,
+        )
+
+        return str(value).lower()
+
+    # ========================================================
+    # HELPERS
+    # ========================================================
+
+    @staticmethod
+    def _normalize_symbol(
+        symbol: str,
+    ) -> str:
+
+        normalized = str(
+            symbol or ""
+        ).strip().upper()
+
+        if not normalized:
+            raise ValueError(
+                "Symbol cannot be empty."
+            )
+
+        return normalized
 
     @staticmethod
     def _timeframe(
         timeframe: str,
     ) -> TimeFrame:
 
-        value = timeframe.strip().lower()
+        value = str(
+            timeframe
+        ).strip().lower()
 
         mapping = {
             "1m": TimeFrame.Minute,
+
             "5m": TimeFrame(
                 5,
                 TimeFrameUnit.Minute,
             ),
+
             "15m": TimeFrame(
                 15,
                 TimeFrameUnit.Minute,
             ),
+
             "30m": TimeFrame(
                 30,
                 TimeFrameUnit.Minute,
             ),
+
             "1h": TimeFrame.Hour,
+
             "1d": TimeFrame.Day,
         }
 
@@ -116,69 +160,130 @@ class MarketData:
 
         return mapping[value]
 
+    @staticmethod
+    def _lookback_days(
+        timeframe: str,
+        limit: int,
+    ) -> int:
+        """
+        Request enough calendar history while keeping
+        the request reasonably small.
+        """
+
+        value = timeframe.lower()
+
+        if value == "1d":
+            return max(
+                limit * 2,
+                30,
+            )
+
+        if value == "1h":
+            return max(
+                30,
+                int(limit / 5) + 10,
+            )
+
+        if value == "30m":
+            return max(
+                15,
+                int(limit / 10) + 10,
+            )
+
+        if value == "15m":
+            return max(
+                10,
+                int(limit / 20) + 7,
+            )
+
+        if value == "5m":
+            return max(
+                7,
+                int(limit / 50) + 5,
+            )
+
+        if value == "1m":
+            return max(
+                5,
+                int(limit / 200) + 3,
+            )
+
+        return 10
+
+    # ========================================================
+    # HISTORICAL BARS
+    # ========================================================
+
     def get_bars(
         self,
         symbol: str,
         timeframe: str = "5m",
         limit: int = 300,
     ) -> pd.DataFrame:
-        """
-        Fetch real historical stock bars.
-        """
 
-        symbol = symbol.upper().strip()
-
-        if not symbol:
-            raise ValueError(
-                "Symbol cannot be empty."
-            )
+        symbol = self._normalize_symbol(
+            symbol
+        )
 
         if limit <= 0:
             raise ValueError(
-                "Limit must be greater than zero."
+                "limit must be greater than zero."
+            )
+
+        if limit > 10000:
+            raise ValueError(
+                "limit cannot exceed 10000."
             )
 
         end = datetime.now(
             timezone.utc
         )
 
-        if timeframe.lower() == "1d":
-            start = end - timedelta(
-                days=max(
-                    limit * 2,
-                    30,
-                )
+        start = end - timedelta(
+            days=self._lookback_days(
+                timeframe,
+                limit,
             )
-
-        else:
-            start = end - timedelta(
-                days=10
-            )
+        )
 
         request = StockBarsRequest(
             symbol_or_symbols=symbol,
+
             timeframe=self._timeframe(
                 timeframe
             ),
+
             start=start,
             end=end,
+
+            # IMPORTANT:
+            # Request the newest bars first.
             limit=limit,
+            sort=Sort.DESC,
+
             feed=self.feed,
         )
 
         try:
-            bars = self.client.get_stock_bars(
-                request
+            response = (
+                self.client
+                .get_stock_bars(
+                    request
+                )
             )
 
-            df = bars.df
+            df = response.df
 
         except Exception as exc:
+
             logger.exception(
-                "Failed to fetch market bars "
-                "for %s using feed=%s",
+                "Failed to fetch bars | "
+                "symbol=%s timeframe=%s "
+                "limit=%s feed=%s",
                 symbol,
-                self.feed,
+                timeframe,
+                limit,
+                self.get_feed_name(),
             )
 
             raise MarketDataError(
@@ -190,6 +295,8 @@ class MarketData:
                 f"No market bars returned for {symbol}"
             )
 
+        # Alpaca normally returns:
+        # MultiIndex(symbol, timestamp)
         if isinstance(
             df.index,
             pd.MultiIndex,
@@ -213,6 +320,8 @@ class MarketData:
                         f"for {symbol}"
                     ) from exc
 
+        # API returned newest -> oldest because Sort.DESC.
+        # JALWE indicators require chronological order.
         df = df.sort_index().copy()
 
         required_columns = {
@@ -223,14 +332,15 @@ class MarketData:
             "volume",
         }
 
-        missing = required_columns.difference(
-            df.columns
+        missing_columns = (
+            required_columns
+            .difference(df.columns)
         )
 
-        if missing:
+        if missing_columns:
             raise MarketDataError(
                 f"Missing columns for {symbol}: "
-                f"{sorted(missing)}"
+                f"{sorted(missing_columns)}"
             )
 
         numeric_columns = [
@@ -244,7 +354,9 @@ class MarketData:
         ]
 
         for column in numeric_columns:
+
             if column in df.columns:
+
                 df[column] = pd.to_numeric(
                     df[column],
                     errors="coerce",
@@ -265,22 +377,21 @@ class MarketData:
                 f"Invalid market bars for {symbol}"
             )
 
+        # Defensive final limit.
         return df.tail(limit)
+
+    # ========================================================
+    # LATEST QUOTE
+    # ========================================================
 
     def get_latest_quote(
         self,
         symbol: str,
     ) -> dict[str, Optional[float]]:
-        """
-        Return latest IEX bid/ask quote.
-        """
 
-        symbol = symbol.upper().strip()
-
-        if not symbol:
-            raise ValueError(
-                "Symbol cannot be empty."
-            )
+        symbol = self._normalize_symbol(
+            symbol
+        )
 
         request = StockLatestQuoteRequest(
             symbol_or_symbols=symbol,
@@ -298,11 +409,12 @@ class MarketData:
             quote = quotes[symbol]
 
         except Exception as exc:
+
             logger.exception(
-                "Failed to fetch latest quote "
-                "for %s using feed=%s",
+                "Failed to fetch latest quote | "
+                "symbol=%s feed=%s",
                 symbol,
-                self.feed,
+                self.get_feed_name(),
             )
 
             raise MarketDataError(
@@ -310,38 +422,50 @@ class MarketData:
                 f"for {symbol}"
             ) from exc
 
-        bid = (
-            float(quote.bid_price)
-            if quote.bid_price is not None
-            else None
-        )
+        bid = None
+        ask = None
 
-        ask = (
-            float(quote.ask_price)
-            if quote.ask_price is not None
-            else None
-        )
+        if getattr(
+            quote,
+            "bid_price",
+            None,
+        ) is not None:
 
+            bid = float(
+                quote.bid_price
+            )
+
+        if getattr(
+            quote,
+            "ask_price",
+            None,
+        ) is not None:
+
+            ask = float(
+                quote.ask_price
+            )
+
+        mid = None
         spread = None
         spread_pct = None
-        mid = None
 
         if (
             bid is not None
             and ask is not None
             and bid > 0
+            and ask > 0
             and ask >= bid
         ):
-            spread = ask - bid
-
             mid = (
-                ask + bid
-            ) / 2
+                bid + ask
+            ) / 2.0
+
+            spread = ask - bid
 
             if mid > 0:
                 spread_pct = (
                     spread / mid
-                ) * 100
+                ) * 100.0
 
         return {
             "bid": bid,
@@ -351,23 +475,27 @@ class MarketData:
             "spread_pct": spread_pct,
         }
 
+    # ========================================================
+    # LAST PRICE
+    # ========================================================
+
     def get_last_price(
         self,
         symbol: str,
     ) -> float:
-        """
-        Return a recent real price.
 
-        Uses quote midpoint first,
-        then the latest real IEX 1-minute bar.
-        """
+        symbol = self._normalize_symbol(
+            symbol
+        )
 
         try:
             quote = self.get_latest_quote(
                 symbol
             )
 
-            mid = quote.get("mid")
+            mid = quote.get(
+                "mid"
+            )
 
             if (
                 mid is not None
@@ -376,7 +504,12 @@ class MarketData:
                 return float(mid)
 
         except MarketDataError:
-            pass
+
+            logger.warning(
+                "Quote unavailable for %s. "
+                "Using latest real bar.",
+                symbol,
+            )
 
         bars = self.get_bars(
             symbol=symbol,
@@ -390,25 +523,28 @@ class MarketData:
 
         if price <= 0:
             raise MarketDataError(
-                f"Invalid latest price "
-                f"for {symbol}"
+                f"Invalid latest price for {symbol}"
             )
 
         return price
+
+    # ========================================================
+    # DATA QUALITY
+    # ========================================================
 
     def data_is_fresh(
         self,
         dataframe: pd.DataFrame,
         max_age_minutes: int = 15,
     ) -> bool:
-        """
-        Check whether the latest bar is recent enough.
-        """
 
         if (
             dataframe is None
             or dataframe.empty
         ):
+            return False
+
+        if max_age_minutes <= 0:
             return False
 
         try:
@@ -417,12 +553,14 @@ class MarketData:
             )
 
             if last_timestamp.tzinfo is None:
+
                 last_timestamp = (
                     last_timestamp
                     .tz_localize("UTC")
                 )
 
             else:
+
                 last_timestamp = (
                     last_timestamp
                     .tz_convert("UTC")
@@ -434,33 +572,32 @@ class MarketData:
 
             age_minutes = (
                 now - last_timestamp
-            ).total_seconds() / 60
+            ).total_seconds() / 60.0
 
             return (
-                age_minutes
+                0
+                <= age_minutes
                 <= max_age_minutes
             )
 
         except Exception:
+
+            logger.exception(
+                "Unable to validate "
+                "market-data freshness."
+            )
+
             return False
 
-    def get_feed_name(self) -> str:
-        return str(
-            getattr(
-                self.feed,
-                "value",
-                self.feed,
-            )
-        )
 
+# ============================================================
+# LAZY SINGLETON
+# ============================================================
 
 market_data: Optional[MarketData] = None
 
 
 def get_market_data() -> MarketData:
-    """
-    Lazy singleton for market-data service.
-    """
 
     global market_data
 

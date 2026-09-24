@@ -31,3 +31,5 @@ logs/
 .idea/
 .DS_Store
 Thumbs.db
+data/
+*_BACKUP*.py

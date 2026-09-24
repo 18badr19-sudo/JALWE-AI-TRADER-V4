@@ -2015,24 +2015,25 @@ def print_startup_health() -> None:
         get_external_research_bridge()
     )
 
-    health = (
+    health = bool(
         bridge.health_check()
     )
 
+    try:
+        reports = int(
+            bridge.count_latest()
+        )
+    except Exception:
+        reports = 0
+
     print(
         "BRIDGE OK:",
-        health.get(
-            "ok",
-            False,
-        )
+        health,
     )
 
     print(
         "BRIDGE REPORTS:",
-        health.get(
-            "latest_research_count",
-            0,
-        )
+        reports,
     )
 
     print(

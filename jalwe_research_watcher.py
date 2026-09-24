@@ -1925,19 +1925,32 @@ def scan_bridge(
     int,
 ]:
 
-    research_items = (
-        bridge
-        .list_recent_research(
-
-            max_age_minutes=(
-                MAX_RESEARCH_AGE_MINUTES
-            ),
-
-            limit=(
-                MAX_REPORTS_PER_SCAN
-            ),
-        )
+    research_items = bridge.list_recent_research(
+        limit=MAX_REPORTS_PER_SCAN,
+        source="APEX",
     )
+
+    fresh_items = []
+
+    for research in research_items:
+        try:
+            age_minutes = bridge.get_age_minutes(
+                research
+            )
+        except Exception:
+            age_minutes = None
+
+        if (
+            age_minutes is not None
+            and age_minutes <= float(
+                MAX_RESEARCH_AGE_MINUTES
+            )
+        ):
+            fresh_items.append(
+                research
+            )
+
+    research_items = fresh_items
 
     discovered = len(
         research_items

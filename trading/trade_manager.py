@@ -1899,6 +1899,15 @@ class TradeManager:
                     "remaining position."
                 )
 
+            fill_price = (
+                float(
+                    broker_order.filled_price
+                )
+                if broker_order.filled_price
+                is not None
+                else None
+            )
+
             trade.remaining_quantity -= (
                 new_fill_quantity
             )
@@ -1906,6 +1915,64 @@ class TradeManager:
             trade.realized_quantity += (
                 new_fill_quantity
             )
+
+            if fill_price is not None:
+                realized_pnl_increment = (
+                    (
+                        fill_price
+                        - trade.entry_price
+                    )
+                    * new_fill_quantity
+                )
+
+                trade.metadata[
+                    "realized_pnl"
+                ] = float(
+                    trade.metadata.get(
+                        "realized_pnl",
+                        0.0,
+                    )
+                    or 0.0
+                ) + realized_pnl_increment
+
+                trade.metadata[
+                    "realized_exit_value"
+                ] = float(
+                    trade.metadata.get(
+                        "realized_exit_value",
+                        0.0,
+                    )
+                    or 0.0
+                ) + (
+                    fill_price
+                    * new_fill_quantity
+                )
+
+                trade.metadata[
+                    "last_exit_fill_price"
+                ] = fill_price
+
+                trade.metadata[
+                    "last_exit_fill_quantity"
+                ] = new_fill_quantity
+
+                entry_notional = (
+                    trade.entry_price
+                    * trade.initial_quantity
+                )
+
+                if entry_notional > 0:
+                    trade.metadata[
+                        "realized_pnl_pct"
+                    ] = (
+                        float(
+                            trade.metadata[
+                                "realized_pnl"
+                            ]
+                        )
+                        / entry_notional
+                        * 100.0
+                    )
 
             if (
                 action

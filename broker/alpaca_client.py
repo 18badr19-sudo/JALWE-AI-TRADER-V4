@@ -17,6 +17,7 @@ from alpaca.trading.requests import (
     GetAssetsRequest,
     GetOrdersRequest,
     MarketOrderRequest,
+    StopOrderRequest,
 )
 
 from core.config import settings
@@ -566,6 +567,91 @@ class AlpacaClient:
                 None,
             ),
 
+            getattr(
+                order,
+                "client_order_id",
+                normalized_client_order_id,
+            ),
+        )
+
+        return order
+
+    # ========================================================
+    # BROKER-NATIVE PROTECTIVE STOP
+    # ========================================================
+
+    def submit_stop_order(
+        self,
+        symbol: str,
+        quantity: int,
+        stop_price: float,
+        client_order_id: Optional[str] = None,
+    ) -> Any:
+        """
+        Submit a PAPER GTC SELL stop order.
+
+        This is a broker-side safety layer for an already-filled
+        long position. It is not an entry signal and cannot BUY.
+        """
+
+        symbol = self._normalize_symbol(
+            symbol
+        )
+
+        quantity = int(
+            quantity
+        )
+
+        stop_price = float(
+            stop_price
+        )
+
+        if quantity <= 0:
+            raise ValueError(
+                "Stop quantity must be positive."
+            )
+
+        if stop_price <= 0:
+            raise ValueError(
+                "Stop price must be positive."
+            )
+
+        normalized_client_order_id = None
+
+        if client_order_id is not None:
+            normalized_client_order_id = (
+                self._normalize_client_order_id(
+                    client_order_id
+                )
+            )
+
+        order_request = StopOrderRequest(
+            symbol=symbol,
+            qty=quantity,
+            side=OrderSide.SELL,
+            time_in_force=TimeInForce.GTC,
+            stop_price=stop_price,
+            client_order_id=(
+                normalized_client_order_id
+            ),
+        )
+
+        order = self.client.submit_order(
+            order_data=order_request
+        )
+
+        logger.info(
+            "PAPER protective stop submitted | "
+            "symbol=%s qty=%s stop=%s order_id=%s "
+            "client_order_id=%s",
+            symbol,
+            quantity,
+            stop_price,
+            getattr(
+                order,
+                "id",
+                None,
+            ),
             getattr(
                 order,
                 "client_order_id",

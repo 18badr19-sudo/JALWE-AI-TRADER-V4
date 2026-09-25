@@ -35,6 +35,7 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 STATE_FILE = DATA_DIR / "railway_controller_state.json"
 APEX_DIAGNOSTICS_FILE = DATA_DIR / "apex_last_cycle.json"
+PERSISTENCE_PROBE_FILE = DATA_DIR / "persistence_probe.json"
 
 APEX_SCRIPT = BASE_DIR / "apex_research_loop.py"
 JALWE_SCRIPT = BASE_DIR / "jalwe_research_watcher.py"
@@ -131,6 +132,191 @@ NY_TZ = ZoneInfo("America/New_York")
 
 
 # ============================================================
+# PERSISTENT STORAGE PROBE
+# ============================================================
+
+def update_persistence_probe() -> dict[str, Any]:
+    """
+    Create/update a tiny file inside DATA_DIR.
+
+    If /app/data is backed by a Railway Volume, the same probe_id
+    and increasing boot_count survive deploys/restarts.
+    """
+    now = datetime.now(
+        timezone.utc
+    ).isoformat()
+
+    payload: dict[str, Any] = {}
+
+    if PERSISTENCE_PROBE_FILE.exists():
+        try:
+            payload = json.loads(
+                PERSISTENCE_PROBE_FILE.read_text(
+                    encoding="utf-8",
+                    errors="ignore",
+                )
+            )
+
+            if not isinstance(
+                payload,
+                dict,
+            ):
+                payload = {}
+
+        except Exception:
+            payload = {}
+
+    probe_id = str(
+        payload.get(
+            "probe_id",
+            "",
+        )
+        or ""
+    ).strip()
+
+    if not probe_id:
+        probe_id = (
+            "JALWE-STORAGE-"
+            + str(
+                int(
+                    time.time()
+                )
+            )
+        )
+
+    previous_boot_count = int(
+        payload.get(
+            "boot_count",
+            0,
+        )
+        or 0
+    )
+
+    first_seen = str(
+        payload.get(
+            "first_seen_utc",
+            "",
+        )
+        or now
+    )
+
+    payload = {
+        "probe_id": probe_id,
+        "first_seen_utc": first_seen,
+        "last_seen_utc": now,
+        "boot_count": (
+            previous_boot_count
+            + 1
+        ),
+        "data_dir": str(
+            DATA_DIR
+        ),
+        "probe_file": str(
+            PERSISTENCE_PROBE_FILE
+        ),
+    }
+
+    PERSISTENCE_PROBE_FILE.write_text(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    return payload
+
+
+def read_persistence_probe() -> dict[str, Any]:
+    if not PERSISTENCE_PROBE_FILE.exists():
+        return {}
+
+    try:
+        payload = json.loads(
+            PERSISTENCE_PROBE_FILE.read_text(
+                encoding="utf-8",
+                errors="ignore",
+            )
+        )
+
+        return (
+            payload
+            if isinstance(
+                payload,
+                dict,
+            )
+            else {}
+        )
+
+    except Exception:
+        return {}
+
+
+def storage_status_text() -> str:
+    payload = read_persistence_probe()
+
+    if not payload:
+        return (
+            "💾 فحص التخزين\n\n"
+            "لا يوجد Persistence Probe حتى الآن."
+        )
+
+    data_dir = str(
+        payload.get(
+            "data_dir",
+            DATA_DIR,
+        )
+    )
+
+    probe_id = str(
+        payload.get(
+            "probe_id",
+            "N/A",
+        )
+    )
+
+    boot_count = int(
+        payload.get(
+            "boot_count",
+            0,
+        )
+        or 0
+    )
+
+    first_seen = str(
+        payload.get(
+            "first_seen_utc",
+            "N/A",
+        )
+    )
+
+    last_seen = str(
+        payload.get(
+            "last_seen_utc",
+            "N/A",
+        )
+    )
+
+    path_ok = (
+        data_dir.rstrip("/")
+        == "/app/data"
+    )
+
+    return (
+        "💾 فحص التخزين الدائم\n\n"
+        f"📁 DATA_DIR: {data_dir}\n"
+        f"✅ المسار /app/data: {'نعم' if path_ok else 'لا'}\n"
+        f"🆔 Probe ID: {probe_id}\n"
+        f"🔁 عدد مرات الإقلاع: {boot_count}\n"
+        f"🕒 أول ظهور: {first_seen}\n"
+        f"🕒 آخر ظهور: {last_seen}\n\n"
+        "بعد أي Restart/Deploy: إذا بقي Probe ID نفسه "
+        "وزاد عداد الإقلاع، فالـVolume دائم ويعمل."
+    )
+
+
+# ============================================================
 # TELEGRAM UI
 # ============================================================
 
@@ -157,6 +343,7 @@ BTN_JALWE_ON = "👁 تشغيل JALWE"
 BTN_JALWE_OFF = "⛔ إيقاف JALWE"
 
 BTN_BRIDGE = "📡 فحص الربط"
+BTN_STORAGE = "💾 فحص التخزين"
 BTN_NO_TRADE = "🔎 لماذا ما فيه صفقة؟"
 BTN_HELP = "ℹ️ الأوامر"
 
@@ -172,6 +359,7 @@ KEYBOARD = {
         [{"text": BTN_APEX_ON}, {"text": BTN_APEX_OFF}],
         [{"text": BTN_JALWE_ON}, {"text": BTN_JALWE_OFF}],
         [{"text": BTN_NO_TRADE}],
+        [{"text": BTN_STORAGE}],
         [{"text": BTN_BRIDGE}, {"text": BTN_HELP}],
     ],
     "resize_keyboard": True,
@@ -2151,6 +2339,7 @@ def help_text() -> str:
         "/apex_on /apex_off\n"
         "/jalwe_on /jalwe_off\n"
         "/bridge - فحص الربط\n"
+        "/storage - فحص التخزين الدائم /app/data\n"
         "/why_no_trade - تشخيص سبب عدم وجود صفقة\n"
         "/help - عرض الأوامر\n\n"
         "🔔 سيرسل البوت تلقائيًا تنبيهًا عند كل "
@@ -2226,6 +2415,9 @@ def handle(text: str) -> str:
     if cmd == BTN_BRIDGE or low == "/bridge":
         return bridge_text()
 
+    if cmd == BTN_STORAGE or low == "/storage":
+        return storage_status_text()
+
     if (
         cmd == BTN_NO_TRADE
         or low == "/why_no_trade"
@@ -2293,6 +2485,16 @@ def main() -> None:
         raise RuntimeError(
             "Alpaca PAPER API configuration is required."
         )
+
+    probe = update_persistence_probe()
+
+    print(
+        "Persistence probe | "
+        f"id={probe.get('probe_id')} "
+        f"boot_count={probe.get('boot_count')} "
+        f"data_dir={probe.get('data_dir')}",
+        flush=True,
+    )
 
     # getUpdates and Telegram webhooks are mutually exclusive.
     # Clear any stale webhook left by an older deployment/setup

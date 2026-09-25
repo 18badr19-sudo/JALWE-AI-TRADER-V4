@@ -1476,6 +1476,45 @@ def main() -> None:
             "Alpaca PAPER API configuration is required."
         )
 
+    # getUpdates and Telegram webhooks are mutually exclusive.
+    # Clear any stale webhook left by an older deployment/setup
+    # before this Railway controller starts long-polling.
+    try:
+        webhook_info = tg_call(
+            "getWebhookInfo",
+            {},
+            timeout=15,
+        )
+
+        webhook_url = str(
+            (
+                webhook_info.get("result", {})
+                or {}
+            ).get("url", "")
+            or ""
+        ).strip()
+
+        if webhook_url:
+            tg_call(
+                "deleteWebhook",
+                {
+                    "drop_pending_updates": "false",
+                },
+                timeout=15,
+            )
+
+            print(
+                "Telegram stale webhook removed; "
+                "getUpdates long-polling enabled.",
+                flush=True,
+            )
+
+    except Exception as exc:
+        print(
+            f"Telegram webhook cleanup warning: {exc}",
+            flush=True,
+        )
+
     me = tg_call(
         "getMe",
         {},

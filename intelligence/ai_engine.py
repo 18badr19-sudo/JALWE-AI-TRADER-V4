@@ -9,6 +9,10 @@ from core.models import (
     SignalAction,
 )
 
+from intelligence.learning_engine import (
+    get_learning_engine,
+)
+
 
 @dataclass
 class AIAnalysis:
@@ -90,6 +94,10 @@ class AIEngine:
 
         self.minimum_buy_score = (
             minimum_buy_score
+        )
+
+        self.learning = (
+            get_learning_engine()
         )
 
     # ========================================================
@@ -194,19 +202,19 @@ class AIEngine:
             )
 
             if liquidity >= 80:
-                bullish += 18
+                bullish += self.learning.apply("liquidity", 18)
                 reasons.append(
                     "Strong liquidity conditions."
                 )
 
             elif liquidity >= 60:
-                bullish += 12
+                bullish += self.learning.apply("liquidity", 12)
                 reasons.append(
                     "Acceptable liquidity."
                 )
 
             elif liquidity < 30:
-                bearish += 15
+                bearish += self.learning.apply("liquidity", 15)
                 warnings.append(
                     "Weak liquidity."
                 )
@@ -223,25 +231,25 @@ class AIEngine:
             evidence_count += 1
 
             if features.rvol >= 3.0:
-                bullish += 18
+                bullish += self.learning.apply("rvol", 18)
                 reasons.append(
                     "Very strong relative volume."
                 )
 
             elif features.rvol >= 2.0:
-                bullish += 14
+                bullish += self.learning.apply("rvol", 14)
                 reasons.append(
                     "Strong relative volume."
                 )
 
             elif features.rvol >= 1.5:
-                bullish += 9
+                bullish += self.learning.apply("rvol", 9)
                 reasons.append(
                     "Elevated relative volume."
                 )
 
             elif features.rvol < 0.8:
-                bearish += 8
+                bearish += self.learning.apply("rvol", 8)
                 warnings.append(
                     "Relative volume is weak."
                 )
@@ -260,7 +268,7 @@ class AIEngine:
 
             if features.above_vwap is True:
 
-                bullish += 14
+                bullish += self.learning.apply("vwap", 14)
 
                 reasons.append(
                     "Price is above session VWAP."
@@ -268,7 +276,7 @@ class AIEngine:
 
             else:
 
-                bearish += 10
+                bearish += self.learning.apply("vwap", 10)
 
                 warnings.append(
                     "Price is below session VWAP."
@@ -285,14 +293,14 @@ class AIEngine:
                     <= distance
                     <= 1.0
                 ):
-                    bullish += 4
+                    bullish += self.learning.apply("vwap", 4)
 
                     reasons.append(
                         "Price is holding close above VWAP."
                     )
 
                 elif distance < -2.0:
-                    bearish += 5
+                    bearish += self.learning.apply("vwap", 5)
 
         # ====================================================
         # 4. TREND STRUCTURE
@@ -312,7 +320,7 @@ class AIEngine:
                 > features.ema_9
                 > features.ema_20
             ):
-                bullish += 14
+                bullish += self.learning.apply("trend", 14)
 
                 reasons.append(
                     "Short-term trend structure is bullish."
@@ -323,7 +331,7 @@ class AIEngine:
                 < features.ema_9
                 < features.ema_20
             ):
-                bearish += 12
+                bearish += self.learning.apply("trend", 12)
 
                 warnings.append(
                     "Short-term trend structure is bearish."
@@ -345,21 +353,21 @@ class AIEngine:
             )
 
             if momentum >= 80:
-                bullish += 14
+                bullish += self.learning.apply("momentum", 14)
 
                 reasons.append(
                     "Momentum score is very strong."
                 )
 
             elif momentum >= 60:
-                bullish += 10
+                bullish += self.learning.apply("momentum", 10)
 
                 reasons.append(
                     "Momentum is supportive."
                 )
 
             elif momentum < 30:
-                bearish += 8
+                bearish += self.learning.apply("momentum", 8)
 
                 warnings.append(
                     "Momentum is weak."
@@ -380,7 +388,7 @@ class AIEngine:
 
             if 50 <= rsi <= 70:
 
-                bullish += 8
+                bullish += self.learning.apply("rsi", 8)
 
                 reasons.append(
                     "RSI supports bullish momentum."
@@ -388,11 +396,11 @@ class AIEngine:
 
             elif 40 <= rsi < 50:
 
-                bullish += 3
+                bullish += self.learning.apply("rsi", 3)
 
             elif rsi > 80:
 
-                bearish += 5
+                bearish += self.learning.apply("rsi", 5)
 
                 warnings.append(
                     "RSI is extremely extended."
@@ -400,7 +408,7 @@ class AIEngine:
 
             elif rsi < 30:
 
-                bearish += 4
+                bearish += self.learning.apply("rsi", 4)
 
                 warnings.append(
                     "RSI shows strong downside pressure."
@@ -426,7 +434,7 @@ class AIEngine:
                 <= distance
                 <= 1.0
             ):
-                bullish += 8
+                bullish += self.learning.apply("breakout", 8)
 
                 reasons.append(
                     "Price is near the 20-bar breakout level."
@@ -434,7 +442,7 @@ class AIEngine:
 
             elif distance > 5.0:
 
-                bearish += 3
+                bearish += self.learning.apply("breakout", 3)
 
         # ====================================================
         # 8. COMPRESSION
@@ -453,7 +461,7 @@ class AIEngine:
 
             if compression <= 0.35:
 
-                bullish += 6
+                bullish += self.learning.apply("compression", 6)
 
                 reasons.append(
                     "Price range is compressed before potential expansion."
@@ -475,14 +483,14 @@ class AIEngine:
             )
 
             if news_score >= 70:
-                bullish += 8
+                bullish += self.learning.apply("news", 8)
 
                 reasons.append(
                     "News catalyst is supportive."
                 )
 
             elif news_score <= 30:
-                bearish += 8
+                bearish += self.learning.apply("news", 8)
 
                 warnings.append(
                     "News catalyst is negative."
@@ -505,7 +513,7 @@ class AIEngine:
 
             if options_score >= 75:
 
-                bullish += 10
+                bullish += self.learning.apply("options_flow", 10)
 
                 reasons.append(
                     "Options flow is strongly supportive."
@@ -513,7 +521,7 @@ class AIEngine:
 
             elif options_score <= 25:
 
-                bearish += 8
+                bearish += self.learning.apply("options_flow", 8)
 
                 warnings.append(
                     "Options flow is bearish."
@@ -527,7 +535,7 @@ class AIEngine:
 
         if regime == MarketRegime.BULL_TREND:
 
-            bullish += 5
+            bullish += self.learning.apply("market_regime", 5)
 
             reasons.append(
                 "Broad market regime is bullish."
@@ -535,7 +543,7 @@ class AIEngine:
 
         elif regime == MarketRegime.BEAR_TREND:
 
-            bearish += 5
+            bearish += self.learning.apply("market_regime", 5)
 
             warnings.append(
                 "Broad market regime is bearish."
@@ -543,7 +551,7 @@ class AIEngine:
 
         elif regime == MarketRegime.HIGH_VOLATILITY:
 
-            bearish += 7
+            bearish += self.learning.apply("market_regime", 7)
 
             warnings.append(
                 "Market volatility is elevated."
@@ -554,7 +562,7 @@ class AIEngine:
             MarketRegime.RISK_OFF,
         }:
 
-            bearish += 20
+            bearish += self.learning.apply("market_regime", 20)
 
             warnings.append(
                 "Market regime is risk-off."
@@ -664,6 +672,12 @@ class AIEngine:
                 ),
                 "possible_evidence": (
                     possible_evidence
+                ),
+                "learning_enabled": (
+                    self.learning.enabled
+                ),
+                "learning_profile": (
+                    self.learning.profile()
                 ),
             },
         )

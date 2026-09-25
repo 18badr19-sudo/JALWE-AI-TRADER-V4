@@ -7,6 +7,7 @@ from enum import Enum
 from typing import Any, Optional
 
 from intelligence.ai_engine import AIEngine
+from core.database import database
 from intelligence.breakout_confirmation_engine import get_breakout_confirmation_engine
 from intelligence.external_research_bridge import get_external_research_bridge
 from intelligence.feature_engine import FeatureEngine
@@ -465,6 +466,19 @@ class DecisionEngine:
 
         self._apply_news(features, warnings)
         self._apply_options(features, warnings)
+
+        # Persist the complete feature state used by the decision.
+        # LearningEngine later pairs closed PAPER trades with the
+        # nearest snapshot around their entry time.
+        try:
+            database.save_feature_snapshot(
+                symbol=symbol,
+                snapshot=features,
+            )
+        except Exception as exc:
+            warnings.append(
+                f"Feature snapshot persistence failed: {exc}"
+            )
 
         # ====================================================
         # 4. AI

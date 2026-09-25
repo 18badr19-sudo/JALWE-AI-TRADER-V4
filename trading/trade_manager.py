@@ -1883,6 +1883,9 @@ class TradeManager:
             trade.pending_action
         )
 
+        fill_price: Optional[float] = None
+        realized_pnl_increment = 0.0
+
         # ----------------------------------------------------
         # APPLY ONLY NEW FILLS
         # ----------------------------------------------------
@@ -2241,6 +2244,14 @@ class TradeManager:
 
             "new_fill_quantity": (
                 new_fill_quantity
+            ),
+
+            "fill_price": (
+                fill_price
+            ),
+
+            "realized_pnl_increment": (
+                realized_pnl_increment
             ),
 
             "cumulative_filled": (

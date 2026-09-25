@@ -1270,6 +1270,129 @@ class ExecutionEngine:
         )
 
     # ========================================================
+    # BROKER-NATIVE PROTECTIVE STOP
+    # ========================================================
+
+    def submit_protective_stop(
+        self,
+        *,
+        symbol: str,
+        quantity: int,
+        stop_price: float,
+        client_order_id: Optional[str] = None,
+    ) -> BrokerOrder:
+        """
+        Place a broker-side GTC SELL stop for an existing
+        PAPER long position.
+
+        The order protects the position if the JALWE process
+        is temporarily unavailable. TradeManager remains the
+        authority for profit-taking and trailing logic.
+        """
+
+        symbol = self._normalize_symbol(
+            symbol
+        )
+
+        quantity = int(
+            quantity
+        )
+
+        stop_price = float(
+            stop_price
+        )
+
+        if quantity <= 0:
+            raise ValueError(
+                "Protective stop quantity must be positive."
+            )
+
+        if stop_price <= 0:
+            raise ValueError(
+                "Protective stop price must be positive."
+            )
+
+        position = self.broker.get_position(
+            symbol
+        )
+
+        if position is None:
+            raise RuntimeError(
+                f"No broker position exists for {symbol}."
+            )
+
+        broker_quantity = self._safe_int(
+            getattr(
+                position,
+                "qty",
+                0,
+            )
+        )
+
+        if broker_quantity <= 0:
+            raise RuntimeError(
+                "Broker position quantity is invalid."
+            )
+
+        if quantity > broker_quantity:
+            raise RuntimeError(
+                "Protective stop quantity exceeds "
+                "broker position quantity."
+            )
+
+        final_client_order_id = (
+            self._new_client_order_id(
+                "JALWE-STOP"
+            )
+            if client_order_id is None
+            else self._validate_client_order_id(
+                client_order_id,
+                required_prefix="JALWE-STOP",
+            )
+        )
+
+        raw = self.broker.submit_stop_order(
+            symbol=symbol,
+            quantity=quantity,
+            stop_price=stop_price,
+            client_order_id=(
+                final_client_order_id
+            ),
+        )
+
+        return self._build_broker_order(
+            broker_response=raw,
+            symbol=symbol,
+            side=TradeSide.SELL,
+            quantity=quantity,
+            requested_price=stop_price,
+            client_order_id=(
+                final_client_order_id
+            ),
+            metadata={
+                "order_role": "PROTECTIVE_STOP",
+                "stop_price": stop_price,
+                "time_in_force": "GTC",
+                "paper_trading": True,
+            },
+        )
+
+    def cancel_protective_stop(
+        self,
+        order_id: str,
+    ) -> None:
+        order_id = str(
+            order_id or ""
+        ).strip()
+
+        if not order_id:
+            return
+
+        self.broker.cancel_order(
+            order_id
+        )
+
+    # ========================================================
     # EXIT ORDER
     # ========================================================
 

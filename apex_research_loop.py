@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -38,6 +39,21 @@ BASE_DIR = (
 ENV_FILE = (
     BASE_DIR
     / ".env"
+)
+
+DATA_DIR = (
+    BASE_DIR
+    / "data"
+)
+
+DATA_DIR.mkdir(
+    parents=True,
+    exist_ok=True,
+)
+
+LAST_CYCLE_FILE = (
+    DATA_DIR
+    / "apex_last_cycle.json"
 )
 
 load_dotenv(
@@ -1095,6 +1111,222 @@ def print_cycle(
 
 
 # ============================================================
+# SAVE LAST CYCLE DIAGNOSTICS
+# ============================================================
+
+def save_cycle_diagnostics(
+    cycle,
+    session: MarketSession,
+) -> None:
+    payload = {
+        "timestamp": utc_now().isoformat(),
+        "session": session.value,
+        "status": getattr(
+            cycle,
+            "status",
+            "UNKNOWN",
+        ),
+        "radar_count": int(
+            getattr(
+                cycle,
+                "radar_count",
+                0,
+            )
+            or 0
+        ),
+        "valid_prebreakout_count": int(
+            getattr(
+                cycle,
+                "valid_prebreakout_count",
+                0,
+            )
+            or 0
+        ),
+        "deep_research_count": int(
+            getattr(
+                cycle,
+                "deep_research_count",
+                0,
+            )
+            or 0
+        ),
+        "packet_count": int(
+            getattr(
+                cycle,
+                "packet_count",
+                0,
+            )
+            or 0
+        ),
+        "shortlisted_count": int(
+            getattr(
+                cycle,
+                "shortlisted_count",
+                0,
+            )
+            or 0
+        ),
+        "published_count": int(
+            getattr(
+                cycle,
+                "published_count",
+                0,
+            )
+            or 0
+        ),
+        "bridge_status": str(
+            getattr(
+                cycle,
+                "bridge_status",
+                "",
+            )
+            or ""
+        ),
+        "errors": list(
+            getattr(
+                cycle,
+                "errors",
+                [],
+            )
+            or []
+        )[:10],
+        "packets": [],
+        "shortlist": [],
+    }
+
+    for packet in list(
+        getattr(
+            cycle,
+            "packets",
+            [],
+        )
+        or []
+    )[:10]:
+        payload["packets"].append(
+            {
+                "symbol": str(
+                    getattr(
+                        packet,
+                        "symbol",
+                        "",
+                    )
+                    or ""
+                ),
+                "research_score": float(
+                    getattr(
+                        packet,
+                        "research_score",
+                        0.0,
+                    )
+                    or 0.0
+                ),
+                "confidence": float(
+                    getattr(
+                        packet,
+                        "confidence",
+                        0.0,
+                    )
+                    or 0.0
+                ),
+                "verdict": str(
+                    getattr(
+                        packet,
+                        "verdict",
+                        "",
+                    )
+                    or ""
+                ),
+                "prebreakout_score": getattr(
+                    packet,
+                    "prebreakout_score",
+                    None,
+                ),
+                "news_score": getattr(
+                    packet,
+                    "news_score",
+                    None,
+                ),
+                "liquidity_score": getattr(
+                    packet,
+                    "liquidity_score",
+                    None,
+                ),
+                "risk_flags": list(
+                    getattr(
+                        packet,
+                        "risk_flags",
+                        [],
+                    )
+                    or []
+                )[:5],
+            }
+        )
+
+    for packet in list(
+        getattr(
+            cycle,
+            "shortlist",
+            [],
+        )
+        or []
+    )[:10]:
+        payload["shortlist"].append(
+            {
+                "symbol": str(
+                    getattr(
+                        packet,
+                        "symbol",
+                        "",
+                    )
+                    or ""
+                ),
+                "verdict": str(
+                    getattr(
+                        packet,
+                        "verdict",
+                        "",
+                    )
+                    or ""
+                ),
+                "research_score": float(
+                    getattr(
+                        packet,
+                        "research_score",
+                        0.0,
+                    )
+                    or 0.0
+                ),
+                "confidence": float(
+                    getattr(
+                        packet,
+                        "confidence",
+                        0.0,
+                    )
+                    or 0.0
+                ),
+            }
+        )
+
+    tmp = LAST_CYCLE_FILE.with_suffix(
+        ".tmp"
+    )
+
+    tmp.write_text(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            indent=2,
+            default=str,
+        ),
+        encoding="utf-8",
+    )
+
+    tmp.replace(
+        LAST_CYCLE_FILE
+    )
+
+
+# ============================================================
 # CLOSED SESSION LIGHT NEWS SCAN
 # ============================================================
 
@@ -1519,6 +1751,17 @@ def main() -> None:
                     cycle,
                     session,
                 )
+
+                try:
+                    save_cycle_diagnostics(
+                        cycle,
+                        session,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Could not save Apex diagnostics: %s",
+                        exc,
+                    )
 
             # =================================================
             # CLOSED

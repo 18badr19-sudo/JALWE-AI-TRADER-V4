@@ -702,14 +702,33 @@ def _strategy_report_snapshot(
         )
     )
 
+    total_adjustments = 0.0
+    period_adjustments = 0.0
+
+    if settings.CAPITAL_MODE == "strategy_wallet":
+        total_adjustments = (
+            database
+            .get_strategy_capital_adjustment_total()
+        )
+
+        period_adjustments = (
+            database
+            .get_strategy_capital_adjustment_since(
+                since_utc
+            )
+        )
+
     strategy_equity = (
         starting_capital
+        + total_adjustments
         + total_realized
     )
 
+    # Capital deposits/withdrawals are not trading PnL.
     period_start_equity = (
         strategy_equity
         - period_realized
+        - period_adjustments
     )
 
     period_pct = (
@@ -796,6 +815,8 @@ def _strategy_report_snapshot(
     return {
         "starting_capital": starting_capital,
         "strategy_equity": strategy_equity,
+        "capital_adjustments_total": total_adjustments,
+        "capital_adjustments_period": period_adjustments,
         "period_realized": period_realized,
         "period_pct": period_pct,
         "open_trades": len(
@@ -878,6 +899,10 @@ def daily_report_text() -> str:
         (
             "💰 قيمة الاستراتيجية الحالية: "
             f"{money(strategy['strategy_equity'])}"
+        ),
+        (
+            "🔄 صافي إيداع/سحب اليوم: "
+            f"{money(strategy['capital_adjustments_period'])}"
         ),
         f"📈 النتيجة: {label}",
         (
@@ -967,6 +992,10 @@ def weekly_report_text() -> str:
         (
             "💰 قيمة الاستراتيجية الحالية: "
             f"{money(strategy['strategy_equity'])}"
+        ),
+        (
+            "🔄 صافي إيداع/سحب الأسبوع: "
+            f"{money(strategy['capital_adjustments_period'])}"
         ),
         (
             "📈 صافي الأسبوع المحقق: "

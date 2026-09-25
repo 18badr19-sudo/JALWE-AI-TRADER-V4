@@ -34,6 +34,9 @@ CONTROL_FILE = Path(
 def _default_controls() -> dict[str, Any]:
     return {
         "allow_new_entries": True,
+        "emergency_close_requested": False,
+        "emergency_close_request_id": "",
+        "emergency_close_requested_at": "",
         "updated_at": (
             datetime.now(
                 timezone.utc
@@ -114,6 +117,88 @@ def new_entries_allowed() -> bool:
         load_runtime_controls().get(
             "allow_new_entries",
             True,
+        )
+    )
+
+
+def request_emergency_close(
+    *,
+    requested_by: str,
+) -> dict[str, Any]:
+    controls = load_runtime_controls()
+
+    request_id = (
+        datetime.now(
+            timezone.utc
+        )
+        .strftime("%Y%m%dT%H%M%S%fZ")
+    )
+
+    controls[
+        "emergency_close_requested"
+    ] = True
+
+    controls[
+        "emergency_close_request_id"
+    ] = request_id
+
+    controls[
+        "emergency_close_requested_at"
+    ] = datetime.now(
+        timezone.utc
+    ).isoformat()
+
+    controls[
+        "updated_by"
+    ] = str(
+        requested_by
+        or "UNKNOWN"
+    )
+
+    save_runtime_controls(
+        controls
+    )
+
+    return controls
+
+
+def clear_emergency_close_request(
+    *,
+    updated_by: str,
+) -> dict[str, Any]:
+    controls = load_runtime_controls()
+
+    controls[
+        "emergency_close_requested"
+    ] = False
+
+    controls[
+        "emergency_close_request_id"
+    ] = ""
+
+    controls[
+        "emergency_close_requested_at"
+    ] = ""
+
+    controls[
+        "updated_by"
+    ] = str(
+        updated_by
+        or "SYSTEM"
+    )
+
+    save_runtime_controls(
+        controls
+    )
+
+    return controls
+
+
+def emergency_close_requested() -> bool:
+    return bool(
+        load_runtime_controls().get(
+            "emergency_close_requested",
+            False,
         )
     )
 

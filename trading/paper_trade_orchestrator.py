@@ -5,7 +5,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Optional
 from uuid import uuid4
@@ -45,6 +45,7 @@ class PaperOrchestratorState(str, Enum):
     READY_AUTO_DISABLED = "READY_AUTO_DISABLED"
     READY_BROKER_LOCKED = "READY_BROKER_LOCKED"
     READY_CONFIG_LOCKED = "READY_CONFIG_LOCKED"
+    READY_MARKET_CLOSED = "READY_MARKET_CLOSED"
 
     ENTRY_PREPARED = "ENTRY_PREPARED"
     ENTRY_SUBMITTED = "ENTRY_SUBMITTED"
@@ -1292,7 +1293,118 @@ class PaperTradeOrchestrator:
             )
 
         # ====================================================
-        # 9. SAVE ENTRY INTENT BEFORE BROKER CALL
+        # 9. MARKET OPEN GATE
+        # ====================================================
+
+        try:
+            market_open = bool(
+                get_alpaca_client()
+                .market_is_open()
+            )
+
+        except Exception as exc:
+            logger.exception(
+                "Unable to verify Alpaca market clock | "
+                "symbol=%s",
+                symbol,
+            )
+
+            blocked_decision = replace(
+                decision,
+                state=DecisionState.WATCHING,
+                ready_for_execution=False,
+                reason=(
+                    "Alpaca market clock is unavailable. "
+                    "New entry is blocked until the market "
+                    "can be verified open."
+                ),
+                metadata={
+                    **dict(
+                        getattr(
+                            decision,
+                            "metadata",
+                            {},
+                        )
+                        or {}
+                    ),
+                    "market_open_gate": {
+                        "approved": False,
+                        "market_open": None,
+                        "reason": (
+                            "BROKER_CLOCK_UNAVAILABLE"
+                        ),
+                        "error": str(exc),
+                    },
+                },
+            )
+
+            return PaperOrchestratorResult(
+                symbol=symbol,
+                state=(
+                    PaperOrchestratorState
+                    .READY_MARKET_CLOSED
+                ),
+                decision=blocked_decision,
+                message=blocked_decision.reason,
+                warnings=list(
+                    blocked_decision.warnings
+                    or []
+                ),
+                metadata={
+                    "market_open": None,
+                    "broker_order_submitted": False,
+                    "entry_intent_created": False,
+                },
+            )
+
+        if not market_open:
+            blocked_decision = replace(
+                decision,
+                state=DecisionState.WATCHING,
+                ready_for_execution=False,
+                reason=(
+                    "US market is closed. JALWE will keep "
+                    "watching and re-analyze before any entry "
+                    "after the market opens."
+                ),
+                metadata={
+                    **dict(
+                        getattr(
+                            decision,
+                            "metadata",
+                            {},
+                        )
+                        or {}
+                    ),
+                    "market_open_gate": {
+                        "approved": False,
+                        "market_open": False,
+                        "reason": "MARKET_CLOSED",
+                    },
+                },
+            )
+
+            return PaperOrchestratorResult(
+                symbol=symbol,
+                state=(
+                    PaperOrchestratorState
+                    .READY_MARKET_CLOSED
+                ),
+                decision=blocked_decision,
+                message=blocked_decision.reason,
+                warnings=list(
+                    blocked_decision.warnings
+                    or []
+                ),
+                metadata={
+                    "market_open": False,
+                    "broker_order_submitted": False,
+                    "entry_intent_created": False,
+                },
+            )
+
+        # ====================================================
+        # 10. SAVE ENTRY INTENT BEFORE BROKER CALL
         # ====================================================
 
         try:
@@ -1335,7 +1447,7 @@ class PaperTradeOrchestrator:
             )
 
         # ====================================================
-        # 10. SUBMIT PAPER BUY
+        # 11. SUBMIT PAPER BUY
         # ====================================================
 
         try:
@@ -1410,7 +1522,7 @@ class PaperTradeOrchestrator:
             )
 
         # ====================================================
-        # 11. SAVE FIRST BROKER SNAPSHOT
+        # 12. SAVE FIRST BROKER SNAPSHOT
         # ====================================================
 
         try:
@@ -1463,7 +1575,7 @@ class PaperTradeOrchestrator:
             )
 
         # ====================================================
-        # 12. RECONCILE ENTRY ORDER
+        # 13. RECONCILE ENTRY ORDER
         # ====================================================
 
         try:

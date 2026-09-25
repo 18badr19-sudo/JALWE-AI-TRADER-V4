@@ -476,6 +476,45 @@ class Database:
             )
 
             # =================================================
+            # STRATEGY REALIZED PNL LEDGER
+            # =================================================
+
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS strategy_pnl_ledger (
+                    event_key TEXT PRIMARY KEY,
+                    trade_id TEXT,
+                    order_id TEXT,
+                    symbol TEXT NOT NULL,
+                    action TEXT,
+                    quantity INTEGER NOT NULL,
+                    fill_price REAL,
+                    entry_price REAL,
+                    realized_pnl REAL NOT NULL,
+                    event_time TEXT NOT NULL,
+                    metadata_json TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS
+                idx_strategy_pnl_event_time
+                ON strategy_pnl_ledger(event_time)
+                """
+            )
+
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS
+                idx_strategy_pnl_symbol
+                ON strategy_pnl_ledger(symbol)
+                """
+            )
+
+            # =================================================
             # SYSTEM EVENTS
             # =================================================
 
@@ -2234,6 +2273,147 @@ class Database:
                     snapshot_json,
                 ),
             )
+
+    # ========================================================
+    # STRATEGY REALIZED PNL LEDGER
+    # ========================================================
+
+    def record_strategy_pnl_event(
+        self,
+        *,
+        event_key: str,
+        trade_id: Optional[str],
+        order_id: Optional[str],
+        symbol: str,
+        action: Optional[str],
+        quantity: int,
+        fill_price: Optional[float],
+        entry_price: Optional[float],
+        realized_pnl: float,
+        event_time: str,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> bool:
+        """
+        Persist one broker-confirmed realized PnL increment.
+
+        event_key must be idempotent so retries/restarts cannot
+        count the same fill twice.
+        """
+
+        event_key = str(event_key or "").strip()
+        symbol = str(symbol or "").strip().upper()
+        event_time = str(event_time or "").strip()
+
+        if not event_key:
+            raise ValueError("event_key cannot be empty.")
+
+        if not symbol:
+            raise ValueError("symbol cannot be empty.")
+
+        if not event_time:
+            raise ValueError("event_time cannot be empty.")
+
+        quantity = int(quantity)
+
+        if quantity <= 0:
+            raise ValueError("quantity must be positive.")
+
+        metadata_json = json.dumps(
+            metadata or {},
+            default=str,
+        )
+
+        with self.connection() as conn:
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO strategy_pnl_ledger (
+                    event_key,
+                    trade_id,
+                    order_id,
+                    symbol,
+                    action,
+                    quantity,
+                    fill_price,
+                    entry_price,
+                    realized_pnl,
+                    event_time,
+                    metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event_key,
+                    trade_id,
+                    order_id,
+                    symbol,
+                    action,
+                    quantity,
+                    fill_price,
+                    entry_price,
+                    float(realized_pnl),
+                    event_time,
+                    metadata_json,
+                ),
+            )
+
+            return bool(
+                cursor.rowcount
+                and cursor.rowcount > 0
+            )
+
+    def get_strategy_realized_pnl_total(
+        self,
+    ) -> float:
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT COALESCE(
+                    SUM(realized_pnl),
+                    0.0
+                ) AS total
+                FROM strategy_pnl_ledger
+                """
+            ).fetchone()
+
+        return float(
+            row["total"]
+            if row is not None
+            else 0.0
+        )
+
+    def get_strategy_realized_pnl_since(
+        self,
+        since_utc: str,
+    ) -> float:
+        since_utc = str(
+            since_utc or ""
+        ).strip()
+
+        if not since_utc:
+            raise ValueError(
+                "since_utc cannot be empty."
+            )
+
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT COALESCE(
+                    SUM(realized_pnl),
+                    0.0
+                ) AS total
+                FROM strategy_pnl_ledger
+                WHERE event_time >= ?
+                """,
+                (
+                    since_utc,
+                ),
+            ).fetchone()
+
+        return float(
+            row["total"]
+            if row is not None
+            else 0.0
+        )
 
     # ========================================================
     # SYSTEM EVENTS

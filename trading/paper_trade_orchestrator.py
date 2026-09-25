@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional
@@ -233,10 +235,66 @@ class PaperTradeOrchestrator:
         )
 
     @staticmethod
-    def _default_equity() -> float:
-        return float(
+    def _strategy_equity_snapshot() -> tuple[
+        float,
+        float,
+        float,
+    ]:
+        starting_capital = float(
             settings.STRATEGY_STARTING_CAPITAL
         )
+
+        total_realized = float(
+            database.get_strategy_realized_pnl_total()
+        )
+
+        current_equity = (
+            starting_capital
+            + total_realized
+        )
+
+        now_ny = datetime.now(
+            ZoneInfo("America/New_York")
+        )
+
+        start_ny = now_ny.replace(
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+
+        start_utc = (
+            start_ny
+            .astimezone(timezone.utc)
+            .isoformat()
+        )
+
+        realized_today = float(
+            database.get_strategy_realized_pnl_since(
+                start_utc
+            )
+        )
+
+        daily_start_equity = (
+            current_equity
+            - realized_today
+        )
+
+        return (
+            current_equity,
+            daily_start_equity,
+            realized_today,
+        )
+
+    @staticmethod
+    def _default_equity() -> float:
+        current, _daily_start, _today = (
+            PaperTradeOrchestrator
+            ._strategy_equity_snapshot()
+        )
+
+        return current
 
     @staticmethod
     def _normalize_symbol(
@@ -316,15 +374,25 @@ class PaperTradeOrchestrator:
             symbol
         )
 
-        if strategy_equity is None:
-            strategy_equity = (
-                self._default_equity()
-            )
+        if (
+            strategy_equity is None
+            or daily_start_equity is None
+        ):
+            (
+                current_equity,
+                current_daily_start,
+                _realized_today,
+            ) = self._strategy_equity_snapshot()
 
-        if daily_start_equity is None:
-            daily_start_equity = float(
-                strategy_equity
-            )
+            if strategy_equity is None:
+                strategy_equity = (
+                    current_equity
+                )
+
+            if daily_start_equity is None:
+                daily_start_equity = (
+                    current_daily_start
+                )
 
         return (
             self.decision_engine

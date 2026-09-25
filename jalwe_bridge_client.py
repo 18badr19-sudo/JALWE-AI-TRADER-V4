@@ -480,6 +480,15 @@ class JalweBridgeClient:
             "score": score,
             "verdict": verdict,
 
+            # Canonical Apex aliases consumed by JALWE
+            # diagnostics/advisory metadata.
+            "apex_research_score": score,
+            "apex_verdict": verdict,
+            "apex_confidence_pct": round(
+                confidence * 100.0,
+                4,
+            ),
+
             "pre_breakout_score": self._get(
                 packet,
                 "pre_breakout_score",

@@ -455,6 +455,12 @@ class DecisionEngine:
         # 2. FEATURE ENGINE
         # ====================================================
 
+        feature_diagnostics = (
+            self.feature_engine.diagnose_input(
+                bars
+            )
+        )
+
         try:
             features = self.feature_engine.build(symbol, bars)
         except Exception as exc:
@@ -467,12 +473,70 @@ class DecisionEngine:
             )
 
         if not features.data_quality_ok or features.data_is_stale:
+            valid_rows = int(
+                feature_diagnostics.get(
+                    "valid_rows",
+                    0,
+                )
+                or 0
+            )
+
+            required_rows = int(
+                feature_diagnostics.get(
+                    "required_rows",
+                    0,
+                )
+                or 0
+            )
+
+            missing_columns = (
+                feature_diagnostics.get(
+                    "missing_columns",
+                    [],
+                )
+                or []
+            )
+
+            if missing_columns:
+                quality_reason = (
+                    "Feature quality failed: missing columns "
+                    + ", ".join(
+                        str(item)
+                        for item in missing_columns
+                    )
+                    + "."
+                )
+
+            elif valid_rows < required_rows:
+                quality_reason = (
+                    "Feature quality failed: "
+                    f"{valid_rows} valid bars, "
+                    f"requires {required_rows}."
+                )
+
+            elif features.data_is_stale:
+                quality_reason = (
+                    "Feature freshness check failed."
+                )
+
+            else:
+                quality_reason = (
+                    "Feature data failed quality checks."
+                )
+
             return self._reject(
                 symbol=symbol,
-                reason="Feature data failed quality or freshness checks.",
+                reason=quality_reason,
                 gates=gates,
                 warnings=warnings,
-                metadata=base_metadata,
+                metadata=self._merge_metadata(
+                    base_metadata,
+                    {
+                        "feature_diagnostics": (
+                            feature_diagnostics
+                        )
+                    },
+                ),
             )
 
         gates["features"] = True

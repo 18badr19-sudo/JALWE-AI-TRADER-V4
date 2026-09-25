@@ -228,6 +228,24 @@ class Settings:
         )
     )
 
+    # Source of truth for position sizing.
+    #
+    # strategy_wallet (default):
+    #   JALWE starts from STRATEGY_STARTING_CAPITAL, compounds
+    #   its own realized PnL, and applies NEW cash deposit /
+    #   withdrawal adjustments detected after the wallet
+    #   baseline is initialized. It never adopts Alpaca's
+    #   pre-existing $100k PAPER balance as JALWE capital.
+    #
+    # virtual:
+    #   Starting capital + JALWE realized PnL only.
+    CAPITAL_MODE: str = (
+        _get_str(
+            "JALWE_CAPITAL_MODE",
+            "strategy_wallet",
+        ).lower()
+    )
+
     # ========================================================
     # ALPACA
     # ========================================================
@@ -913,6 +931,15 @@ def validate_settings() -> None:
     ):
         errors.append(
             "JALWE_STARTING_CAPITAL must be greater than zero."
+        )
+
+    if settings.CAPITAL_MODE not in {
+        "strategy_wallet",
+        "virtual",
+    }:
+        errors.append(
+            "JALWE_CAPITAL_MODE must be "
+            "strategy_wallet or virtual."
         )
 
     # ========================================================

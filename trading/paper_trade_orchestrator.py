@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -21,6 +23,7 @@ from intelligence.decision_engine import (
     get_decision_engine,
 )
 
+from broker.alpaca_client import get_alpaca_client
 from trading.execution_engine import get_execution_engine
 from trading.reconciliation_engine import get_reconciliation_engine
 from trading.recovery_engine import get_recovery_engine
@@ -235,6 +238,267 @@ class PaperTradeOrchestrator:
         )
 
     @staticmethod
+    def _activity_time(
+        activity: dict[str, Any],
+    ) -> str:
+        for key in (
+            "transaction_time",
+            "at",
+            "date",
+            "timestamp",
+            "created_at",
+        ):
+            value = str(
+                activity.get(key)
+                or ""
+            ).strip()
+
+            if value:
+                return value
+
+        return datetime.now(
+            timezone.utc
+        ).isoformat()
+
+    @staticmethod
+    def _activity_amount(
+        activity: dict[str, Any],
+    ) -> Optional[float]:
+        for key in (
+            "net_amount",
+            "amount",
+            "cash",
+        ):
+            value = activity.get(key)
+
+            try:
+                if value is not None:
+                    return float(value)
+            except (
+                TypeError,
+                ValueError,
+            ):
+                continue
+
+        return None
+
+    @staticmethod
+    def _sync_strategy_wallet_adjustments() -> float:
+        """
+        Synchronize NEW Alpaca PAPER cash deposits/withdrawals.
+
+        First run establishes a baseline at the current time so
+        the existing Alpaca PAPER balance is NOT imported into
+        JALWE's strategy wallet.
+        """
+
+        if settings.CAPITAL_MODE != "strategy_wallet":
+            return 0.0
+
+        now = datetime.now(
+            timezone.utc
+        )
+
+        baseline_key = (
+            "capital_flow_baseline_utc"
+        )
+
+        last_sync_key = (
+            "capital_flow_last_sync_utc"
+        )
+
+        baseline = (
+            database
+            .get_strategy_capital_state(
+                baseline_key
+            )
+        )
+
+        if not baseline:
+            stamp = now.isoformat()
+
+            database.set_strategy_capital_state(
+                baseline_key,
+                stamp,
+            )
+
+            database.set_strategy_capital_state(
+                last_sync_key,
+                stamp,
+            )
+
+            logger.info(
+                "JALWE strategy-wallet baseline initialized | %s",
+                stamp,
+            )
+
+            return (
+                database
+                .get_strategy_capital_adjustment_total()
+            )
+
+        last_sync = (
+            database
+            .get_strategy_capital_state(
+                last_sync_key
+            )
+            or baseline
+        )
+
+        try:
+            parsed_last_sync = (
+                datetime.fromisoformat(
+                    str(last_sync)
+                    .replace(
+                        "Z",
+                        "+00:00",
+                    )
+                )
+            )
+
+            if parsed_last_sync.tzinfo is None:
+                parsed_last_sync = (
+                    parsed_last_sync
+                    .replace(
+                        tzinfo=timezone.utc
+                    )
+                )
+
+        except Exception:
+            parsed_last_sync = now
+
+        # Avoid a broker activity request for every symbol.
+        if (
+            now - parsed_last_sync
+        ).total_seconds() < 300:
+            return (
+                database
+                .get_strategy_capital_adjustment_total()
+            )
+
+        try:
+            activities = (
+                get_alpaca_client()
+                .get_cash_transfer_activities(
+                    after=str(last_sync),
+                    limit=100,
+                )
+            )
+        except Exception as exc:
+            logger.warning(
+                "Strategy wallet cash-flow sync failed: %s",
+                exc,
+            )
+
+            return (
+                database
+                .get_strategy_capital_adjustment_total()
+            )
+
+        inserted = 0
+
+        for activity in activities:
+            activity_type = str(
+                activity.get(
+                    "activity_type",
+                    "",
+                )
+                or ""
+            ).upper()
+
+            if activity_type not in {
+                "CSD",
+                "CSW",
+            }:
+                continue
+
+            raw_amount = (
+                PaperTradeOrchestrator
+                ._activity_amount(
+                    activity
+                )
+            )
+
+            if raw_amount is None:
+                continue
+
+            amount = (
+                abs(raw_amount)
+                if activity_type == "CSD"
+                else -abs(raw_amount)
+            )
+
+            activity_time = (
+                PaperTradeOrchestrator
+                ._activity_time(
+                    activity
+                )
+            )
+
+            raw_id = str(
+                activity.get("id")
+                or activity.get(
+                    "activity_id"
+                )
+                or activity.get(
+                    "event_id"
+                )
+                or activity.get(
+                    "ref_id"
+                )
+                or ""
+            ).strip()
+
+            if raw_id:
+                event_key = (
+                    "ALPACA-CASH-"
+                    + raw_id
+                )
+            else:
+                canonical = json.dumps(
+                    activity,
+                    sort_keys=True,
+                    default=str,
+                ).encode(
+                    "utf-8"
+                )
+
+                event_key = (
+                    "ALPACA-CASH-"
+                    + hashlib.sha256(
+                        canonical
+                    ).hexdigest()
+                )
+
+            if database.record_strategy_capital_adjustment(
+                event_key=event_key,
+                activity_type=activity_type,
+                amount=amount,
+                activity_time=activity_time,
+                metadata={
+                    "source": "ALPACA_PAPER",
+                    "raw": activity,
+                },
+            ):
+                inserted += 1
+
+        database.set_strategy_capital_state(
+            last_sync_key,
+            now.isoformat(),
+        )
+
+        if inserted:
+            logger.info(
+                "Strategy wallet cash flows synchronized | new=%s",
+                inserted,
+            )
+
+        return (
+            database
+            .get_strategy_capital_adjustment_total()
+        )
+
+    @staticmethod
     def _strategy_equity_snapshot() -> tuple[
         float,
         float,
@@ -248,8 +512,17 @@ class PaperTradeOrchestrator:
             database.get_strategy_realized_pnl_total()
         )
 
+        capital_adjustments = 0.0
+
+        if settings.CAPITAL_MODE == "strategy_wallet":
+            capital_adjustments = float(
+                PaperTradeOrchestrator
+                ._sync_strategy_wallet_adjustments()
+            )
+
         current_equity = (
             starting_capital
+            + capital_adjustments
             + total_realized
         )
 
@@ -276,9 +549,23 @@ class PaperTradeOrchestrator:
             )
         )
 
+        adjustments_today = 0.0
+
+        if settings.CAPITAL_MODE == "strategy_wallet":
+            adjustments_today = float(
+                database
+                .get_strategy_capital_adjustment_since(
+                    start_utc
+                )
+            )
+
+        # Remove today's PnL and cash flows from current equity
+        # so deposits/withdrawals do not look like trading PnL
+        # to the daily-loss circuit breaker.
         daily_start_equity = (
             current_equity
             - realized_today
+            - adjustments_today
         )
 
         return (

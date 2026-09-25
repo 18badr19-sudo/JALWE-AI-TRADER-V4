@@ -515,6 +515,33 @@ class Database:
             )
 
             # =================================================
+            # STRATEGY CAPITAL ADJUSTMENTS
+            # =================================================
+
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS strategy_capital_adjustments (
+                    event_key TEXT PRIMARY KEY,
+                    activity_type TEXT NOT NULL,
+                    amount REAL NOT NULL,
+                    activity_time TEXT NOT NULL,
+                    metadata_json TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS strategy_capital_state (
+                    state_key TEXT PRIMARY KEY,
+                    state_value TEXT,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+
+            # =================================================
             # SYSTEM EVENTS
             # =================================================
 
@@ -2414,6 +2441,164 @@ class Database:
             if row is not None
             else 0.0
         )
+
+    # ========================================================
+    # STRATEGY CAPITAL ADJUSTMENTS
+    # ========================================================
+
+    def record_strategy_capital_adjustment(
+        self,
+        *,
+        event_key: str,
+        activity_type: str,
+        amount: float,
+        activity_time: str,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> bool:
+        event_key = str(event_key or "").strip()
+        activity_type = str(activity_type or "").strip().upper()
+        activity_time = str(activity_time or "").strip()
+
+        if not event_key:
+            raise ValueError("event_key cannot be empty.")
+
+        if activity_type not in {"CSD", "CSW"}:
+            raise ValueError("Unsupported capital activity type.")
+
+        if not activity_time:
+            raise ValueError("activity_time cannot be empty.")
+
+        metadata_json = json.dumps(
+            metadata or {},
+            default=str,
+        )
+
+        with self.connection() as conn:
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO strategy_capital_adjustments (
+                    event_key,
+                    activity_type,
+                    amount,
+                    activity_time,
+                    metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    event_key,
+                    activity_type,
+                    float(amount),
+                    activity_time,
+                    metadata_json,
+                ),
+            )
+
+            return bool(
+                cursor.rowcount
+                and cursor.rowcount > 0
+            )
+
+    def get_strategy_capital_adjustment_total(
+        self,
+    ) -> float:
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT COALESCE(
+                    SUM(amount),
+                    0.0
+                ) AS total
+                FROM strategy_capital_adjustments
+                """
+            ).fetchone()
+
+        return float(
+            row["total"]
+            if row is not None
+            else 0.0
+        )
+
+    def get_strategy_capital_adjustment_since(
+        self,
+        since_utc: str,
+    ) -> float:
+        since_utc = str(since_utc or "").strip()
+
+        if not since_utc:
+            raise ValueError("since_utc cannot be empty.")
+
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT COALESCE(
+                    SUM(amount),
+                    0.0
+                ) AS total
+                FROM strategy_capital_adjustments
+                WHERE activity_time >= ?
+                """,
+                (since_utc,),
+            ).fetchone()
+
+        return float(
+            row["total"]
+            if row is not None
+            else 0.0
+        )
+
+    def get_strategy_capital_state(
+        self,
+        state_key: str,
+    ) -> Optional[str]:
+        state_key = str(state_key or "").strip()
+
+        if not state_key:
+            return None
+
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT state_value
+                FROM strategy_capital_state
+                WHERE state_key = ?
+                """,
+                (state_key,),
+            ).fetchone()
+
+        if row is None:
+            return None
+
+        return str(row["state_value"] or "")
+
+    def set_strategy_capital_state(
+        self,
+        state_key: str,
+        state_value: str,
+    ) -> None:
+        state_key = str(state_key or "").strip()
+
+        if not state_key:
+            raise ValueError("state_key cannot be empty.")
+
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO strategy_capital_state (
+                    state_key,
+                    state_value
+                )
+                VALUES (?, ?)
+                ON CONFLICT(state_key)
+                DO UPDATE SET
+                    state_value = excluded.state_value,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    state_key,
+                    str(state_value or ""),
+                ),
+            )
 
     # ========================================================
     # SYSTEM EVENTS

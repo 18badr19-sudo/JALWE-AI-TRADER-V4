@@ -282,35 +282,40 @@ class LearningEngine:
             rows = conn.execute(
                 """
                 SELECT
-                    t.trade_id,
-                    t.signal_id,
-                    t.symbol,
-                    t.strategy,
-                    t.quantity,
-                    t.entry_price,
-                    t.realized_pnl,
-                    t.realized_pnl_pct,
-                    t.closed_at,
+                    mt.trade_id,
+                    NULL AS signal_id,
+                    mt.symbol,
+                    json_extract(
+                        mt.metadata_json,
+                        '$.strategy'
+                    ) AS strategy,
+                    mt.initial_quantity AS quantity,
+                    mt.entry_price,
+                    json_extract(
+                        mt.metadata_json,
+                        '$.realized_pnl'
+                    ) AS realized_pnl,
+                    json_extract(
+                        mt.metadata_json,
+                        '$.realized_pnl_pct'
+                    ) AS realized_pnl_pct,
+                    mt.closed_at,
                     (
                         SELECT fs.snapshot_json
                         FROM feature_snapshots fs
-                        WHERE fs.symbol = t.symbol
+                        WHERE fs.symbol = mt.symbol
                         ORDER BY
-                            CASE
-                                WHEN t.opened_at IS NOT NULL
-                                THEN ABS(
-                                    julianday(fs.created_at)
-                                    - julianday(t.opened_at)
-                                )
-                                ELSE fs.id * -1
-                            END ASC,
+                            ABS(
+                                julianday(fs.created_at)
+                                - julianday(mt.created_at)
+                            ) ASC,
                             fs.id DESC
                         LIMIT 1
                     ) AS snapshot_json
-                FROM trades t
-                WHERE t.status = 'CLOSED'
+                FROM managed_trades mt
+                WHERE mt.stage = 'CLOSED'
                 ORDER BY
-                    COALESCE(t.closed_at, t.updated_at) DESC
+                    COALESCE(mt.closed_at, mt.updated_at) DESC
                 LIMIT ?
                 """,
                 (self.max_history,),
@@ -901,12 +906,12 @@ class LearningEngine:
             trade_row = conn.execute(
                 """
                 SELECT COUNT(*) AS total
-                FROM trades
-                WHERE status = 'CLOSED'
+                FROM managed_trades
+                WHERE stage = 'CLOSED'
                   AND EXISTS (
                       SELECT 1
                       FROM feature_snapshots fs
-                      WHERE fs.symbol = trades.symbol
+                      WHERE fs.symbol = managed_trades.symbol
                   )
                 """
             ).fetchone()

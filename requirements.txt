@@ -1,5 +1,9 @@
 alpaca-py
+alpaca-trade-api
 python-dotenv
 numpy
 pandas
 psycopg2-binary
+requests
+scikit-learn
+finvizfinance

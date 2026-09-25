@@ -200,14 +200,20 @@ class Settings:
     AUTO_PAPER_EXECUTION: bool = (
         _get_bool(
             "JALWE_AUTO_PAPER_EXECUTION",
-            False,
+            _get_bool(
+                "AUTO_PAPER_EXECUTION",
+                False,
+            ),
         )
     )
 
     BROKER_SUBMISSION_ENABLED: bool = (
         _get_bool(
             "JALWE_BROKER_SUBMISSION",
-            False,
+            _get_bool(
+                "BROKER_SUBMISSION_ENABLED",
+                False,
+            ),
         )
     )
 

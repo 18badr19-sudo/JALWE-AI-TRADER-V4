@@ -13,7 +13,10 @@ from pathlib import Path
 from typing import Any, Optional
 
 
-from core.config import settings
+from core.config import (
+    auto_paper_execution_ready,
+    settings,
+)
 from core.database import database
 
 from intelligence.decision_engine import (
@@ -22,6 +25,29 @@ from intelligence.decision_engine import (
 
 from intelligence.external_research_bridge import (
     get_external_research_bridge,
+)
+
+from market.market_data import get_market_data
+
+from trading.execution_engine import (
+    get_execution_engine,
+)
+
+from trading.paper_trade_orchestrator import (
+    get_paper_trade_orchestrator,
+)
+
+from trading.reconciliation_engine import (
+    get_reconciliation_engine,
+)
+
+from trading.recovery_engine import (
+    get_recovery_engine,
+)
+
+from trading.trade_manager import (
+    EXIT_ACTIONS,
+    get_trade_manager,
 )
 
 
@@ -128,9 +154,13 @@ TELEGRAM_ENABLED = bool(
 # IMPORTANT SAFETY
 # ============================================================
 
-ORDER_EXECUTION_ENABLED = False
+ORDER_EXECUTION_ENABLED = bool(
+    auto_paper_execution_ready()
+)
 
-CALL_EXECUTION_ENGINE = False
+CALL_EXECUTION_ENGINE = (
+    ORDER_EXECUTION_ENABLED
+)
 
 
 # ============================================================
@@ -852,7 +882,7 @@ def build_decision_payload(
         "execution": {
 
             "watcher_execution_enabled":
-                False,
+                ORDER_EXECUTION_ENABLED,
 
             "execution_engine_called":
                 False,
@@ -1744,12 +1774,199 @@ def print_decision(
 
     print(
         "EXECUTION:",
-        "DISABLED",
+        (
+            "PAPER AUTO"
+            if ORDER_EXECUTION_ENABLED
+            else "DISABLED"
+        ),
     )
 
     print(
         "======================================"
     )
+
+
+# ============================================================
+# ACTIVE PAPER TRADE MANAGEMENT
+# ============================================================
+
+def manage_active_paper_trades() -> int:
+    """
+    Manage confirmed Alpaca PAPER positions.
+
+    Safe lifecycle:
+        load persisted ManagedTrade
+        -> refresh price
+        -> TradeManager decision
+        -> optional PAPER exit
+        -> broker reconciliation
+        -> persist updated state
+
+    No live-trading path exists here.
+    """
+
+    if not auto_paper_execution_ready():
+        return 0
+
+    recovery = get_recovery_engine()
+
+    try:
+        recovery_result = recovery.recover_all()
+    except Exception as exc:
+        logger.exception(
+            "Active trade recovery failed: %s",
+            exc,
+        )
+        raise
+
+    if not bool(
+        recovery_result.get(
+            "safe_to_trade",
+            False,
+        )
+    ):
+        logger.warning(
+            "Active trade management blocked by recovery safety."
+        )
+        return 0
+
+    active = database.load_active_managed_trades()
+
+    if not active:
+        return 0
+
+    market_data = get_market_data()
+    trade_manager = get_trade_manager()
+    execution_engine = get_execution_engine()
+    reconciliation_engine = get_reconciliation_engine()
+
+    managed_count = 0
+
+    for trade_id, trade in active.items():
+        try:
+            current_price = float(
+                market_data.get_last_price(
+                    trade.symbol
+                )
+            )
+
+            decision = trade_manager.evaluate(
+                trade,
+                current_price,
+            )
+
+            # HOLD / stop-ratchet / runner-state changes still
+            # need persistence for restart safety.
+            if decision.action not in EXIT_ACTIONS:
+                database.save_managed_trade(
+                    trade_id,
+                    trade,
+                )
+                managed_count += 1
+                continue
+
+            if int(decision.quantity or 0) <= 0:
+                database.save_managed_trade(
+                    trade_id,
+                    trade,
+                )
+                managed_count += 1
+                continue
+
+            broker_order = execution_engine.submit_exit(
+                symbol=trade.symbol,
+                quantity=int(decision.quantity),
+                requested_price=current_price,
+                reason=str(decision.reason or ""),
+            )
+
+            trade_manager.register_exit_order(
+                trade,
+                decision,
+                broker_order,
+            )
+
+            database.save_managed_trade(
+                trade_id,
+                trade,
+            )
+
+            reconciled = (
+                reconciliation_engine
+                .wait_for_terminal_state(
+                    broker_order,
+                    timeout_seconds=30.0,
+                    poll_interval_seconds=1.0,
+                )
+            )
+
+            trade_manager.apply_exit_reconciliation(
+                trade,
+                reconciled,
+            )
+
+            database.save_managed_trade(
+                trade_id,
+                trade,
+            )
+
+            database.log_event(
+                event_type="PAPER_TRADE_MANAGEMENT",
+                severity="INFO",
+                message=(
+                    f"{trade.symbol}: "
+                    f"{decision.action.value} "
+                    f"qty={decision.quantity} "
+                    f"price={current_price}"
+                ),
+                metadata={
+                    "trade_id": trade_id,
+                    "symbol": trade.symbol,
+                    "action": decision.action.value,
+                    "quantity": decision.quantity,
+                    "current_price": current_price,
+                    "stage": trade.stage.value,
+                    "remaining_quantity": (
+                        trade.remaining_quantity
+                    ),
+                    "broker_order_id": (
+                        reconciled.order_id
+                    ),
+                    "broker_status": (
+                        reconciled.status.value
+                    ),
+                },
+            )
+
+            managed_count += 1
+
+        except Exception as exc:
+            logger.exception(
+                "Active trade management failed | "
+                "trade_id=%s symbol=%s error=%s",
+                trade_id,
+                getattr(trade, "symbol", ""),
+                exc,
+            )
+
+            try:
+                database.log_event(
+                    event_type="PAPER_TRADE_MANAGEMENT_ERROR",
+                    severity="ERROR",
+                    message=str(exc),
+                    metadata={
+                        "trade_id": trade_id,
+                        "symbol": getattr(
+                            trade,
+                            "symbol",
+                            "",
+                        ),
+                    },
+                )
+            except Exception:
+                pass
+
+    return managed_count
 
 
 # ============================================================
@@ -1784,17 +2001,36 @@ def process_research(
         )
 
         # ====================================================
-        # JALWE DECISION ONLY
-        #
-        # NO ExecutionEngine call exists in this file.
+        # JALWE DECISION / OPTIONAL PAPER EXECUTION
         # ====================================================
 
-        decision = (
-            decision_engine
-            .analyze(
-                symbol
+        execution_result = None
+
+        if auto_paper_execution_ready():
+            execution_result = (
+                get_paper_trade_orchestrator()
+                .run_symbol(
+                    symbol
+                )
             )
-        )
+
+            decision = (
+                execution_result.decision
+            )
+
+            if decision is None:
+                raise RuntimeError(
+                    "PaperTradeOrchestrator returned "
+                    "no FinalTradeDecision."
+                )
+
+        else:
+            decision = (
+                decision_engine
+                .analyze(
+                    symbol
+                )
+            )
 
         # ====================================================
         # BUILD AUDIT PAYLOAD
@@ -1806,6 +2042,36 @@ def process_research(
                 decision,
             )
         )
+
+        if execution_result is not None:
+            execution_state = getattr(
+                execution_result.state,
+                "value",
+                str(execution_result.state),
+            )
+
+            payload["execution"] = {
+                "watcher_execution_enabled": True,
+                "execution_engine_called": True,
+                "broker_order_submitted": bool(
+                    execution_result.broker_order_id
+                ),
+                "orchestrator_state": execution_state,
+                "intent_id": execution_result.intent_id,
+                "client_order_id": (
+                    execution_result.client_order_id
+                ),
+                "broker_order_id": (
+                    execution_result.broker_order_id
+                ),
+                "managed_trade_id": (
+                    execution_result.managed_trade_id
+                ),
+                "message": execution_result.message,
+                "warnings": list(
+                    execution_result.warnings or []
+                ),
+            }
 
         # ====================================================
         # SAVE TO JALWE DATABASE
@@ -2011,7 +2277,11 @@ def heartbeat(
         ),
 
         "| execution:",
-        "DISABLED",
+        (
+            "PAPER_AUTO"
+            if ORDER_EXECUTION_ENABLED
+            else "DISABLED"
+        ),
     )
 
 
@@ -2113,11 +2383,21 @@ def main() -> None:
     )
 
     print(
-        "ORDER EXECUTION: DISABLED"
+        "ORDER EXECUTION:",
+        (
+            "PAPER AUTO ENABLED"
+            if ORDER_EXECUTION_ENABLED
+            else "DISABLED"
+        ),
     )
 
     print(
-        "EXECUTION ENGINE CALLED: FALSE"
+        "EXECUTION ENGINE CALLED:",
+        (
+            "TRUE WHEN JALWE IS READY"
+            if CALL_EXECUTION_ENGINE
+            else "FALSE"
+        ),
     )
 
     print(
@@ -2161,10 +2441,21 @@ def main() -> None:
                 )
             )
 
+            managed_trades = (
+                manage_active_paper_trades()
+            )
+
             heartbeat(
                 discovered,
                 processed,
             )
+
+            if managed_trades:
+                print(
+                    utc_now_iso(),
+                    "| active paper trades managed:",
+                    managed_trades,
+                )
 
         except KeyboardInterrupt:
 

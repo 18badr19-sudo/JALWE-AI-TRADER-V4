@@ -1129,6 +1129,54 @@ def build_telegram_message(
         )
     )
 
+    backfill = safe_dict(
+        decision_metadata.get(
+            "market_data_backfill",
+            {},
+        )
+    )
+
+    if bool(
+        backfill.get(
+            "attempted",
+            False,
+        )
+    ):
+        succeeded = bool(
+            backfill.get(
+                "succeeded",
+                False,
+            )
+        )
+
+        lines.extend(
+            [
+                "",
+                "🧩 Smart Backfill",
+                (
+                    "الحالة: "
+                    + (
+                        "✅ نجح"
+                        if succeeded
+                        else "⚠️ لم يكتمل"
+                    )
+                ),
+                (
+                    "Bars: "
+                    f"{backfill.get('initial_valid_rows', 0)}"
+                    " → "
+                    f"{backfill.get('final_valid_rows', 0)}"
+                    " / "
+                    f"{backfill.get('required_rows', 0)}"
+                ),
+                (
+                    "المحاولات: "
+                    f"{backfill.get('attempt_count', 0)}"
+                ),
+                "المصدر: شموع Alpaca حقيقية فقط",
+            ]
+        )
+
     feature_diagnostics = safe_dict(
         decision_metadata.get(
             "feature_diagnostics",

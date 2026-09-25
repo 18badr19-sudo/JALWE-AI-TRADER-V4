@@ -679,20 +679,47 @@ def build_decision_payload(
 
         "apex": {
 
-            "verdict":
+            "verdict": (
                 research_metadata.get(
                     "apex_verdict"
-                ),
+                )
+                or
+                research_metadata.get(
+                    "verdict"
+                )
+            ),
 
-            "score":
+            "score": (
                 research_metadata.get(
                     "apex_research_score"
-                ),
+                )
+                if research_metadata.get(
+                    "apex_research_score"
+                ) is not None
+                else research_metadata.get(
+                    "score"
+                )
+            ),
 
-            "confidence_pct":
+            "confidence_pct": (
                 research_metadata.get(
                     "apex_confidence_pct"
-                ),
+                )
+                if research_metadata.get(
+                    "apex_confidence_pct"
+                ) is not None
+                else (
+                    float(
+                        getattr(
+                            research,
+                            "confidence",
+                            0.0,
+                        )
+                        or 0.0
+                    )
+                    * 100.0
+                )
+            ),
 
             "bias":
                 getattr(
@@ -1208,12 +1235,18 @@ def build_telegram_message(
 
     lines.extend(
         [
-
             "",
-
-            "🔒 التنفيذ الآلي من Watcher: معطل",
-
-            "لا يوجد أمر شراء أو بيع من هذا التنبيه.",
+            (
+                "📄 تنفيذ PAPER الآلي: مفعّل"
+                if ORDER_EXECUTION_ENABLED
+                else "🔒 تنفيذ PAPER الآلي: معطّل"
+            ),
+            (
+                "هذا التنبيه تحليلي؛ تنفيذ الأمر يتم فقط "
+                "إذا اجتازت الصفقة جميع بوابات JALWE."
+                if ORDER_EXECUTION_ENABLED
+                else "لا يوجد أمر شراء أو بيع من هذا التنبيه."
+            ),
         ]
     )
 

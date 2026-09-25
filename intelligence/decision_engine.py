@@ -286,12 +286,29 @@ class DecisionEngine:
                     getattr(research, "risk_flags", []) or []
                 ),
                 "created_at": getattr(research, "created_at", ""),
-                "apex_verdict": raw_metadata.get("apex_verdict"),
-                "apex_research_score": raw_metadata.get(
-                    "apex_research_score"
+                "apex_verdict": (
+                    raw_metadata.get("apex_verdict")
+                    or raw_metadata.get("verdict")
                 ),
-                "apex_confidence_pct": raw_metadata.get(
-                    "apex_confidence_pct"
+                "apex_research_score": (
+                    raw_metadata.get("apex_research_score")
+                    if raw_metadata.get("apex_research_score") is not None
+                    else raw_metadata.get("score")
+                ),
+                "apex_confidence_pct": (
+                    raw_metadata.get("apex_confidence_pct")
+                    if raw_metadata.get("apex_confidence_pct") is not None
+                    else (
+                        float(
+                            getattr(
+                                research,
+                                "confidence",
+                                0.0,
+                            )
+                            or 0.0
+                        )
+                        * 100.0
+                    )
                 ),
                 "raw_metadata": raw_metadata,
             }

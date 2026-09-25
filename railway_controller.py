@@ -1703,6 +1703,16 @@ def main() -> None:
         )
 
     offset = 0
+    telegram_conflict_started_at: Optional[float] = None
+    telegram_conflict_alert_after_seconds = max(
+        30,
+        int(
+            os.getenv(
+                "JALWE_TELEGRAM_CONFLICT_ALERT_AFTER_SECONDS",
+                "90",
+            )
+        ),
+    )
 
     while True:
         monitor_children()
@@ -1722,6 +1732,10 @@ def main() -> None:
                 },
                 timeout=25,
             ).get("result", [])
+
+            # A successful poll means any deployment-overlap
+            # conflict has cleared.
+            telegram_conflict_started_at = None
 
             for update in updates:
                 update_id = int(
@@ -1757,6 +1771,48 @@ def main() -> None:
                 send_message(reply)
 
         except Exception as exc:
+            error_text = str(exc)
+
+            if (
+                "Telegram getUpdates: Conflict:"
+                in error_text
+            ):
+                now_epoch = time.time()
+
+                if telegram_conflict_started_at is None:
+                    telegram_conflict_started_at = now_epoch
+
+                conflict_age = (
+                    now_epoch
+                    - telegram_conflict_started_at
+                )
+
+                print(
+                    "Telegram getUpdates conflict "
+                    f"({conflict_age:.0f}s): {error_text}",
+                    flush=True,
+                )
+
+                # Railway can briefly overlap old/new containers
+                # during a deployment. Do not alarm the user for
+                # one transient conflict; alert only if it persists.
+                if (
+                    conflict_age
+                    >= telegram_conflict_alert_after_seconds
+                ):
+                    notify_error(
+                        "وحدة تحكم Telegram",
+                        (
+                            f"{error_text} | "
+                            f"مستمر منذ {conflict_age:.0f} ثانية"
+                        ),
+                    )
+
+                time.sleep(5)
+                continue
+
+            telegram_conflict_started_at = None
+
             print(
                 f"Telegram controller error: {exc}",
                 flush=True,

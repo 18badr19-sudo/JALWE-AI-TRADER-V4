@@ -153,6 +153,12 @@ class ResearchCycleResult:
 
     status: str
 
+    market_scanned_count: int = 0
+
+    market_usable_count: int = 0
+
+    radar_source: str = ""
+
     radar_count: int = 0
 
     valid_prebreakout_count: int = 0
@@ -243,9 +249,9 @@ class ResearchOrchestrator:
 
     VERSION = "2.0"
 
-    DEFAULT_RADAR_TOP_N = 20
+    DEFAULT_RADAR_TOP_N = 40
 
-    DEFAULT_DEEP_RESEARCH_TOP_N = 5
+    DEFAULT_DEEP_RESEARCH_TOP_N = 8
 
     DEFAULT_MIN_PRE_CONFIDENCE = 75.0
 
@@ -936,6 +942,33 @@ class ResearchOrchestrator:
             )
 
             return result
+
+        result.market_scanned_count = int(
+            getattr(
+                radar,
+                "scanned_count",
+                0,
+            )
+            or 0
+        )
+
+        result.market_usable_count = int(
+            getattr(
+                radar,
+                "tradable_count",
+                0,
+            )
+            or 0
+        )
+
+        result.radar_source = str(
+            getattr(
+                radar,
+                "source",
+                "",
+            )
+            or ""
+        )
 
         radar_status = str(
             getattr(

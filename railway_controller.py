@@ -32,6 +32,7 @@ DATA_DIR = Path(
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 STATE_FILE = DATA_DIR / "railway_controller_state.json"
+APEX_DIAGNOSTICS_FILE = DATA_DIR / "apex_last_cycle.json"
 
 APEX_SCRIPT = BASE_DIR / "apex_research_loop.py"
 JALWE_SCRIPT = BASE_DIR / "jalwe_research_watcher.py"
@@ -154,6 +155,7 @@ BTN_JALWE_ON = "👁 تشغيل JALWE"
 BTN_JALWE_OFF = "⛔ إيقاف JALWE"
 
 BTN_BRIDGE = "📡 فحص الربط"
+BTN_NO_TRADE = "🔎 لماذا ما فيه صفقة؟"
 BTN_HELP = "ℹ️ الأوامر"
 
 KEYBOARD = {
@@ -167,6 +169,7 @@ KEYBOARD = {
         [{"text": BTN_EMERGENCY_CLOSE}, {"text": BTN_CONFIRM_EMERGENCY_CLOSE}],
         [{"text": BTN_APEX_ON}, {"text": BTN_APEX_OFF}],
         [{"text": BTN_JALWE_ON}, {"text": BTN_JALWE_OFF}],
+        [{"text": BTN_NO_TRADE}],
         [{"text": BTN_BRIDGE}, {"text": BTN_HELP}],
     ],
     "resize_keyboard": True,
@@ -1451,6 +1454,429 @@ def status_text() -> str:
     )
 
 
+def no_trade_diagnostics_text() -> str:
+    lines = [
+        "🔎 تشخيص عدم وجود صفقة",
+        "",
+    ]
+
+    # --------------------------------------------------------
+    # APEX LAST CYCLE
+    # --------------------------------------------------------
+
+    if APEX_DIAGNOSTICS_FILE.exists():
+        try:
+            apex_payload = json.loads(
+                APEX_DIAGNOSTICS_FILE.read_text(
+                    encoding="utf-8",
+                    errors="ignore",
+                )
+            )
+
+            timestamp = str(
+                apex_payload.get(
+                    "timestamp",
+                    "",
+                )
+                or ""
+            )
+
+            session = str(
+                apex_payload.get(
+                    "session",
+                    "UNKNOWN",
+                )
+                or "UNKNOWN"
+            )
+
+            status = str(
+                apex_payload.get(
+                    "status",
+                    "UNKNOWN",
+                )
+                or "UNKNOWN"
+            )
+
+            market_scanned = int(
+                apex_payload.get(
+                    "market_scanned_count",
+                    0,
+                )
+                or 0
+            )
+
+            market_usable = int(
+                apex_payload.get(
+                    "market_usable_count",
+                    0,
+                )
+                or 0
+            )
+
+            radar_source = str(
+                apex_payload.get(
+                    "radar_source",
+                    "",
+                )
+                or ""
+            )
+
+            radar_count = int(
+                apex_payload.get(
+                    "radar_count",
+                    0,
+                )
+                or 0
+            )
+
+            valid_pre = int(
+                apex_payload.get(
+                    "valid_prebreakout_count",
+                    0,
+                )
+                or 0
+            )
+
+            deep_count = int(
+                apex_payload.get(
+                    "deep_research_count",
+                    0,
+                )
+                or 0
+            )
+
+            shortlist_count = int(
+                apex_payload.get(
+                    "shortlisted_count",
+                    0,
+                )
+                or 0
+            )
+
+            published_count = int(
+                apex_payload.get(
+                    "published_count",
+                    0,
+                )
+                or 0
+            )
+
+            lines.extend(
+                [
+                    "📡 APEX آخر دورة:",
+                    f"Session: {session}",
+                    f"Status: {status}",
+                    f"مصدر الماسح: {radar_source or 'UNKNOWN'}",
+                    f"السوق المفحوص: {market_scanned}",
+                    f"أسهم ببيانات قابلة للترتيب: {market_usable}",
+                    f"Radar النهائي: {radar_count}",
+                    f"PreBreakout صالح: {valid_pre}",
+                    f"Deep Research: {deep_count}",
+                    f"Shortlist: {shortlist_count}",
+                    f"مرسل إلى JALWE: {published_count}",
+                ]
+            )
+
+            if timestamp:
+                parsed = parse_dt(
+                    timestamp
+                )
+
+                if parsed is not None:
+                    lines.append(
+                        "وقت الدورة: "
+                        + parsed.astimezone(
+                            NY_TZ
+                        ).strftime(
+                            "%Y-%m-%d %H:%M NY"
+                        )
+                    )
+
+            packets = apex_payload.get(
+                "packets",
+                [],
+            )
+
+            if isinstance(
+                packets,
+                list,
+            ) and packets:
+
+                lines.extend(
+                    [
+                        "",
+                        "🏁 أفضل نتائج APEX:",
+                    ]
+                )
+
+                for packet in packets[:5]:
+                    if not isinstance(
+                        packet,
+                        dict,
+                    ):
+                        continue
+
+                    symbol = str(
+                        packet.get(
+                            "symbol",
+                            "?",
+                        )
+                        or "?"
+                    )
+
+                    verdict = str(
+                        packet.get(
+                            "verdict",
+                            "UNKNOWN",
+                        )
+                        or "UNKNOWN"
+                    )
+
+                    score = safe_float(
+                        packet.get(
+                            "research_score"
+                        )
+                    )
+
+                    confidence = safe_float(
+                        packet.get(
+                            "confidence"
+                        )
+                    )
+
+                    score_text = (
+                        f"{score:.1f}"
+                        if score is not None
+                        else "?"
+                    )
+
+                    confidence_text = (
+                        f"{confidence:.0f}%"
+                        if confidence is not None
+                        else "?"
+                    )
+
+                    risk_flags = packet.get(
+                        "risk_flags",
+                        [],
+                    )
+
+                    risk_text = ""
+
+                    if (
+                        isinstance(
+                            risk_flags,
+                            list,
+                        )
+                        and risk_flags
+                    ):
+                        risk_text = (
+                            " | "
+                            + ",".join(
+                                str(item)
+                                for item
+                                in risk_flags[:2]
+                            )
+                        )
+
+                    lines.append(
+                        f"• {symbol} | {verdict} | "
+                        f"{score_text} | {confidence_text}"
+                        f"{risk_text}"
+                    )
+
+            errors = apex_payload.get(
+                "errors",
+                [],
+            )
+
+            if (
+                isinstance(
+                    errors,
+                    list,
+                )
+                and errors
+            ):
+                lines.extend(
+                    [
+                        "",
+                        "⚠️ أخطاء APEX:",
+                    ]
+                )
+
+                for error in errors[:3]:
+                    lines.append(
+                        "• "
+                        + str(error)[:220]
+                    )
+
+        except Exception as exc:
+            lines.append(
+                "⚠️ تعذر قراءة تشخيص APEX: "
+                + str(exc)
+            )
+
+    else:
+        lines.append(
+            "لا يوجد ملف تشخيص APEX حتى الآن."
+        )
+
+    # --------------------------------------------------------
+    # JALWE RECENT DECISIONS
+    # --------------------------------------------------------
+
+    try:
+        from core.database import database
+
+        with database.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    message,
+                    metadata_json,
+                    created_at
+                FROM system_events
+                WHERE event_type = 'APEX_RESEARCH_DECISION'
+                ORDER BY id DESC
+                LIMIT 5
+                """
+            ).fetchall()
+
+        lines.extend(
+            [
+                "",
+                "🧠 آخر قرارات JALWE:",
+            ]
+        )
+
+        if not rows:
+            lines.append(
+                "لا توجد قرارات JALWE حديثة."
+            )
+
+        for row in rows:
+            payload = {}
+
+            try:
+                payload = json.loads(
+                    row["metadata_json"]
+                    or "{}"
+                )
+            except Exception:
+                payload = {}
+
+            jalwe_data = payload.get(
+                "jalwe",
+                {},
+            )
+
+            if not isinstance(
+                jalwe_data,
+                dict,
+            ):
+                jalwe_data = {}
+
+            symbol = str(
+                payload.get("symbol")
+                or "?"
+            ).upper()
+
+            state = str(
+                jalwe_data.get("state")
+                or "UNKNOWN"
+            )
+
+            reason = str(
+                jalwe_data.get("reason")
+                or ""
+            ).strip()
+
+            ai_score = safe_float(
+                jalwe_data.get(
+                    "ai_score"
+                )
+            )
+
+            opportunity_score = (
+                safe_float(
+                    jalwe_data.get(
+                        "opportunity_score"
+                    )
+                )
+            )
+
+            breakout_score = (
+                safe_float(
+                    jalwe_data.get(
+                        "breakout_score"
+                    )
+                )
+            )
+
+            score_parts = []
+
+            if ai_score is not None:
+                score_parts.append(
+                    f"AI {ai_score:.0f}"
+                )
+
+            if opportunity_score is not None:
+                score_parts.append(
+                    f"Opp {opportunity_score:.0f}"
+                )
+
+            if breakout_score is not None:
+                score_parts.append(
+                    f"Break {breakout_score:.0f}"
+                )
+
+            score_text = (
+                " | ".join(score_parts)
+                if score_parts
+                else "بدون درجات"
+            )
+
+            lines.append(
+                f"• {symbol} | {state} | "
+                f"{score_text}"
+            )
+
+            if reason:
+                if len(reason) > 150:
+                    reason = (
+                        reason[:147]
+                        + "..."
+                    )
+
+                lines.append(
+                    f"  السبب: {reason}"
+                )
+
+    except Exception as exc:
+        lines.extend(
+            [
+                "",
+                "⚠️ تعذر قراءة قرارات JALWE: "
+                + str(exc),
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "ℹ️ إذا كان Radar كبير لكن Published=0، "
+            "فالفلترة داخل APEX هي السبب. "
+            "إذا وصلت تقارير إلى JALWE ولم يظهر "
+            "READY_FOR_PAPER_EXECUTION، فالرفض من "
+            "بوابات JALWE أو المخاطر.",
+        ]
+    )
+
+    return "\n".join(
+        lines
+    )[:3900]
+
+
 def bridge_text() -> str:
     try:
         from intelligence.external_research_bridge import (
@@ -1493,6 +1919,7 @@ def help_text() -> str:
         "/apex_on /apex_off\n"
         "/jalwe_on /jalwe_off\n"
         "/bridge - فحص الربط\n"
+        "/why_no_trade - تشخيص سبب عدم وجود صفقة\n"
         "/help - عرض الأوامر\n\n"
         "🔔 سيرسل البوت تلقائيًا تنبيهًا عند كل "
         "BUY/SELL منفذ على Alpaca PAPER.\n"
@@ -1566,6 +1993,12 @@ def handle(text: str) -> str:
 
     if cmd == BTN_BRIDGE or low == "/bridge":
         return bridge_text()
+
+    if (
+        cmd == BTN_NO_TRADE
+        or low == "/why_no_trade"
+    ):
+        return no_trade_diagnostics_text()
 
     if cmd == BTN_HELP or low in {"/help", "/start"}:
         return help_text()

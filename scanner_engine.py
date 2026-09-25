@@ -5,10 +5,13 @@ import math
 import os
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 import pandas as pd
+import requests
 
 from alpaca_trade_api.rest import REST
 from dotenv import load_dotenv
@@ -163,9 +166,8 @@ class ScannerEngine:
     # ========================================================
 
     DEFAULT_FILTERS = {
-        "Price": "Under $15",
-        "Float": "Under 20M",
-        "Relative Volume": "Over 1.5",
+        "Price": "Under $100",
+        "Relative Volume": "Over 1.3",
         "Industry": "Stocks only (ex-Funds)",
     }
 
@@ -238,6 +240,69 @@ class ScannerEngine:
         self.alpaca: Optional[
             REST
         ] = None
+
+        self.data_feed = (
+            os.getenv(
+                "ALPACA_DATA_FEED",
+                "iex",
+            )
+            .strip()
+            .lower()
+            or "iex"
+        )
+
+        self.full_market_scan = (
+            os.getenv(
+                "APEX_FULL_MARKET_SCAN",
+                "true",
+            )
+            .strip()
+            .lower()
+            in {"1", "true", "yes", "on"}
+        )
+
+        self.scan_min_price = max(
+            0.01,
+            float(
+                os.getenv(
+                    "APEX_SCAN_MIN_PRICE",
+                    "0.50",
+                )
+            ),
+        )
+
+        self.scan_max_price = max(
+            self.scan_min_price,
+            float(
+                os.getenv(
+                    "APEX_SCAN_MAX_PRICE",
+                    "100.0",
+                )
+            ),
+        )
+
+        self.snapshot_batch_size = min(
+            150,
+            max(
+                25,
+                int(
+                    os.getenv(
+                        "APEX_SNAPSHOT_BATCH_SIZE",
+                        "100",
+                    )
+                ),
+            ),
+        )
+
+        self.snapshot_timeout_seconds = max(
+            5,
+            int(
+                os.getenv(
+                    "APEX_SNAPSHOT_TIMEOUT_SECONDS",
+                    "20",
+                )
+            ),
+        )
 
         self._initialize_alpaca()
 
@@ -678,6 +743,473 @@ class ScannerEngine:
                 )
 
         return symbols
+
+    # ========================================================
+    # ALPACA FULL-MARKET LIGHT SCAN
+    # ========================================================
+
+    @staticmethod
+    def _chunked(
+        values: list[str],
+        size: int,
+    ):
+        size = max(1, int(size))
+
+        for index in range(
+            0,
+            len(values),
+            size,
+        ):
+            yield values[
+                index:index + size
+            ]
+
+
+    @staticmethod
+    def _snapshot_section(
+        snapshot: Any,
+        *names: str,
+    ) -> Any:
+        if not isinstance(
+            snapshot,
+            dict,
+        ):
+            return None
+
+        for name in names:
+            if name in snapshot:
+                return snapshot.get(name)
+
+        return None
+
+
+    @staticmethod
+    def _snapshot_number(
+        section: Any,
+        *keys: str,
+    ) -> Optional[float]:
+        if not isinstance(
+            section,
+            dict,
+        ):
+            return None
+
+        for key in keys:
+            if key not in section:
+                continue
+
+            try:
+                value = float(
+                    section.get(key)
+                )
+
+                if math.isfinite(value):
+                    return value
+
+            except (
+                TypeError,
+                ValueError,
+            ):
+                continue
+
+        return None
+
+
+    @staticmethod
+    def _regular_session_fraction() -> float:
+        """
+        Approximate how much of the regular US session has
+        elapsed. Used only to turn current daily volume into a
+        volume-pace ratio against the previous full day.
+        """
+
+        now_ny = datetime.now(
+            ZoneInfo(
+                "America/New_York"
+            )
+        )
+
+        minutes = (
+            now_ny.hour * 60
+            + now_ny.minute
+        )
+
+        regular_open = (
+            9 * 60
+            + 30
+        )
+
+        regular_close = (
+            16 * 60
+        )
+
+        if minutes < regular_open:
+            return 0.10
+
+        if minutes >= regular_close:
+            return 1.0
+
+        elapsed = (
+            minutes
+            - regular_open
+        )
+
+        return max(
+            0.10,
+            min(
+                1.0,
+                elapsed / 390.0,
+            ),
+        )
+
+
+    def _fetch_snapshot_batch(
+        self,
+        symbols: list[str],
+    ) -> dict[str, Any]:
+
+        if not symbols:
+            return {}
+
+        response = requests.get(
+            "https://data.alpaca.markets/v2/stocks/snapshots",
+            params={
+                "symbols": ",".join(
+                    symbols
+                ),
+                "feed": self.data_feed,
+            },
+            headers={
+                "APCA-API-KEY-ID": self.api_key,
+                "APCA-API-SECRET-KEY": (
+                    self.api_secret
+                ),
+                "accept": "application/json",
+            },
+            timeout=(
+                self.snapshot_timeout_seconds
+            ),
+        )
+
+        response.raise_for_status()
+
+        payload = response.json()
+
+        if not isinstance(
+            payload,
+            dict,
+        ):
+            return {}
+
+        snapshots = payload.get(
+            "snapshots"
+        )
+
+        if isinstance(
+            snapshots,
+            dict,
+        ):
+            return snapshots
+
+        # Older/alternate response shape is the symbol map
+        # itself.
+        return {
+            str(key).upper(): value
+            for key, value
+            in payload.items()
+            if isinstance(
+                value,
+                dict,
+            )
+        }
+
+
+    def _run_alpaca_full_market_scan(
+        self,
+    ) -> tuple[
+        list[RankedCandidate],
+        int,
+        list[str],
+    ]:
+        """
+        Lightweight scan of the entire Alpaca-tradable US
+        equity universe.
+
+        This stage does NOT perform deep technical analysis.
+        It ranks current market activity so only the strongest
+        names proceed to PreBreakout/News/Liquidity/AI.
+        """
+
+        warnings: list[str] = []
+
+        tradable_symbols = sorted(
+            self._get_tradable_symbols()
+        )
+
+        universe_count = len(
+            tradable_symbols
+        )
+
+        if not tradable_symbols:
+            return (
+                [],
+                0,
+                [
+                    "ALPACA_ASSET_UNIVERSE_EMPTY"
+                ],
+            )
+
+        session_fraction = (
+            self._regular_session_fraction()
+        )
+
+        output: list[
+            RankedCandidate
+        ] = []
+
+        failed_batches = 0
+
+        for batch in self._chunked(
+            tradable_symbols,
+            self.snapshot_batch_size,
+        ):
+            try:
+                snapshots = (
+                    self._fetch_snapshot_batch(
+                        batch
+                    )
+                )
+
+            except Exception as exc:
+                failed_batches += 1
+
+                logger.warning(
+                    "Alpaca snapshot batch failed: %s",
+                    exc,
+                )
+
+                continue
+
+            for symbol in batch:
+                snapshot = snapshots.get(
+                    symbol
+                )
+
+                if not isinstance(
+                    snapshot,
+                    dict,
+                ):
+                    continue
+
+                latest_trade = (
+                    self._snapshot_section(
+                        snapshot,
+                        "latestTrade",
+                        "latest_trade",
+                    )
+                )
+
+                minute_bar = (
+                    self._snapshot_section(
+                        snapshot,
+                        "minuteBar",
+                        "minute_bar",
+                    )
+                )
+
+                daily_bar = (
+                    self._snapshot_section(
+                        snapshot,
+                        "dailyBar",
+                        "daily_bar",
+                    )
+                )
+
+                previous_bar = (
+                    self._snapshot_section(
+                        snapshot,
+                        "prevDailyBar",
+                        "previousDailyBar",
+                        "prev_daily_bar",
+                    )
+                )
+
+                price = (
+                    self._snapshot_number(
+                        latest_trade,
+                        "p",
+                        "price",
+                    )
+                    or
+                    self._snapshot_number(
+                        minute_bar,
+                        "c",
+                        "close",
+                    )
+                    or
+                    self._snapshot_number(
+                        daily_bar,
+                        "c",
+                        "close",
+                    )
+                )
+
+                if (
+                    price is None
+                    or
+                    price < self.scan_min_price
+                    or
+                    price > self.scan_max_price
+                ):
+                    continue
+
+                volume = (
+                    self._snapshot_number(
+                        daily_bar,
+                        "v",
+                        "volume",
+                    )
+                    or 0.0
+                )
+
+                previous_volume = (
+                    self._snapshot_number(
+                        previous_bar,
+                        "v",
+                        "volume",
+                    )
+                )
+
+                previous_close = (
+                    self._snapshot_number(
+                        previous_bar,
+                        "c",
+                        "close",
+                    )
+                )
+
+                change_pct = None
+
+                if (
+                    previous_close is not None
+                    and previous_close > 0
+                ):
+                    change_pct = (
+                        (
+                            price
+                            - previous_close
+                        )
+                        / previous_close
+                        * 100.0
+                    )
+
+                relative_volume = None
+
+                if (
+                    previous_volume is not None
+                    and previous_volume > 0
+                ):
+                    expected_volume = (
+                        previous_volume
+                        * session_fraction
+                    )
+
+                    if expected_volume > 0:
+                        relative_volume = (
+                            volume
+                            / expected_volume
+                        )
+
+                dollar_volume = (
+                    price
+                    * volume
+                )
+
+                (
+                    rank_score,
+                    reasons,
+                    candidate_warnings,
+                ) = self._rank_candidate(
+                    relative_volume=(
+                        relative_volume
+                    ),
+                    volume=volume,
+                    average_volume=(
+                        previous_volume
+                    ),
+                    price=price,
+                    change_pct=(
+                        change_pct
+                    ),
+                    float_shares=None,
+                )
+
+                output.append(
+                    RankedCandidate(
+                        symbol=symbol,
+                        rank_score=rank_score,
+                        relative_volume=(
+                            relative_volume
+                        ),
+                        volume=volume,
+                        average_volume=(
+                            previous_volume
+                        ),
+                        price=price,
+                        change_pct=(
+                            change_pct
+                        ),
+                        float_shares=None,
+                        dollar_volume=(
+                            dollar_volume
+                        ),
+                        tradable=True,
+                        reasons=reasons,
+                        warnings=(
+                            candidate_warnings
+                            + [
+                                "ALPACA_FULL_MARKET"
+                            ]
+                        ),
+                        raw={
+                            "source": (
+                                "ALPACA_SNAPSHOT"
+                            ),
+                            "feed": (
+                                self.data_feed
+                            ),
+                            "session_fraction": (
+                                session_fraction
+                            ),
+                        },
+                    )
+                )
+
+        output.sort(
+            key=lambda item: (
+                item.rank_score,
+                item.relative_volume
+                or 0.0,
+                item.dollar_volume
+                or 0.0,
+                item.volume
+                or 0.0,
+            ),
+            reverse=True,
+        )
+
+        if failed_batches:
+            warnings.append(
+                "ALPACA_SNAPSHOT_BATCH_FAILURES="
+                + str(failed_batches)
+            )
+
+        return (
+            output,
+            universe_count,
+            warnings,
+        )
+
 
     # ========================================================
     # SCORE CANDIDATE
@@ -1328,7 +1860,83 @@ class ScannerEngine:
             )
 
         # ----------------------------------------------------
-        # FINVIZ
+        # PRIMARY: ALPACA FULL MARKET
+        # ----------------------------------------------------
+
+        if self.full_market_scan:
+
+            try:
+                (
+                    ranked,
+                    universe_count,
+                    full_market_warnings,
+                ) = (
+                    self._run_alpaca_full_market_scan()
+                )
+
+                if ranked:
+
+                    selected = ranked[
+                        :max(
+                            1,
+                            int(top_n),
+                        )
+                    ]
+
+                    return RadarResult(
+                        symbols=[
+                            item.symbol
+                            for item in selected
+                        ],
+                        ranked_candidates=(
+                            selected
+                        ),
+                        status="SUCCESS",
+                        source=(
+                            "ALPACA_FULL_MARKET"
+                        ),
+                        scanned_count=(
+                            universe_count
+                        ),
+                        tradable_count=(
+                            len(ranked)
+                        ),
+                        returned_count=(
+                            len(selected)
+                        ),
+                        filters={
+                            "price": (
+                                f"{self.scan_min_price}-"
+                                f"{self.scan_max_price}"
+                            ),
+                            "feed": (
+                                self.data_feed
+                            ),
+                            "mode": (
+                                "FULL_MARKET_LIGHT_SCAN"
+                            ),
+                        },
+                        warnings=(
+                            full_market_warnings
+                        ),
+                    )
+
+                logger.warning(
+                    "Alpaca full-market scan returned "
+                    "no usable ranked candidates; "
+                    "falling back to Finviz."
+                )
+
+            except Exception as exc:
+
+                logger.exception(
+                    "Alpaca full-market scan failed; "
+                    "falling back to Finviz: %s",
+                    exc,
+                )
+
+        # ----------------------------------------------------
+        # FALLBACK: FINVIZ
         # ----------------------------------------------------
 
         try:

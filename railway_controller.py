@@ -6,6 +6,7 @@ import signal
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -305,8 +306,59 @@ def tg_call(
         method="POST",
     )
 
-    with urllib.request.urlopen(req, timeout=timeout) as response:
-        body = response.read().decode("utf-8", errors="replace")
+    try:
+        with urllib.request.urlopen(
+            req,
+            timeout=timeout,
+        ) as response:
+            body = response.read().decode(
+                "utf-8",
+                errors="replace",
+            )
+
+    except urllib.error.HTTPError as exc:
+        error_body = ""
+
+        try:
+            error_body = (
+                exc.read()
+                .decode(
+                    "utf-8",
+                    errors="replace",
+                )
+            )
+        except Exception:
+            pass
+
+        description = ""
+
+        if error_body:
+            try:
+                parsed_error = json.loads(
+                    error_body
+                )
+                description = str(
+                    parsed_error.get(
+                        "description",
+                        "",
+                    )
+                    or ""
+                ).strip()
+            except Exception:
+                description = (
+                    error_body.strip()
+                )
+
+        if description:
+            raise RuntimeError(
+                f"Telegram {method}: "
+                f"{description}"
+            ) from exc
+
+        raise RuntimeError(
+            f"Telegram {method}: "
+            f"HTTP {exc.code} {exc.reason}"
+        ) from exc
 
     result = json.loads(body)
 

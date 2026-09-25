@@ -8,7 +8,7 @@ from broker.alpaca_client import get_alpaca_client
 from core.database import database
 from core.models import BrokerOrder, OrderStatus, TradeSide
 from trading.reconciliation_engine import get_reconciliation_engine
-from trading.trade_manager import get_trade_manager
+from trading.trade_manager import TradeStage, get_trade_manager
 
 
 logger = logging.getLogger(__name__)
@@ -45,6 +45,10 @@ class RecoveryEngine:
 
     JALWE_EXIT_PREFIXES = (
         "JALWE-EXIT",
+    )
+
+    JALWE_STOP_PREFIXES = (
+        "JALWE-STOP",
     )
 
     ACTIVE_ORDER_STATUSES = {
@@ -794,6 +798,214 @@ class RecoveryEngine:
         return result
 
     # ========================================================
+    # BROKER PROTECTIVE STOP RECOVERY
+    # ========================================================
+
+    def _reconcile_protective_stop(
+        self,
+        trade_id: str,
+        trade: Any,
+    ) -> dict[str, Any]:
+        metadata = (
+            trade.metadata
+            if isinstance(
+                trade.metadata,
+                dict,
+            )
+            else {}
+        )
+
+        order_id = str(
+            metadata.get(
+                "protective_stop_order_id",
+                "",
+            )
+            or ""
+        ).strip()
+
+        if not order_id:
+            return {
+                "checked": False,
+                "active": False,
+                "filled": False,
+            }
+
+        raw_order = self.broker.get_order(
+            order_id
+        )
+
+        status = self._map_order_status(
+            getattr(
+                raw_order,
+                "status",
+                None,
+            )
+        )
+
+        filled_quantity = self._safe_int(
+            getattr(
+                raw_order,
+                "filled_qty",
+                0,
+            )
+        )
+
+        fill_price = self._safe_float(
+            getattr(
+                raw_order,
+                "filled_avg_price",
+                None,
+            )
+        )
+
+        active = status in {
+            OrderStatus.ACCEPTED,
+            OrderStatus.SUBMITTED,
+            OrderStatus.PARTIALLY_FILLED,
+        }
+
+        metadata[
+            "protective_stop_status"
+        ] = status.value
+
+        metadata[
+            "protective_stop_active"
+        ] = bool(
+            active
+        )
+
+        if status == OrderStatus.FILLED:
+            already_applied = bool(
+                metadata.get(
+                    "protective_stop_fill_applied",
+                    False,
+                )
+            )
+
+            if (
+                not already_applied
+                and filled_quantity > 0
+            ):
+                applied_quantity = min(
+                    int(
+                        trade.remaining_quantity
+                    ),
+                    filled_quantity,
+                )
+
+                if applied_quantity > 0:
+                    trade.remaining_quantity -= (
+                        applied_quantity
+                    )
+
+                    trade.realized_quantity += (
+                        applied_quantity
+                    )
+
+                    if fill_price is not None:
+                        realized = (
+                            (
+                                fill_price
+                                - trade.entry_price
+                            )
+                            * applied_quantity
+                        )
+
+                        trade.metadata[
+                            "realized_pnl"
+                        ] = float(
+                            trade.metadata.get(
+                                "realized_pnl",
+                                0.0,
+                            )
+                            or 0.0
+                        ) + realized
+
+                        event_key = (
+                            f"{order_id}:"
+                            f"{filled_quantity}"
+                        )
+
+                        database.record_strategy_pnl_event(
+                            event_key=event_key,
+                            trade_id=trade_id,
+                            order_id=order_id,
+                            symbol=trade.symbol,
+                            action=(
+                                "BROKER_PROTECTIVE_STOP"
+                            ),
+                            quantity=applied_quantity,
+                            fill_price=fill_price,
+                            entry_price=(
+                                trade.entry_price
+                            ),
+                            realized_pnl=realized,
+                            event_time=(
+                                datetime.now(
+                                    timezone.utc
+                                ).isoformat()
+                            ),
+                            metadata={
+                                "source": (
+                                    "RECOVERY_ENGINE"
+                                ),
+                                "protective_stop": True,
+                            },
+                        )
+
+                metadata[
+                    "protective_stop_fill_applied"
+                ] = True
+
+            if int(
+                trade.remaining_quantity
+            ) <= 0:
+                trade.remaining_quantity = 0
+                trade.trailing_active = False
+                trade.stage = (
+                    TradeStage.CLOSED
+                )
+
+            metadata[
+                "protective_stop_active"
+            ] = False
+
+        elif status in {
+            OrderStatus.CANCELED,
+            OrderStatus.REJECTED,
+        }:
+            metadata[
+                "protective_stop_active"
+            ] = False
+
+        trade.metadata = metadata
+
+        database.save_managed_trade(
+            trade_id,
+            trade,
+        )
+
+        return {
+            "checked": True,
+            "active": bool(
+                metadata.get(
+                    "protective_stop_active",
+                    False,
+                )
+            ),
+            "filled": (
+                status
+                == OrderStatus.FILLED
+            ),
+            "status": status.value,
+            "order_id": order_id,
+            "filled_quantity": (
+                filled_quantity
+            ),
+            "fill_price": fill_price,
+        }
+
+    # ========================================================
     # RECOVER ONE MANAGED TRADE / PENDING EXIT
     # ========================================================
 
@@ -818,6 +1030,39 @@ class RecoveryEngine:
             "broker_quantity": None,
             "warning": None,
         }
+
+        # ----------------------------------------------------
+        # BROKER-NATIVE PROTECTIVE STOP
+        # ----------------------------------------------------
+
+        try:
+            protective_stop = (
+                self._reconcile_protective_stop(
+                    trade_id,
+                    trade,
+                )
+            )
+
+            result[
+                "protective_stop"
+            ] = protective_stop
+
+        except Exception as exc:
+            logger.exception(
+                "Protective stop recovery failed | "
+                "trade_id=%s symbol=%s",
+                trade_id,
+                symbol,
+            )
+
+            result[
+                "warning"
+            ] = (
+                "PROTECTIVE_STOP_RECOVERY_FAILED"
+            )
+            result["error"] = str(exc)
+
+            return result
 
         # ----------------------------------------------------
         # PENDING EXIT ORDER
@@ -1155,6 +1400,64 @@ class RecoveryEngine:
             if getattr(trade, "pending_order_id", None)
         }
 
+        known_protective_stop_ids = {
+            str(
+                getattr(
+                    trade,
+                    "metadata",
+                    {},
+                ).get(
+                    "protective_stop_order_id",
+                    "",
+                )
+            ).strip()
+            for trade in local_trades.values()
+            if isinstance(
+                getattr(
+                    trade,
+                    "metadata",
+                    {},
+                ),
+                dict,
+            )
+            and getattr(
+                trade,
+                "metadata",
+                {},
+            ).get(
+                "protective_stop_order_id"
+            )
+        }
+
+        known_protective_stop_client_ids = {
+            str(
+                getattr(
+                    trade,
+                    "metadata",
+                    {},
+                ).get(
+                    "protective_stop_client_order_id",
+                    "",
+                )
+            ).strip()
+            for trade in local_trades.values()
+            if isinstance(
+                getattr(
+                    trade,
+                    "metadata",
+                    {},
+                ),
+                dict,
+            )
+            and getattr(
+                trade,
+                "metadata",
+                {},
+            ).get(
+                "protective_stop_client_order_id"
+            )
+        }
+
         known_entry_order_ids = {
             str(row.get("broker_order_id") or "").strip()
             for row in entry_intents
@@ -1189,7 +1492,16 @@ class RecoveryEngine:
                 for prefix in self.JALWE_EXIT_PREFIXES
             )
 
-            if not (is_jalwe_entry or is_jalwe_exit):
+            is_jalwe_stop = any(
+                client_order_id.startswith(prefix)
+                for prefix in self.JALWE_STOP_PREFIXES
+            )
+
+            if not (
+                is_jalwe_entry
+                or is_jalwe_exit
+                or is_jalwe_stop
+            ):
                 continue
 
             status = self._value(
@@ -1211,6 +1523,13 @@ class RecoveryEngine:
             ):
                 continue
 
+            if is_jalwe_stop and (
+                order_id in known_protective_stop_ids
+                or client_order_id
+                in known_protective_stop_client_ids
+            ):
+                continue
+
             record = {
                 "order_id": order_id,
                 "client_order_id": client_order_id,
@@ -1228,7 +1547,13 @@ class RecoveryEngine:
                     getattr(order, "filled_qty", 0)
                 ),
                 "role": (
-                    "ENTRY" if is_jalwe_entry else "EXIT"
+                    "ENTRY"
+                    if is_jalwe_entry
+                    else (
+                        "PROTECTIVE_STOP"
+                        if is_jalwe_stop
+                        else "EXIT"
+                    )
                 ),
             }
 

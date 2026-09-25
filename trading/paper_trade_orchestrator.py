@@ -983,6 +983,129 @@ class PaperTradeOrchestrator:
         )
 
     # ========================================================
+    # BROKER-NATIVE PROTECTIVE STOP
+    # ========================================================
+
+    def _arm_managed_trade_stop(
+        self,
+        managed_trade_id: str,
+    ) -> dict[str, Any]:
+        if not bool(
+            settings
+            .BROKER_PROTECTIVE_STOP_ENABLED
+        ):
+            return {
+                "enabled": False,
+                "active": False,
+                "reason": "DISABLED",
+            }
+
+        trade = database.load_managed_trade(
+            managed_trade_id
+        )
+
+        if trade is None:
+            raise RuntimeError(
+                "ManagedTrade could not be reloaded "
+                "for protective stop arming."
+            )
+
+        quantity = int(
+            trade.remaining_quantity
+        )
+
+        stop_price = float(
+            trade.current_stop
+        )
+
+        if quantity <= 0:
+            return {
+                "enabled": True,
+                "active": False,
+                "reason": "NO_REMAINING_POSITION",
+            }
+
+        order = (
+            self.execution_engine
+            .submit_protective_stop(
+                symbol=trade.symbol,
+                quantity=quantity,
+                stop_price=stop_price,
+            )
+        )
+
+        database.save_broker_order(
+            order
+        )
+
+        trade.metadata[
+            "protective_stop_order_id"
+        ] = order.order_id
+
+        trade.metadata[
+            "protective_stop_client_order_id"
+        ] = order.client_order_id
+
+        trade.metadata[
+            "protective_stop_price"
+        ] = stop_price
+
+        trade.metadata[
+            "protective_stop_quantity"
+        ] = quantity
+
+        trade.metadata[
+            "protective_stop_status"
+        ] = order.status.value
+
+        trade.metadata[
+            "protective_stop_active"
+        ] = True
+
+        trade.metadata[
+            "protective_stop_fill_applied"
+        ] = False
+
+        database.save_managed_trade(
+            managed_trade_id,
+            trade,
+        )
+
+        database.log_event(
+            event_type=(
+                "BROKER_PROTECTIVE_STOP_ARMED"
+            ),
+            severity="INFO",
+            message=(
+                f"{trade.symbol}: broker protective "
+                f"stop armed qty={quantity} "
+                f"stop={stop_price}"
+            ),
+            metadata={
+                "trade_id": managed_trade_id,
+                "symbol": trade.symbol,
+                "quantity": quantity,
+                "stop_price": stop_price,
+                "order_id": order.order_id,
+                "client_order_id": (
+                    order.client_order_id
+                ),
+            },
+        )
+
+        return {
+            "enabled": True,
+            "active": True,
+            "order_id": order.order_id,
+            "client_order_id": (
+                order.client_order_id
+            ),
+            "quantity": quantity,
+            "stop_price": stop_price,
+            "status": order.status.value,
+        }
+
+    # ========================================================
     # RUN SYMBOL
     # ========================================================
 
@@ -1810,6 +1933,56 @@ class PaperTradeOrchestrator:
                 )
             )
 
+            protective_stop = {
+                "enabled": bool(
+                    settings
+                    .BROKER_PROTECTIVE_STOP_ENABLED
+                ),
+                "active": False,
+            }
+
+            protective_warnings: list[str] = []
+
+            try:
+                protective_stop = (
+                    self._arm_managed_trade_stop(
+                        str(
+                            managed_trade_id
+                        )
+                    )
+                )
+
+            except Exception as exc:
+                logger.exception(
+                    "Protective stop arming failed | "
+                    "trade_id=%s symbol=%s",
+                    managed_trade_id,
+                    symbol,
+                )
+
+                protective_warnings.append(
+                    "Broker protective stop could "
+                    "not be armed: "
+                    + str(exc)
+                )
+
+                database.log_event(
+                    event_type=(
+                        "BROKER_PROTECTIVE_STOP_ERROR"
+                    ),
+                    severity="CRITICAL",
+                    message=(
+                        "Confirmed PAPER position is "
+                        "not protected by the broker-side "
+                        "stop."
+                    ),
+                    metadata={
+                        "trade_id": managed_trade_id,
+                        "symbol": symbol,
+                        "error": str(exc),
+                    },
+                )
+
             return PaperOrchestratorResult(
                 symbol=symbol,
 
@@ -1842,12 +2015,28 @@ class PaperTradeOrchestrator:
                     "TradeManager control."
                 ),
 
+                warnings=(
+                    list(
+                        getattr(
+                            decision,
+                            "warnings",
+                            [],
+                        )
+                        or []
+                    )
+                    + protective_warnings
+                ),
+
                 metadata={
                     "entry_recovery": (
                         recovery_result
                     ),
 
                     "intent_state": "MANAGED",
+
+                    "protective_stop": (
+                        protective_stop
+                    ),
                 },
             )
 

@@ -751,6 +751,16 @@ class Settings:
         )
     )
 
+    # Broker-native GTC stop for confirmed PAPER positions.
+    # TradeManager still controls profit targets/trailing logic,
+    # but Alpaca keeps a protective stop resting broker-side.
+    BROKER_PROTECTIVE_STOP_ENABLED: bool = (
+        _get_bool(
+            "BROKER_PROTECTIVE_STOP_ENABLED",
+            True,
+        )
+    )
+
     # ========================================================
     # DATA / BROKER SAFETY
     # ========================================================

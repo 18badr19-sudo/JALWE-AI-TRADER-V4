@@ -2146,6 +2146,438 @@ def print_decision(
 
 
 # ============================================================
+# BROKER PROTECTIVE STOP SYNC
+# ============================================================
+
+def _raw_order_status(
+    order: Any,
+) -> str:
+    return str(
+        getattr(
+            getattr(
+                order,
+                "status",
+                "",
+            ),
+            "value",
+            getattr(
+                order,
+                "status",
+                "",
+            ),
+        )
+        or ""
+    ).strip().lower()
+
+
+def _cancel_protective_stop(
+    trade_id: str,
+    trade: Any,
+    execution_engine: Any,
+) -> str:
+    metadata = (
+        trade.metadata
+        if isinstance(
+            trade.metadata,
+            dict,
+        )
+        else {}
+    )
+
+    order_id = str(
+        metadata.get(
+            "protective_stop_order_id",
+            "",
+        )
+        or ""
+    ).strip()
+
+    if not order_id:
+        return "NONE"
+
+    try:
+        raw = (
+            execution_engine
+            .broker
+            .get_order(
+                order_id
+            )
+        )
+
+        status = _raw_order_status(
+            raw
+        )
+
+        if status == "filled":
+            metadata[
+                "protective_stop_active"
+            ] = False
+            metadata[
+                "protective_stop_status"
+            ] = "filled"
+            trade.metadata = metadata
+            database.save_managed_trade(
+                trade_id,
+                trade,
+            )
+            return "FILLED"
+
+        if status in {
+            "canceled",
+            "cancelled",
+            "expired",
+            "done_for_day",
+            "rejected",
+            "replaced",
+        }:
+            metadata[
+                "protective_stop_active"
+            ] = False
+            metadata[
+                "protective_stop_status"
+            ] = status
+            trade.metadata = metadata
+            database.save_managed_trade(
+                trade_id,
+                trade,
+            )
+            return "CANCELED"
+
+        execution_engine.cancel_protective_stop(
+            order_id
+        )
+
+        deadline = (
+            time.time()
+            + 5.0
+        )
+
+        while time.time() < deadline:
+            time.sleep(
+                0.25
+            )
+
+            raw = (
+                execution_engine
+                .broker
+                .get_order(
+                    order_id
+                )
+            )
+
+            status = _raw_order_status(
+                raw
+            )
+
+            if status == "filled":
+                metadata[
+                    "protective_stop_active"
+                ] = False
+                metadata[
+                    "protective_stop_status"
+                ] = "filled"
+                trade.metadata = metadata
+                database.save_managed_trade(
+                    trade_id,
+                    trade,
+                )
+                return "FILLED"
+
+            if status in {
+                "canceled",
+                "cancelled",
+                "expired",
+                "done_for_day",
+                "rejected",
+                "replaced",
+            }:
+                metadata[
+                    "protective_stop_active"
+                ] = False
+                metadata[
+                    "protective_stop_status"
+                ] = status
+                trade.metadata = metadata
+                database.save_managed_trade(
+                    trade_id,
+                    trade,
+                )
+                return "CANCELED"
+
+        raise RuntimeError(
+            "Protective stop cancellation "
+            "did not reach a terminal state."
+        )
+
+    except Exception:
+        logger.exception(
+            "Protective stop cancellation failed | "
+            "trade_id=%s symbol=%s order_id=%s",
+            trade_id,
+            getattr(
+                trade,
+                "symbol",
+                "",
+            ),
+            order_id,
+        )
+        raise
+
+
+def _sync_protective_stop(
+    trade_id: str,
+    trade: Any,
+    execution_engine: Any,
+) -> dict[str, Any]:
+    if not bool(
+        settings
+        .BROKER_PROTECTIVE_STOP_ENABLED
+    ):
+        return {
+            "enabled": False,
+            "active": False,
+            "reason": "DISABLED",
+        }
+
+    quantity = int(
+        trade.remaining_quantity
+    )
+
+    if quantity <= 0:
+        return {
+            "enabled": True,
+            "active": False,
+            "reason": "NO_REMAINING_POSITION",
+        }
+
+    desired_stop = float(
+        trade.current_stop
+    )
+
+    metadata = (
+        trade.metadata
+        if isinstance(
+            trade.metadata,
+            dict,
+        )
+        else {}
+    )
+
+    order_id = str(
+        metadata.get(
+            "protective_stop_order_id",
+            "",
+        )
+        or ""
+    ).strip()
+
+    stored_qty = int(
+        metadata.get(
+            "protective_stop_quantity",
+            0,
+        )
+        or 0
+    )
+
+    try:
+        stored_stop = float(
+            metadata.get(
+                "protective_stop_price",
+                0.0,
+            )
+            or 0.0
+        )
+    except (
+        TypeError,
+        ValueError,
+    ):
+        stored_stop = 0.0
+
+    if order_id:
+        try:
+            raw = (
+                execution_engine
+                .broker
+                .get_order(
+                    order_id
+                )
+            )
+
+            status = _raw_order_status(
+                raw
+            )
+
+            active = status in {
+                "new",
+                "accepted",
+                "pending_new",
+                "accepted_for_bidding",
+                "held",
+                "partially_filled",
+                "pending_replace",
+                "pending_cancel",
+            }
+
+            if (
+                active
+                and stored_qty == quantity
+                and abs(
+                    stored_stop
+                    - desired_stop
+                )
+                <= 0.0001
+            ):
+                metadata[
+                    "protective_stop_active"
+                ] = True
+                metadata[
+                    "protective_stop_status"
+                ] = status
+                trade.metadata = metadata
+
+                return {
+                    "enabled": True,
+                    "active": True,
+                    "order_id": order_id,
+                    "quantity": quantity,
+                    "stop_price": desired_stop,
+                    "status": status,
+                    "changed": False,
+                }
+
+            if status == "filled":
+                metadata[
+                    "protective_stop_active"
+                ] = False
+                metadata[
+                    "protective_stop_status"
+                ] = "filled"
+                trade.metadata = metadata
+                database.save_managed_trade(
+                    trade_id,
+                    trade,
+                )
+
+                return {
+                    "enabled": True,
+                    "active": False,
+                    "filled": True,
+                    "order_id": order_id,
+                }
+
+        except Exception:
+            logger.exception(
+                "Unable to inspect protective stop | "
+                "trade_id=%s symbol=%s",
+                trade_id,
+                trade.symbol,
+            )
+            raise
+
+        cancel_state = (
+            _cancel_protective_stop(
+                trade_id,
+                trade,
+                execution_engine,
+            )
+        )
+
+        if cancel_state == "FILLED":
+            return {
+                "enabled": True,
+                "active": False,
+                "filled": True,
+                "order_id": order_id,
+            }
+
+    stop_order = (
+        execution_engine
+        .submit_protective_stop(
+            symbol=trade.symbol,
+            quantity=quantity,
+            stop_price=desired_stop,
+        )
+    )
+
+    database.save_broker_order(
+        stop_order
+    )
+
+    metadata = (
+        trade.metadata
+        if isinstance(
+            trade.metadata,
+            dict,
+        )
+        else {}
+    )
+
+    metadata[
+        "protective_stop_order_id"
+    ] = stop_order.order_id
+
+    metadata[
+        "protective_stop_client_order_id"
+    ] = stop_order.client_order_id
+
+    metadata[
+        "protective_stop_quantity"
+    ] = quantity
+
+    metadata[
+        "protective_stop_price"
+    ] = desired_stop
+
+    metadata[
+        "protective_stop_status"
+    ] = stop_order.status.value
+
+    metadata[
+        "protective_stop_active"
+    ] = True
+
+    metadata[
+        "protective_stop_fill_applied"
+    ] = False
+
+    trade.metadata = metadata
+
+    database.save_managed_trade(
+        trade_id,
+        trade,
+    )
+
+    database.log_event(
+        event_type=(
+            "BROKER_PROTECTIVE_STOP_SYNC"
+        ),
+        severity="INFO",
+        message=(
+            f"{trade.symbol}: broker protective "
+            f"stop synced qty={quantity} "
+            f"stop={desired_stop}"
+        ),
+        metadata={
+            "trade_id": trade_id,
+            "symbol": trade.symbol,
+            "quantity": quantity,
+            "stop_price": desired_stop,
+            "order_id": stop_order.order_id,
+        },
+    )
+
+    return {
+        "enabled": True,
+        "active": True,
+        "order_id": stop_order.order_id,
+        "quantity": quantity,
+        "stop_price": desired_stop,
+        "status": stop_order.status.value,
+        "changed": True,
+    }
+
+
+# ============================================================
 # ACTIVE PAPER TRADE MANAGEMENT
 # ============================================================
 
@@ -2221,6 +2653,24 @@ def manage_active_paper_trades() -> int:
                     trade_id,
                     trade,
                 )
+
+                stop_sync = (
+                    _sync_protective_stop(
+                        trade_id,
+                        trade,
+                        execution_engine,
+                    )
+                )
+
+                if stop_sync.get(
+                    "filled",
+                    False,
+                ):
+                    # RecoveryEngine applies the broker fill
+                    # on the next loop before any new action.
+                    managed_count += 1
+                    continue
+
                 managed_count += 1
                 continue
 
@@ -2229,6 +2679,21 @@ def manage_active_paper_trades() -> int:
                     trade_id,
                     trade,
                 )
+                managed_count += 1
+                continue
+
+            protective_cancel = (
+                _cancel_protective_stop(
+                    trade_id,
+                    trade,
+                    execution_engine,
+                )
+            )
+
+            if protective_cancel == "FILLED":
+                # Broker-side protection won the race.
+                # Do not submit a second SELL. RecoveryEngine
+                # will reconcile the stop fill next loop.
                 managed_count += 1
                 continue
 
@@ -2334,6 +2799,15 @@ def manage_active_paper_trades() -> int:
                 trade_id,
                 trade,
             )
+
+            if int(
+                trade.remaining_quantity
+            ) > 0:
+                _sync_protective_stop(
+                    trade_id,
+                    trade,
+                    execution_engine,
+                )
 
             database.log_event(
                 event_type="PAPER_TRADE_MANAGEMENT",

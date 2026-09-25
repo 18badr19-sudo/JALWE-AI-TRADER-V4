@@ -1497,6 +1497,30 @@ def no_trade_diagnostics_text() -> str:
                 or "UNKNOWN"
             )
 
+            market_scanned = int(
+                apex_payload.get(
+                    "market_scanned_count",
+                    0,
+                )
+                or 0
+            )
+
+            market_usable = int(
+                apex_payload.get(
+                    "market_usable_count",
+                    0,
+                )
+                or 0
+            )
+
+            radar_source = str(
+                apex_payload.get(
+                    "radar_source",
+                    "",
+                )
+                or ""
+            )
+
             radar_count = int(
                 apex_payload.get(
                     "radar_count",
@@ -1542,7 +1566,10 @@ def no_trade_diagnostics_text() -> str:
                     "📡 APEX آخر دورة:",
                     f"Session: {session}",
                     f"Status: {status}",
-                    f"Radar: {radar_count}",
+                    f"مصدر الماسح: {radar_source or 'UNKNOWN'}",
+                    f"السوق المفحوص: {market_scanned}",
+                    f"أسهم ببيانات قابلة للترتيب: {market_usable}",
+                    f"Radar النهائي: {radar_count}",
                     f"PreBreakout صالح: {valid_pre}",
                     f"Deep Research: {deep_count}",
                     f"Shortlist: {shortlist_count}",

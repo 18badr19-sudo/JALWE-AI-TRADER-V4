@@ -1034,6 +1034,34 @@ class DecisionEngine:
             bars=bars,
         )
 
+        base_metadata[
+            "trigger_watch"
+        ] = {
+            "state": getattr(
+                trigger.state,
+                "value",
+                str(trigger.state),
+            ),
+            "current_price": (
+                trigger.current_price
+            ),
+            "trigger_price": (
+                trigger.trigger_price
+            ),
+            "stop_price": (
+                trigger.stop_price
+            ),
+            "distance_to_trigger_pct": (
+                trigger.distance_to_trigger_pct
+            ),
+            "chase_pct": (
+                trigger.chase_pct
+            ),
+            "bars_since_breakout": (
+                trigger.bars_since_breakout
+            ),
+        }
+
         gates["trigger"] = bool(trigger.approved_for_entry)
 
         if trigger.state in {

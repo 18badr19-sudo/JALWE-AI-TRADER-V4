@@ -101,7 +101,7 @@ POLL_SECONDS = max(
     int(
         os.getenv(
             "JALWE_RESEARCH_POLL_SECONDS",
-            "60",
+            "15",
         )
     ),
 )
@@ -310,6 +310,8 @@ def load_state() -> dict:
         "processed": {},
 
         "last_notified": {},
+
+        "watching": {},
     }
 
     if not STATE_FILE.exists():
@@ -358,6 +360,18 @@ def load_state() -> dict:
 
             last_notified = {}
 
+        watching = data.get(
+            "watching",
+            {},
+        )
+
+        if not isinstance(
+            watching,
+            dict,
+        ):
+
+            watching = {}
+
         return {
 
             "processed":
@@ -365,6 +379,9 @@ def load_state() -> dict:
 
             "last_notified":
                 last_notified,
+
+            "watching":
+                watching,
         }
 
     except Exception as exc:
@@ -405,6 +422,12 @@ def save_state(
         "last_notified":
             state.get(
                 "last_notified",
+                {},
+            ),
+
+        "watching":
+            state.get(
+                "watching",
                 {},
             ),
     }
@@ -590,6 +613,24 @@ def should_process(
     )
 
     if old_version == version:
+
+        watching = safe_dict(
+            state.get(
+                "watching",
+                {},
+            )
+        )
+
+        if bool(
+            watching.get(
+                symbol,
+                False,
+            )
+        ):
+            return (
+                True,
+                "FAST_TRIGGER_RECHECK",
+            )
 
         return (
             False,
@@ -2563,6 +2604,34 @@ def process_research(
                 decision,
             )
         )
+
+        jalwe_state = str(
+            safe_dict(
+                payload.get(
+                    "jalwe",
+                    {},
+                )
+            ).get(
+                "state",
+                "",
+            )
+            or ""
+        ).upper()
+
+        watching = state.setdefault(
+            "watching",
+            {},
+        )
+
+        if jalwe_state == "WATCHING":
+            watching[
+                symbol
+            ] = True
+        else:
+            watching.pop(
+                symbol,
+                None,
+            )
 
         runtime_controls = (
             load_runtime_controls()

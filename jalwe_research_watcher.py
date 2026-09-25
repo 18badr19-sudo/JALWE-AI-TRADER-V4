@@ -1122,6 +1122,72 @@ def build_telegram_message(
         ),
     ]
 
+    decision_metadata = safe_dict(
+        jalwe.get(
+            "metadata",
+            {},
+        )
+    )
+
+    feature_diagnostics = safe_dict(
+        decision_metadata.get(
+            "feature_diagnostics",
+            {},
+        )
+    )
+
+    if feature_diagnostics:
+        lines.extend(
+            [
+                "",
+                "🧪 فحص بيانات JALWE",
+                (
+                    "Bars: "
+                    f"{feature_diagnostics.get('valid_rows', 0)} "
+                    "/ "
+                    f"{feature_diagnostics.get('required_rows', 0)} "
+                    "مطلوبة"
+                ),
+                (
+                    "آخر شمعة: "
+                    + (
+                        f"{format_number(feature_diagnostics.get('latest_bar_age_minutes'))} دقيقة"
+                        if feature_diagnostics.get(
+                            "latest_bar_age_minutes"
+                        ) is not None
+                        else "N/A"
+                    )
+                ),
+            ]
+        )
+
+        missing_columns = safe_list(
+            feature_diagnostics.get(
+                "missing_columns",
+                [],
+            )
+        )
+
+        if missing_columns:
+            lines.append(
+                "أعمدة ناقصة: "
+                + ", ".join(
+                    str(item)
+                    for item in missing_columns
+                )
+            )
+
+        if not bool(
+            feature_diagnostics.get(
+                "freshness_enforced",
+                False,
+            )
+        ):
+            lines.append(
+                "ملاحظة: الرفض الحالي من جودة البيانات، "
+                "وليس من حد زمني مستقل للشمعة."
+            )
+
     if jalwe.get(
         "strategy"
     ):

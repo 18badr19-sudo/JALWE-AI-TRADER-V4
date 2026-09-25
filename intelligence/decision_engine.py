@@ -198,6 +198,222 @@ class DecisionEngine:
         return output
 
     # ========================================================
+    # SMART MARKET-DATA BACKFILL
+    # ========================================================
+
+    def _smart_backfill_bars(
+        self,
+        symbol: str,
+        timeframe: str,
+        bars: Any,
+        diagnostics: dict[str, Any],
+        bar_limit: int,
+    ) -> tuple[Any, dict[str, Any], Optional[dict[str, Any]]]:
+        """
+        Retry sparse Alpaca history with a wider lookback.
+
+        Safety:
+        - Uses only real Alpaca bars.
+        - Never fabricates/resamples missing candles.
+        - Never lowers FeatureEngine's minimum-row requirement.
+        - Stops after three bounded retries.
+        """
+
+        initial_valid = int(
+            diagnostics.get(
+                "valid_rows",
+                0,
+            )
+            or 0
+        )
+
+        required_rows = int(
+            diagnostics.get(
+                "required_rows",
+                0,
+            )
+            or 0
+        )
+
+        missing_columns = (
+            diagnostics.get(
+                "missing_columns",
+                [],
+            )
+            or []
+        )
+
+        if (
+            required_rows <= 0
+            or initial_valid >= required_rows
+            or missing_columns
+        ):
+            return (
+                bars,
+                diagnostics,
+                None,
+            )
+
+        best_bars = bars
+        best_diagnostics = dict(
+            diagnostics
+        )
+
+        attempts: list[dict[str, Any]] = []
+
+        next_limit = max(
+            int(bar_limit) * 2,
+            1000,
+        )
+
+        max_limit = min(
+            10000,
+            max(
+                int(bar_limit) * 8,
+                4000,
+            ),
+        )
+
+        for _ in range(3):
+            request_limit = min(
+                next_limit,
+                max_limit,
+            )
+
+            if any(
+                int(item.get("limit") or 0)
+                == request_limit
+                for item in attempts
+            ):
+                break
+
+            attempt: dict[str, Any] = {
+                "limit": request_limit,
+                "status": "STARTED",
+            }
+
+            try:
+                candidate_bars = (
+                    self.market_data.get_bars(
+                        symbol,
+                        timeframe,
+                        request_limit,
+                    )
+                )
+
+                candidate_diagnostics = (
+                    self.feature_engine
+                    .diagnose_input(
+                        candidate_bars
+                    )
+                )
+
+                candidate_valid = int(
+                    candidate_diagnostics.get(
+                        "valid_rows",
+                        0,
+                    )
+                    or 0
+                )
+
+                attempt.update(
+                    {
+                        "status": "SUCCESS",
+                        "valid_rows": candidate_valid,
+                    }
+                )
+
+                if candidate_valid > int(
+                    best_diagnostics.get(
+                        "valid_rows",
+                        0,
+                    )
+                    or 0
+                ):
+                    best_bars = (
+                        candidate_bars
+                    )
+                    best_diagnostics = (
+                        candidate_diagnostics
+                    )
+
+                attempts.append(
+                    attempt
+                )
+
+                if candidate_valid >= required_rows:
+                    break
+
+            except Exception as exc:
+                attempt.update(
+                    {
+                        "status": "ERROR",
+                        "error": str(exc)[:300],
+                    }
+                )
+
+                attempts.append(
+                    attempt
+                )
+
+            if request_limit >= max_limit:
+                break
+
+            next_limit = min(
+                request_limit * 2,
+                max_limit,
+            )
+
+        final_valid = int(
+            best_diagnostics.get(
+                "valid_rows",
+                0,
+            )
+            or 0
+        )
+
+        backfill_metadata = {
+            "attempted": bool(
+                attempts
+            ),
+            "succeeded": bool(
+                final_valid >= required_rows
+            ),
+            "initial_valid_rows": (
+                initial_valid
+            ),
+            "final_valid_rows": (
+                final_valid
+            ),
+            "required_rows": (
+                required_rows
+            ),
+            "attempt_count": len(
+                attempts
+            ),
+            "attempts": attempts,
+            "real_bars_only": True,
+            "fabricated_bars": False,
+        }
+
+        logger.info(
+            "Smart backfill | symbol=%s timeframe=%s "
+            "initial=%s final=%s required=%s attempts=%s",
+            symbol,
+            timeframe,
+            initial_valid,
+            final_valid,
+            required_rows,
+            len(attempts),
+        )
+
+        return (
+            best_bars,
+            best_diagnostics,
+            backfill_metadata,
+        )
+
+    # ========================================================
     # EXTERNAL APEX RESEARCH - ADVISORY ONLY
     # ========================================================
 
@@ -460,6 +676,23 @@ class DecisionEngine:
                 bars
             )
         )
+
+        (
+            bars,
+            feature_diagnostics,
+            backfill_metadata,
+        ) = self._smart_backfill_bars(
+            symbol=symbol,
+            timeframe=timeframe,
+            bars=bars,
+            diagnostics=feature_diagnostics,
+            bar_limit=bar_limit,
+        )
+
+        if backfill_metadata is not None:
+            base_metadata[
+                "market_data_backfill"
+            ] = backfill_metadata
 
         try:
             features = self.feature_engine.build(symbol, bars)

@@ -36,4 +36,4 @@ jobs:
           PAPER_TRADING: "true"
           ALLOW_LIVE_TRADING: "false"
         run: |
-          python -m unittest tests.test_paper_safety -v
+          python -m unittest tests.test_paper_safety tests.test_persistence_probe -v

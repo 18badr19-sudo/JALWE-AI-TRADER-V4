@@ -62,6 +62,18 @@ AUTO_RESTART = os.getenv("JALWE_AUTO_RESTART", "true").strip().lower() in {
     "1", "true", "yes", "on"
 }
 
+ERROR_ALERTS_ENABLED = os.getenv(
+    "JALWE_ERROR_ALERTS",
+    "true",
+).strip().lower() in {
+    "1", "true", "yes", "on"
+}
+
+ERROR_ALERT_COOLDOWN_SECONDS = max(
+    60,
+    int(os.getenv("JALWE_ERROR_ALERT_COOLDOWN_SECONDS", "300")),
+)
+
 ORDER_ALERTS_ENABLED = os.getenv(
     "JALWE_ORDER_ALERTS",
     "true",
@@ -95,8 +107,8 @@ NY_TZ = ZoneInfo("America/New_York")
 # TELEGRAM UI
 # ============================================================
 
-BTN_START = "🟢 تشغيل JALWE + APEX"
-BTN_STOP = "🛑 إيقاف JALWE + APEX"
+BTN_START = "🟢 تشغيل الكل"
+BTN_STOP = "🔴 إيقاف الكل"
 BTN_RESTART = "♻️ إعادة تشغيل النظام"
 BTN_STATUS = "📊 حالة النظام"
 
@@ -203,6 +215,8 @@ def load_state() -> dict[str, Any]:
         "last_order_check_epoch": 0.0,
         "last_daily_report_date": "",
         "last_weekly_report_key": "",
+        "last_error_key": "",
+        "last_error_epoch": 0.0,
     }
 
     if not STATE_FILE.exists():
@@ -300,6 +314,56 @@ def send_message(text: str) -> None:
         },
         timeout=20,
     )
+
+
+def notify_error(
+    source: str,
+    details: Any,
+    *,
+    force: bool = False,
+) -> None:
+    if not ERROR_ALERTS_ENABLED:
+        return
+
+    now_epoch = time.time()
+    key = f"{source}:{type(details).__name__}:{details}"
+
+    last_key = str(
+        controller_state.get("last_error_key") or ""
+    )
+    last_epoch = safe_float(
+        controller_state.get("last_error_epoch")
+    ) or 0.0
+
+    if (
+        not force
+        and key == last_key
+        and (
+            now_epoch - last_epoch
+            < ERROR_ALERT_COOLDOWN_SECONDS
+        )
+    ):
+        return
+
+    controller_state["last_error_key"] = key
+    controller_state["last_error_epoch"] = now_epoch
+    save_state(controller_state)
+
+    message = (
+        "⚠️ خطأ في نظام JALWE + APEX\n\n"
+        f"📍 المصدر: {source}\n"
+        f"🧾 التفاصيل: {str(details)[:2500]}\n\n"
+        "سيحاول النظام الاستمرار أو إعادة تشغيل "
+        "الخدمة تلقائيًا إذا كان ذلك ممكنًا."
+    )
+
+    try:
+        send_message(message)
+    except Exception as exc:
+        print(
+            f"Unable to send Telegram error alert: {exc}",
+            flush=True,
+        )
 
 
 # ============================================================
@@ -784,6 +848,10 @@ def poll_filled_order_alerts() -> None:
             f"Filled-order poll failed: {exc}",
             flush=True,
         )
+        notify_error(
+            "مراقبة أوامر Alpaca",
+            exc,
+        )
         save_state(controller_state)
         return
 
@@ -871,6 +939,10 @@ def maybe_send_scheduled_reports() -> None:
                     f"Daily report send failed: {exc}",
                     flush=True,
                 )
+                notify_error(
+                    "التقرير اليومي",
+                    exc,
+                )
 
     # Weekly report: Friday after 16:20 New York.
     if AUTO_WEEKLY_REPORT and now_ny.weekday() == 4:
@@ -895,6 +967,10 @@ def maybe_send_scheduled_reports() -> None:
                 print(
                     f"Weekly report send failed: {exc}",
                     flush=True,
+                )
+                notify_error(
+                    "التقرير الأسبوعي",
+                    exc,
                 )
 
 
@@ -1025,6 +1101,8 @@ def status_text() -> str:
         f"{jalwe.status()}\n\n"
         f"🔔 تنبيهات تنفيذ الصفقات: "
         f"{'مفعلة' if ORDER_ALERTS_ENABLED else 'معطلة'}\n"
+        f"⚠️ تنبيهات أخطاء النظام: "
+        f"{'مفعلة' if ERROR_ALERTS_ENABLED else 'معطلة'}\n"
         "🔒 تنفيذ أوامر التداول من Watcher: معطل"
     )
 
@@ -1055,8 +1133,8 @@ def bridge_text() -> str:
 def help_text() -> str:
     return (
         "ℹ️ أوامر السيرفر\n\n"
-        "/run - تشغيل APEX وJALWE\n"
-        "/stop - إيقاف APEX وJALWE\n"
+        "/run - تشغيل الكل (APEX + JALWE)\n"
+        "/stop - إيقاف الكل (APEX + JALWE)\n"
         "/restart - إعادة تشغيلهما\n"
         "/status - حالة النظام\n"
         "/portfolio - الرصيد والأسهم المفتوحة\n"
@@ -1070,7 +1148,9 @@ def help_text() -> str:
         "🔔 سيرسل البوت تلقائيًا تنبيهًا عند كل "
         "BUY/SELL منفذ على Alpaca PAPER.\n"
         "📅 ويرسل تقريرًا يوميًا بعد إغلاق السوق، "
-        "وتقريرًا أسبوعيًا يوم الجمعة."
+        "وتقريرًا أسبوعيًا يوم الجمعة.\n"
+        "⚠️ وإذا توقف APEX أو JALWE بشكل غير متوقع "
+        "أو فشل اتصال مهم، يرسل تنبيه خطأ على تيليجرام."
     )
 
 
@@ -1125,10 +1205,32 @@ def handle(text: str) -> str:
 
 def monitor_children() -> None:
     for managed in (apex, jalwe):
+        if (
+            managed.desired_running
+            and managed.process is not None
+            and managed.process.poll() is not None
+        ):
+            exit_code = managed.process.returncode
+
+            notify_error(
+                f"{managed.name} توقف بشكل غير متوقع",
+                f"Exit code: {exit_code}",
+                force=True,
+            )
+
         message = managed.restart_if_needed()
 
         if message:
             print(message, flush=True)
+
+            if AUTO_RESTART:
+                try:
+                    send_message(
+                        "♻️ إعادة تشغيل تلقائية\n\n"
+                        f"{message}"
+                    )
+                except Exception:
+                    pass
 
 
 def shutdown(*_: Any) -> None:
@@ -1247,6 +1349,10 @@ def main() -> None:
             print(
                 f"Telegram controller error: {exc}",
                 flush=True,
+            )
+            notify_error(
+                "وحدة تحكم Telegram",
+                exc,
             )
             time.sleep(5)
 

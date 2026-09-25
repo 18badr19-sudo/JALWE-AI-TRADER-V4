@@ -65,6 +65,9 @@ class RiskEngine:
         max_daily_loss_pct: float = 3.0,
         max_open_positions: int = 1,
         max_position_allocation_pct: float = 75.0,
+        allocation_b_pct: float = 50.0,
+        allocation_a_pct: float = 75.0,
+        allocation_a_plus_pct: float = 100.0,
         minimum_signal_score: float = 82.0,
         minimum_price: float = 0.50,
         maximum_price: float = 100.0,
@@ -95,6 +98,18 @@ class RiskEngine:
 
         self.max_position_allocation_pct = float(
             max_position_allocation_pct
+        )
+
+        self.allocation_b_pct = float(
+            allocation_b_pct
+        )
+
+        self.allocation_a_pct = float(
+            allocation_a_pct
+        )
+
+        self.allocation_a_plus_pct = float(
+            allocation_a_plus_pct
         )
 
         self.minimum_signal_score = float(
@@ -379,6 +394,48 @@ class RiskEngine:
         )
 
     # ========================================================
+    # DYNAMIC POSITION ALLOCATION
+    # ========================================================
+
+    def _allocation_pct_for_grade(
+        self,
+        setup_grade: Optional[str],
+    ) -> float:
+        normalized = (
+            str(setup_grade or "")
+            .strip()
+            .upper()
+            .replace(" ", "")
+        )
+
+        if normalized in {
+            "A+",
+            "A_PLUS",
+            "APLUS",
+        }:
+            return min(
+                100.0,
+                self.allocation_a_plus_pct,
+            )
+
+        if normalized == "A":
+            return min(
+                100.0,
+                self.allocation_a_pct,
+            )
+
+        if normalized == "B":
+            return min(
+                100.0,
+                self.allocation_b_pct,
+            )
+
+        return min(
+            100.0,
+            self.max_position_allocation_pct,
+        )
+
+    # ========================================================
     # DAILY LOSS CIRCUIT BREAKER
     # ========================================================
 
@@ -624,6 +681,7 @@ class RiskEngine:
         strategy_equity: float,
         available_cash: float,
         risk_pct: float,
+        allocation_pct: float,
     ) -> tuple[
         int,
         float,
@@ -661,7 +719,7 @@ class RiskEngine:
         max_position_value = (
             strategy_equity
             * (
-                self.max_position_allocation_pct
+                allocation_pct
                 / 100.0
             )
         )
@@ -1231,6 +1289,12 @@ class RiskEngine:
         # POSITION SIZE
         # ====================================================
 
+        allocation_pct = (
+            self._allocation_pct_for_grade(
+                setup_grade
+            )
+        )
+
         (
             quantity,
             actual_risk,
@@ -1249,6 +1313,10 @@ class RiskEngine:
 
             risk_pct=(
                 selected_risk_pct
+            ),
+
+            allocation_pct=(
+                allocation_pct
             ),
         )
 
@@ -1269,7 +1337,7 @@ class RiskEngine:
                 ),
 
                 max_position_allocation_pct=(
-                    self.max_position_allocation_pct
+                    allocation_pct
                 ),
             )
 
@@ -1438,7 +1506,11 @@ class RiskEngine:
                 ),
 
                 "max_position_allocation_pct": (
-                    self.max_position_allocation_pct
+                    allocation_pct
+                ),
+
+                "allocation_model": (
+                    "B=50%,A=75%,A+=100%"
                 ),
 
                 "stop_source": (
@@ -1492,6 +1564,15 @@ def get_risk_engine() -> RiskEngine:
             ),
             max_position_allocation_pct=(
                 settings.MAX_POSITION_ALLOCATION_PCT
+            ),
+            allocation_b_pct=(
+                settings.ALLOCATION_B_PCT
+            ),
+            allocation_a_pct=(
+                settings.ALLOCATION_A_PCT
+            ),
+            allocation_a_plus_pct=(
+                settings.ALLOCATION_A_PLUS_PCT
             ),
             minimum_signal_score=(
                 settings.MIN_SIGNAL_SCORE

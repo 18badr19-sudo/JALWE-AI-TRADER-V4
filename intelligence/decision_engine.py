@@ -997,9 +997,40 @@ class DecisionEngine:
         # 10. TRIGGER
         # ====================================================
 
+        trigger_current_price = (
+            session.current_price
+        )
+
+        try:
+            live_last_price = float(
+                self.market_data.get_last_price(
+                    symbol
+                )
+            )
+
+            if live_last_price > 0:
+                trigger_current_price = (
+                    live_last_price
+                )
+
+                base_metadata[
+                    "trigger_price_source"
+                ] = "ALPACA_LAST_PRICE"
+
+        except Exception as exc:
+            warnings.append(
+                "Latest-price trigger refresh failed; "
+                "using session price: "
+                + str(exc)
+            )
+
+            base_metadata[
+                "trigger_price_source"
+            ] = "SESSION_PRICE_FALLBACK"
+
         trigger = self.trigger_engine.evaluate(
             session_strategy,
-            current_price=session.current_price,
+            current_price=trigger_current_price,
             bars=bars,
         )
 

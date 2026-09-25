@@ -425,7 +425,32 @@ class Settings:
     MAX_PORTFOLIO_EXPOSURE_PCT: float = (
         _get_float(
             "MAX_PORTFOLIO_EXPOSURE_PCT",
+            100.0,
+        )
+    )
+
+    # ========================================================
+    # DYNAMIC CAPITAL ALLOCATION BY SETUP GRADE
+    # ========================================================
+
+    ALLOCATION_B_PCT: float = (
+        _get_float(
+            "ALLOCATION_B_PCT",
+            50.0,
+        )
+    )
+
+    ALLOCATION_A_PCT: float = (
+        _get_float(
+            "ALLOCATION_A_PCT",
             75.0,
+        )
+    )
+
+    ALLOCATION_A_PLUS_PCT: float = (
+        _get_float(
+            "ALLOCATION_A_PLUS_PCT",
+            100.0,
         )
     )
 
@@ -1005,6 +1030,33 @@ def validate_settings() -> None:
         errors.append(
             "MAX_POSITION_ALLOCATION_PCT cannot exceed "
             "MAX_PORTFOLIO_EXPOSURE_PCT."
+        )
+
+    allocation_values = (
+        settings.ALLOCATION_B_PCT,
+        settings.ALLOCATION_A_PCT,
+        settings.ALLOCATION_A_PLUS_PCT,
+    )
+
+    for value in allocation_values:
+        if not (
+            0
+            < value
+            <= settings.MAX_PORTFOLIO_EXPOSURE_PCT
+        ):
+            errors.append(
+                "Dynamic allocation percentages must be > 0 "
+                "and <= MAX_PORTFOLIO_EXPOSURE_PCT."
+            )
+            break
+
+    if not (
+        settings.ALLOCATION_B_PCT
+        <= settings.ALLOCATION_A_PCT
+        <= settings.ALLOCATION_A_PLUS_PCT
+    ):
+        errors.append(
+            "Dynamic allocation must follow B <= A <= A+."
         )
 
     # ========================================================

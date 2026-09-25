@@ -616,6 +616,15 @@ class AlpacaClient:
                 "Stop price must be positive."
             )
 
+        # Alpaca equity stop-price precision:
+        # >= $1: 2 decimals, < $1: 4 decimals.
+        stop_price = round(
+            stop_price,
+            2
+            if stop_price >= 1.0
+            else 4,
+        )
+
         normalized_client_order_id = None
 
         if client_order_id is not None:

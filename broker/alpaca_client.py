@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import json
 import logging
+import urllib.parse
+import urllib.request
+
 from typing import Any, Optional
 
 from alpaca.trading.client import TradingClient
@@ -147,10 +151,22 @@ class AlpacaClient:
             self.get_account()
         )
 
+        last_equity_raw = getattr(
+            account,
+            "last_equity",
+            None,
+        )
+
         return {
 
             "equity": float(
                 account.equity
+            ),
+
+            "last_equity": (
+                float(last_equity_raw)
+                if last_equity_raw is not None
+                else float(account.equity)
             ),
 
             "cash": float(
@@ -165,6 +181,121 @@ class AlpacaClient:
                 account.portfolio_value
             ),
         }
+
+    # ========================================================
+    # CASH TRANSFER ACTIVITIES
+    # ========================================================
+
+    def get_cash_transfer_activities(
+        self,
+        *,
+        after: Optional[str] = None,
+        until: Optional[str] = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """
+        Read Alpaca PAPER cash deposits/withdrawals.
+
+        CSD = cash deposit / inbound cash.
+        CSW = cash withdrawal / outbound cash.
+
+        This is read-only and is used only so the risk engine
+        can distinguish capital flows from trading PnL.
+        """
+
+        page_size = max(
+            1,
+            min(
+                int(limit),
+                100,
+            ),
+        )
+
+        params = {
+            "activity_types": "CSD,CSW",
+            "direction": "asc",
+            "page_size": page_size,
+        }
+
+        if after:
+            params["after"] = str(after)
+
+        if until:
+            params["until"] = str(until)
+
+        query = urllib.parse.urlencode(
+            params
+        )
+
+        url = (
+            str(
+                settings.ALPACA_BASE_URL
+            ).rstrip("/")
+            + "/v2/account/activities?"
+            + query
+        )
+
+        request = urllib.request.Request(
+            url,
+            headers={
+                "APCA-API-KEY-ID": (
+                    settings.ALPACA_API_KEY
+                ),
+                "APCA-API-SECRET-KEY": (
+                    settings.ALPACA_SECRET_KEY
+                ),
+                "Accept": "application/json",
+            },
+            method="GET",
+        )
+
+        with urllib.request.urlopen(
+            request,
+            timeout=20,
+        ) as response:
+            payload = json.loads(
+                response.read().decode(
+                    "utf-8",
+                    errors="replace",
+                )
+            )
+
+        if not isinstance(
+            payload,
+            list,
+        ):
+            raise RuntimeError(
+                "Unexpected Alpaca activity response."
+            )
+
+        result: list[dict[str, Any]] = []
+
+        for item in payload:
+            if not isinstance(
+                item,
+                dict,
+            ):
+                continue
+
+            activity_type = str(
+                item.get(
+                    "activity_type",
+                    "",
+                )
+                or ""
+            ).upper()
+
+            if activity_type not in {
+                "CSD",
+                "CSW",
+            }:
+                continue
+
+            result.append(
+                item
+            )
+
+        return result
 
     # ========================================================
     # MARKET CLOCK

@@ -228,6 +228,23 @@ class Settings:
         )
     )
 
+    # Source of truth for position sizing.
+    #
+    # broker_equity:
+    #   Use the current Alpaca PAPER account equity. Profits,
+    #   losses, deposits and withdrawals automatically change
+    #   the capital available to JALWE.
+    #
+    # virtual:
+    #   Legacy isolated balance = starting capital + JALWE
+    #   realized PnL ledger.
+    CAPITAL_MODE: str = (
+        _get_str(
+            "JALWE_CAPITAL_MODE",
+            "broker_equity",
+        ).lower()
+    )
+
     # ========================================================
     # ALPACA
     # ========================================================
@@ -913,6 +930,15 @@ def validate_settings() -> None:
     ):
         errors.append(
             "JALWE_STARTING_CAPITAL must be greater than zero."
+        )
+
+    if settings.CAPITAL_MODE not in {
+        "broker_equity",
+        "virtual",
+    }:
+        errors.append(
+            "JALWE_CAPITAL_MODE must be "
+            "broker_equity or virtual."
         )
 
     # ========================================================

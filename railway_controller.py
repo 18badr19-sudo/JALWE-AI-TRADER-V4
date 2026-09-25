@@ -1457,16 +1457,15 @@ def bridge_text() -> str:
             get_external_research_bridge,
         )
 
-        health = (
-            get_external_research_bridge()
-            .health_check()
-        )
+        bridge = get_external_research_bridge()
+        health = bridge.health_details()
+        report_count = bridge.count_latest()
 
         return (
             "📡 حالة الربط\n\n"
-            f"OK: {health.get('ok')}\n"
+            f"OK: {health.get('healthy')}\n"
             f"Backend: {health.get('backend')}\n"
-            f"Reports: {health.get('latest_research_count')}\n"
+            f"Reports: {report_count}\n"
             "Execution authority: "
             f"{health.get('execution_authority', False)}"
         )

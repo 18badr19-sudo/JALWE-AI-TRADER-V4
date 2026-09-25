@@ -962,6 +962,33 @@ def print_cycle(
     )
 
     print(
+        "MARKET SCANNED:",
+        getattr(
+            cycle,
+            "market_scanned_count",
+            0,
+        ),
+    )
+
+    print(
+        "MARKET USABLE:",
+        getattr(
+            cycle,
+            "market_usable_count",
+            0,
+        ),
+    )
+
+    print(
+        "RADAR SOURCE:",
+        getattr(
+            cycle,
+            "radar_source",
+            "",
+        ),
+    )
+
+    print(
         "RADAR:",
         cycle.radar_count,
     )
@@ -1125,6 +1152,30 @@ def save_cycle_diagnostics(
             cycle,
             "status",
             "UNKNOWN",
+        ),
+        "market_scanned_count": int(
+            getattr(
+                cycle,
+                "market_scanned_count",
+                0,
+            )
+            or 0
+        ),
+        "market_usable_count": int(
+            getattr(
+                cycle,
+                "market_usable_count",
+                0,
+            )
+            or 0
+        ),
+        "radar_source": str(
+            getattr(
+                cycle,
+                "radar_source",
+                "",
+            )
+            or ""
         ),
         "radar_count": int(
             getattr(

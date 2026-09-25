@@ -6,6 +6,7 @@ import math
 from typing import Optional
 
 from broker.alpaca_client import get_alpaca_client
+from core.config import settings
 
 from core.models import (
     FeatureSnapshot,
@@ -1473,6 +1474,37 @@ def get_risk_engine() -> RiskEngine:
 
     if risk_engine is None:
 
-        risk_engine = RiskEngine()
+        risk_engine = RiskEngine(
+            strategy_starting_capital=(
+                settings.STRATEGY_STARTING_CAPITAL
+            ),
+            default_risk_pct=(
+                settings.RISK_PER_TRADE_PCT
+            ),
+            maximum_risk_pct=(
+                settings.MAX_RISK_PER_TRADE_PCT
+            ),
+            max_daily_loss_pct=(
+                settings.MAX_DAILY_LOSS_PCT
+            ),
+            max_open_positions=(
+                settings.MAX_OPEN_POSITIONS
+            ),
+            max_position_allocation_pct=(
+                settings.MAX_POSITION_ALLOCATION_PCT
+            ),
+            minimum_signal_score=(
+                settings.MIN_SIGNAL_SCORE
+            ),
+            minimum_price=(
+                settings.MIN_STOCK_PRICE
+            ),
+            maximum_price=(
+                settings.MAX_STOCK_PRICE
+            ),
+            atr_stop_multiplier=(
+                settings.DEFAULT_STOP_ATR_MULTIPLIER
+            ),
+        )
 
     return risk_engine

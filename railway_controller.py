@@ -10,7 +10,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
@@ -20,6 +20,8 @@ from core.runtime_controls import (
     request_emergency_close,
     set_new_entries_allowed,
 )
+from core.config import settings
+from core.database import database
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -670,137 +672,338 @@ def portfolio_text() -> str:
     return "\n".join(lines)
 
 
-def daily_report_text() -> str:
-    try:
-        account = get_account()
-        history = get_portfolio_history(
-            "1D",
-            "5Min",
+def _strategy_report_snapshot(
+    since_ny: datetime,
+) -> dict[str, Any]:
+    if since_ny.tzinfo is None:
+        since_ny = since_ny.replace(
+            tzinfo=NY_TZ
         )
-    except Exception as exc:
-        return f"📅 تعذر حساب تقرير اليوم:\n{exc}"
 
-    profit_loss = history.get("profit_loss") or []
-    profit_loss_pct = history.get("profit_loss_pct") or []
+    since_utc = (
+        since_ny
+        .astimezone(timezone.utc)
+        .isoformat()
+    )
 
-    pnl = (
-        safe_float(profit_loss[-1])
-        if profit_loss
+    starting_capital = float(
+        settings.STRATEGY_STARTING_CAPITAL
+    )
+
+    total_realized = (
+        database
+        .get_strategy_realized_pnl_total()
+    )
+
+    period_realized = (
+        database
+        .get_strategy_realized_pnl_since(
+            since_utc
+        )
+    )
+
+    strategy_equity = (
+        starting_capital
+        + total_realized
+    )
+
+    period_start_equity = (
+        strategy_equity
+        - period_realized
+    )
+
+    period_pct = (
+        period_realized
+        / period_start_equity
+        if period_start_equity > 0
         else None
     )
 
-    pnl_pct = (
-        safe_float(profit_loss_pct[-1])
-        if profit_loss_pct
-        else None
+    active_managed = (
+        database
+        .get_active_managed_trade_rows()
     )
 
-    if pnl is None:
-        equity = safe_float(account.get("equity"))
-        last_equity = safe_float(account.get("last_equity"))
+    with database.connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                trade_id,
+                realized_pnl,
+                event_time
+            FROM strategy_pnl_ledger
+            WHERE event_time >= ?
+            ORDER BY event_time ASC
+            """,
+            (
+                since_utc,
+            ),
+        ).fetchall()
 
-        if (
-            equity is not None
-            and last_equity is not None
-        ):
-            pnl = equity - last_equity
+    period_events = [
+        dict(row)
+        for row in rows
+    ]
 
-            if last_equity:
-                pnl_pct = pnl / last_equity
+    trade_totals: dict[str, float] = {}
 
-    label = (
-        "ربح"
-        if (pnl or 0.0) > 0
-        else "خسارة"
-        if (pnl or 0.0) < 0
-        else "تعادل"
-    )
+    for row in period_events:
+        trade_id = str(
+            row.get("trade_id")
+            or ""
+        ).strip()
 
-    return (
-        "📅 تقرير اليوم — Alpaca PAPER\n\n"
-        f"💰 قيمة الحساب: {money(account.get('equity'))}\n"
-        f"💵 الكاش: {money(account.get('cash'))}\n"
-        f"📈 النتيجة: {label}\n"
-        f"💲 ربح/خسارة اليوم: {money(pnl)}\n"
-        f"📊 النسبة: {pct(pnl_pct, fraction=True)}"
-    )
+        if not trade_id:
+            continue
 
-
-def weekly_report_text() -> str:
-    try:
-        account = get_account()
-        history = get_portfolio_history(
-            "1W",
-            "1D",
+        trade_totals[trade_id] = (
+            trade_totals.get(
+                trade_id,
+                0.0,
+            )
+            + float(
+                row.get("realized_pnl")
+                or 0.0
+            )
         )
-    except Exception as exc:
-        return f"📆 تعذر حساب تقرير الأسبوع:\n{exc}"
 
-    cumulative = [
-        safe_float(value)
-        for value in (history.get("profit_loss") or [])
-    ]
-    cumulative = [
-        value
-        for value in cumulative
-        if value is not None
-    ]
+    winning_trades = sum(
+        1
+        for value in trade_totals.values()
+        if value > 0
+    )
 
-    pct_values = [
-        safe_float(value)
-        for value in (history.get("profit_loss_pct") or [])
-    ]
-    pct_values = [
-        value
-        for value in pct_values
-        if value is not None
-    ]
-
-    weekly_net = cumulative[-1] if cumulative else 0.0
-    weekly_pct = pct_values[-1] if pct_values else None
-
-    day_changes: list[float] = []
-    previous = 0.0
-
-    for value in cumulative:
-        day_changes.append(value - previous)
-        previous = value
+    losing_trades = sum(
+        1
+        for value in trade_totals.values()
+        if value < 0
+    )
 
     gross_gain = sum(
         value
-        for value in day_changes
+        for value in trade_totals.values()
         if value > 0
     )
 
     gross_loss = abs(
         sum(
             value
-            for value in day_changes
+            for value in trade_totals.values()
             if value < 0
         )
     )
 
-    winning_days = sum(
-        1
-        for value in day_changes
-        if value > 0
+    return {
+        "starting_capital": starting_capital,
+        "strategy_equity": strategy_equity,
+        "period_realized": period_realized,
+        "period_pct": period_pct,
+        "open_trades": len(
+            active_managed
+        ),
+        "trade_count": len(
+            trade_totals
+        ),
+        "winning_trades": winning_trades,
+        "losing_trades": losing_trades,
+        "gross_gain": gross_gain,
+        "gross_loss": gross_loss,
+    }
+
+
+def daily_report_text() -> str:
+    now_ny = datetime.now(
+        NY_TZ
     )
 
-    losing_days = sum(
-        1
-        for value in day_changes
-        if value < 0
+    day_start = now_ny.replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
     )
 
-    return (
-        "📆 تقرير الأسبوع — Alpaca PAPER\n\n"
-        f"💰 قيمة الحساب الآن: {money(account.get('equity'))}\n"
-        f"📈 صافي الأسبوع: {money(weekly_net)}\n"
-        f"📊 نسبة الأسبوع: {pct(weekly_pct, fraction=True)}\n"
-        f"✅ مجموع الأيام الرابحة: {money(gross_gain)}\n"
-        f"❌ مجموع الأيام الخاسرة: {money(gross_loss)}\n"
-        f"🟢 أيام رابحة: {winning_days}\n"
-        f"🔴 أيام خاسرة: {losing_days}"
+    try:
+        strategy = (
+            _strategy_report_snapshot(
+                day_start
+            )
+        )
+    except Exception as exc:
+        return (
+            "📅 تعذر حساب تقرير JALWE اليومي:\n"
+            f"{exc}"
+        )
+
+    try:
+        account = get_account()
+        account_lines = [
+            "",
+            "🏦 Alpaca PAPER Account",
+            (
+                "Equity: "
+                f"{money(account.get('equity'))}"
+            ),
+            (
+                "Cash: "
+                f"{money(account.get('cash'))}"
+            ),
+        ]
+    except Exception as exc:
+        account_lines = [
+            "",
+            "🏦 Alpaca PAPER Account",
+            f"تعذر القراءة: {exc}",
+        ]
+
+    realized = float(
+        strategy["period_realized"]
+    )
+
+    label = (
+        "ربح"
+        if realized > 0
+        else "خسارة"
+        if realized < 0
+        else "تعادل"
+    )
+
+    lines = [
+        "📅 تقرير اليوم — JALWE PAPER",
+        "",
+        (
+            "💼 رأس مال الاستراتيجية: "
+            f"{money(strategy['starting_capital'])}"
+        ),
+        (
+            "💰 قيمة الاستراتيجية الحالية: "
+            f"{money(strategy['strategy_equity'])}"
+        ),
+        f"📈 النتيجة: {label}",
+        (
+            "💲 الربح/الخسارة المحققة اليوم: "
+            f"{money(realized)}"
+        ),
+        (
+            "📊 نسبة اليوم: "
+            f"{pct(strategy['period_pct'], fraction=True)}"
+        ),
+        (
+            "📂 صفقات JALWE المفتوحة: "
+            f"{strategy['open_trades']}"
+        ),
+        (
+            "🧾 صفقات لها PnL محقق اليوم: "
+            f"{strategy['trade_count']}"
+        ),
+    ]
+
+    lines.extend(
+        account_lines
+    )
+
+    return "\n".join(
+        lines
+    )
+
+
+def weekly_report_text() -> str:
+    now_ny = datetime.now(
+        NY_TZ
+    )
+
+    week_start = (
+        now_ny
+        - timedelta(
+            days=now_ny.weekday()
+        )
+    ).replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+
+    try:
+        strategy = (
+            _strategy_report_snapshot(
+                week_start
+            )
+        )
+    except Exception as exc:
+        return (
+            "📆 تعذر حساب تقرير JALWE الأسبوعي:\n"
+            f"{exc}"
+        )
+
+    try:
+        account = get_account()
+        account_lines = [
+            "",
+            "🏦 Alpaca PAPER Account",
+            (
+                "Equity: "
+                f"{money(account.get('equity'))}"
+            ),
+            (
+                "Cash: "
+                f"{money(account.get('cash'))}"
+            ),
+        ]
+    except Exception as exc:
+        account_lines = [
+            "",
+            "🏦 Alpaca PAPER Account",
+            f"تعذر القراءة: {exc}",
+        ]
+
+    lines = [
+        "📆 تقرير الأسبوع — JALWE PAPER",
+        "",
+        (
+            "💼 رأس مال الاستراتيجية: "
+            f"{money(strategy['starting_capital'])}"
+        ),
+        (
+            "💰 قيمة الاستراتيجية الحالية: "
+            f"{money(strategy['strategy_equity'])}"
+        ),
+        (
+            "📈 صافي الأسبوع المحقق: "
+            f"{money(strategy['period_realized'])}"
+        ),
+        (
+            "📊 نسبة الأسبوع: "
+            f"{pct(strategy['period_pct'], fraction=True)}"
+        ),
+        (
+            "✅ أرباح الصفقات: "
+            f"{money(strategy['gross_gain'])}"
+        ),
+        (
+            "❌ خسائر الصفقات: "
+            f"{money(strategy['gross_loss'])}"
+        ),
+        (
+            "🟢 صفقات رابحة: "
+            f"{strategy['winning_trades']}"
+        ),
+        (
+            "🔴 صفقات خاسرة: "
+            f"{strategy['losing_trades']}"
+        ),
+        (
+            "📂 صفقات JALWE المفتوحة: "
+            f"{strategy['open_trades']}"
+        ),
+    ]
+
+    lines.extend(
+        account_lines
+    )
+
+    return "\n".join(
+        lines
     )
 
 

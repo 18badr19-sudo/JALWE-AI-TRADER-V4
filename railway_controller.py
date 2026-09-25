@@ -95,6 +95,23 @@ AUTO_WEEKLY_REPORT = os.getenv(
     "1", "true", "yes", "on"
 }
 
+AUTO_LEARNING = os.getenv(
+    "JALWE_LEARNING_ENABLED",
+    "true",
+).strip().lower() in {
+    "1", "true", "yes", "on"
+}
+
+LEARNING_INTERVAL_SECONDS = max(
+    900,
+    int(
+        os.getenv(
+            "JALWE_LEARNING_INTERVAL_SECONDS",
+            "3600",
+        )
+    ),
+)
+
 ORDER_ALERT_POLL_SECONDS = max(
     10,
     int(os.getenv("JALWE_ORDER_ALERT_POLL_SECONDS", "15")),
@@ -116,6 +133,8 @@ BTN_PORTFOLIO = "💼 محفظتي"
 BTN_TODAY = "📅 ربح اليوم"
 BTN_WEEK = "📆 تقرير الأسبوع"
 BTN_TRADES = "🧾 آخر الصفقات"
+BTN_LEARNING = "🧠 حالة التعلم"
+BTN_LEARN_NOW = "🎓 تعلم الآن"
 
 BTN_APEX_ON = "🧠 تشغيل APEX"
 BTN_APEX_OFF = "⛔ إيقاف APEX"
@@ -131,6 +150,7 @@ KEYBOARD = {
         [{"text": BTN_RESTART}, {"text": BTN_STATUS}],
         [{"text": BTN_PORTFOLIO}, {"text": BTN_TODAY}],
         [{"text": BTN_WEEK}, {"text": BTN_TRADES}],
+        [{"text": BTN_LEARNING}, {"text": BTN_LEARN_NOW}],
         [{"text": BTN_APEX_ON}, {"text": BTN_APEX_OFF}],
         [{"text": BTN_JALWE_ON}, {"text": BTN_JALWE_OFF}],
         [{"text": BTN_BRIDGE}, {"text": BTN_HELP}],
@@ -215,6 +235,7 @@ def load_state() -> dict[str, Any]:
         "last_order_check_epoch": 0.0,
         "last_daily_report_date": "",
         "last_weekly_report_key": "",
+        "last_learning_epoch": 0.0,
         "last_error_key": "",
         "last_error_epoch": 0.0,
     }
@@ -975,6 +996,156 @@ def maybe_send_scheduled_reports() -> None:
 
 
 # ============================================================
+# LEARNING ENGINE CONTROL
+# ============================================================
+
+def learning_status_text() -> str:
+    try:
+        from intelligence.learning_engine import (
+            get_learning_engine,
+        )
+
+        status = get_learning_engine().status()
+    except Exception as exc:
+        return f"🧠 تعذر قراءة حالة التعلم:\n{exc}"
+
+    active = bool(status.get("active"))
+    enabled = bool(status.get("enabled"))
+    eligible = int(status.get("eligible_trades") or 0)
+    minimum = int(status.get("minimum_trades") or 0)
+    max_adjustment = status.get("max_adjustment_pct")
+
+    weights = status.get("weights") or []
+    changed = [
+        item
+        for item in weights
+        if abs(
+            float(item.get("multiplier") or 1.0)
+            - 1.0
+        ) >= 0.0025
+    ]
+
+    lines = [
+        "🧠 JALWE Learning Engine V1",
+        "",
+        f"الحالة: {'🟢 نشط' if active else '🟡 ينتظر بيانات'}",
+        f"التعلم مفعّل: {'نعم' if enabled else 'لا'}",
+        f"الصفقات المؤهلة: {eligible}/{minimum}",
+        f"أقصى تعديل للعوامل: ±{max_adjustment}%",
+        f"العوامل المعدلة حاليًا: {len(changed)}",
+    ]
+
+    if changed:
+        lines.extend(["", "📚 أهم الأوزان المتعلمة:"])
+
+        for item in changed[:8]:
+            multiplier = float(
+                item.get("multiplier") or 1.0
+            )
+            delta = (
+                multiplier - 1.0
+            ) * 100.0
+            lines.append(
+                f"• {item.get('factor')}: "
+                f"{delta:+.1f}% "
+                f"(عينات {item.get('samples')})"
+            )
+
+    if not active:
+        lines.extend(
+            [
+                "",
+                "لن يغيّر أوزان التحليل حتى يجمع "
+                f"{minimum} صفقة PAPER مغلقة ومؤهلة.",
+            ]
+        )
+
+    return "\n".join(lines)
+
+
+def run_learning_now_text() -> str:
+    try:
+        from intelligence.learning_engine import (
+            get_learning_engine,
+        )
+
+        result = (
+            get_learning_engine()
+            .run_learning_cycle()
+        )
+    except Exception as exc:
+        notify_error(
+            "Learning Engine",
+            exc,
+        )
+        return f"🎓 فشل تشغيل دورة التعلم:\n{exc}"
+
+    active = bool(result.get("learning_active"))
+    eligible = int(result.get("eligible_trades") or 0)
+    minimum = int(result.get("minimum_trades") or 0)
+    changed = int(result.get("changed_factors") or 0)
+
+    return (
+        "🎓 اكتملت دورة التعلم\n\n"
+        f"الحالة: {'🟢 تعلم فعلي' if active else '🟡 جمع بيانات'}\n"
+        f"الصفقات المؤهلة: {eligible}/{minimum}\n"
+        f"العوامل التي تغيرت: {changed}\n"
+        "🔒 التعديلات محكومة بحدود أمان ولا تغيّر الكود."
+    )
+
+
+def maybe_run_learning_cycle() -> None:
+    if not AUTO_LEARNING:
+        return
+
+    now_epoch = time.time()
+    last_epoch = safe_float(
+        controller_state.get(
+            "last_learning_epoch"
+        )
+    ) or 0.0
+
+    if (
+        now_epoch - last_epoch
+        < LEARNING_INTERVAL_SECONDS
+    ):
+        return
+
+    controller_state[
+        "last_learning_epoch"
+    ] = now_epoch
+    save_state(controller_state)
+
+    try:
+        from intelligence.learning_engine import (
+            get_learning_engine,
+        )
+
+        result = (
+            get_learning_engine()
+            .run_learning_cycle()
+        )
+
+        print(
+            "Learning cycle | "
+            f"active={result.get('learning_active')} "
+            f"eligible={result.get('eligible_trades')} "
+            f"changed={result.get('changed_factors')}",
+            flush=True,
+        )
+
+    except Exception as exc:
+        print(
+            f"Learning cycle failed: {exc}",
+            flush=True,
+        )
+        notify_error(
+            "Learning Engine",
+            exc,
+        )
+
+
+# ============================================================
 # MANAGED CHILD PROCESSES
 # ============================================================
 
@@ -1103,6 +1274,8 @@ def status_text() -> str:
         f"{'مفعلة' if ORDER_ALERTS_ENABLED else 'معطلة'}\n"
         f"⚠️ تنبيهات أخطاء النظام: "
         f"{'مفعلة' if ERROR_ALERTS_ENABLED else 'معطلة'}\n"
+        f"🧠 التعلم الذاتي: "
+        f"{'مفعّل' if AUTO_LEARNING else 'معطّل'}\n"
         "🔒 تنفيذ أوامر التداول من Watcher: معطل"
     )
 
@@ -1141,6 +1314,8 @@ def help_text() -> str:
         "/today - ربح/خسارة اليوم\n"
         "/week - تقرير الأسبوع\n"
         "/trades - آخر الأوامر المنفذة\n"
+        "/learning - حالة التعلم الذاتي\n"
+        "/learn_now - تشغيل دورة تعلم الآن\n"
         "/apex_on /apex_off\n"
         "/jalwe_on /jalwe_off\n"
         "/bridge - فحص الربط\n"
@@ -1181,6 +1356,12 @@ def handle(text: str) -> str:
 
     if cmd == BTN_TRADES or low == "/trades":
         return recent_trades_text()
+
+    if cmd == BTN_LEARNING or low == "/learning":
+        return learning_status_text()
+
+    if cmd == BTN_LEARN_NOW or low == "/learn_now":
+        return run_learning_now_text()
 
     if cmd == BTN_APEX_ON or low == "/apex_on":
         return apex.start()
@@ -1298,6 +1479,7 @@ def main() -> None:
         monitor_children()
         poll_filled_order_alerts()
         maybe_send_scheduled_reports()
+        maybe_run_learning_cycle()
 
         try:
             updates = tg_call(

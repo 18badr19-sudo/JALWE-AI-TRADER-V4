@@ -136,6 +136,21 @@ WATCHING_UPDATE_SECONDS = max(
     ),
 )
 
+LIFECYCLE_ALERTS_ENABLED = (
+    os.getenv(
+        "JALWE_LIFECYCLE_ALERTS",
+        "true",
+    )
+    .strip()
+    .lower()
+    in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+)
+
 
 # ============================================================
 # TELEGRAM
@@ -324,6 +339,8 @@ def load_state() -> dict:
         "watching": {},
 
         "last_watch_update": {},
+
+        "lifecycle_events": {},
     }
 
     if not STATE_FILE.exists():
@@ -396,6 +413,18 @@ def load_state() -> dict:
 
             last_watch_update = {}
 
+        lifecycle_events = data.get(
+            "lifecycle_events",
+            {},
+        )
+
+        if not isinstance(
+            lifecycle_events,
+            dict,
+        ):
+
+            lifecycle_events = {}
+
         return {
 
             "processed":
@@ -409,6 +438,9 @@ def load_state() -> dict:
 
             "last_watch_update":
                 last_watch_update,
+
+            "lifecycle_events":
+                lifecycle_events,
         }
 
     except Exception as exc:
@@ -461,6 +493,12 @@ def save_state(
         "last_watch_update":
             state.get(
                 "last_watch_update",
+                {},
+            ),
+
+        "lifecycle_events":
+            state.get(
+                "lifecycle_events",
                 {},
             ),
     }
@@ -1928,6 +1966,622 @@ def notify_if_changed(
 
 
 # ============================================================
+# PAPER LIFECYCLE TELEGRAM ALERTS
+# ============================================================
+
+def _strategy_equity_for_alert() -> float:
+    realized = (
+        database
+        .get_strategy_realized_pnl_total()
+    )
+
+    adjustments = 0.0
+
+    if str(
+        getattr(
+            settings,
+            "CAPITAL_MODE",
+            "strategy_wallet",
+        )
+        or "strategy_wallet"
+    ).strip().lower() == "strategy_wallet":
+        adjustments = (
+            database
+            .get_strategy_capital_adjustment_total()
+        )
+
+    return float(
+        settings.STRATEGY_STARTING_CAPITAL
+    ) + float(
+        adjustments
+    ) + float(
+        realized
+    )
+
+
+def send_lifecycle_once(
+    state: dict,
+    event_key: str,
+    message: str,
+) -> str:
+    if not LIFECYCLE_ALERTS_ENABLED:
+        return "LIFECYCLE_ALERTS_DISABLED"
+
+    event_key = str(
+        event_key or ""
+    ).strip()
+
+    if not event_key:
+        return "EMPTY_EVENT_KEY"
+
+    lifecycle_events = state.setdefault(
+        "lifecycle_events",
+        {},
+    )
+
+    if event_key in lifecycle_events:
+        return "ALREADY_SENT"
+
+    success, error = send_telegram(
+        message
+    )
+
+    if not success:
+        if error == "TELEGRAM_NOT_CONFIGURED":
+            return "TELEGRAM_NOT_CONFIGURED"
+
+        logger.warning(
+            "Lifecycle Telegram alert failed | "
+            "event=%s error=%s",
+            event_key,
+            error,
+        )
+
+        return "FAILED"
+
+    lifecycle_events[
+        event_key
+    ] = utc_now_iso()
+
+    if len(
+        lifecycle_events
+    ) > 500:
+        items = list(
+            lifecycle_events.items()
+        )[-500:]
+
+        state[
+            "lifecycle_events"
+        ] = dict(
+            items
+        )
+
+    save_state(
+        state
+    )
+
+    return "SENT"
+
+
+def _managed_trade_snapshot(
+    managed_trade_id: Optional[str],
+) -> Optional[Any]:
+    trade_id = str(
+        managed_trade_id or ""
+    ).strip()
+
+    if not trade_id:
+        return None
+
+    try:
+        return database.load_managed_trade(
+            trade_id
+        )
+    except Exception:
+        logger.exception(
+            "Unable to load managed trade for lifecycle alert | "
+            "trade_id=%s",
+            trade_id,
+        )
+        return None
+
+
+def notify_execution_lifecycle(
+    payload: dict,
+    state: dict,
+) -> None:
+    jalwe = safe_dict(
+        payload.get(
+            "jalwe",
+            {},
+        )
+    )
+
+    execution = safe_dict(
+        payload.get(
+            "execution",
+            {},
+        )
+    )
+
+    symbol = str(
+        payload.get(
+            "symbol",
+            "",
+        )
+        or ""
+    ).upper()
+
+    if not symbol:
+        return
+
+    if bool(
+        jalwe.get(
+            "ready_for_execution",
+            False,
+        )
+    ):
+        ready_key = (
+            "READY:"
+            + symbol
+            + ":"
+            + str(
+                jalwe.get(
+                    "entry_price",
+                    "",
+                )
+            )
+            + ":"
+            + str(
+                jalwe.get(
+                    "stop_price",
+                    "",
+                )
+            )
+        )
+
+        send_lifecycle_once(
+            state,
+            ready_key,
+            (
+                "🎯 JALWE — Trigger مؤكد\n\n"
+                f"📌 السهم: ${symbol}\n"
+                f"⭐ الدرجة: ${jalwe.get('setup_grade') or 'N/A'}\n"
+                f"💲 Entry: ${format_number(jalwe.get('entry_price'))}\n"
+                f"🛑 Stop: ${format_number(jalwe.get('stop_price'))}\n"
+                f"🎯 T1: ${format_number(jalwe.get('target_1'))}\n"
+                f"🎯 T2: ${format_number(jalwe.get('target_2'))}\n"
+                f"🎯 T3: ${format_number(jalwe.get('target_3'))}\n"
+                f"🔢 Qty: ${jalwe.get('quantity', 0)}\n"
+                "📄 ينتقل الآن لمسار تنفيذ PAPER."
+            ),
+        )
+
+    orchestrator_state = str(
+        execution.get(
+            "orchestrator_state",
+            "",
+        )
+        or ""
+    ).upper()
+
+    if orchestrator_state != "ENTRY_MANAGED":
+        return
+
+    managed_trade_id = str(
+        execution.get(
+            "managed_trade_id",
+            "",
+        )
+        or ""
+    )
+
+    broker_order_id = str(
+        execution.get(
+            "broker_order_id",
+            "",
+        )
+        or ""
+    )
+
+    trade = _managed_trade_snapshot(
+        managed_trade_id
+    )
+
+    if trade is None:
+        return
+
+    entry_key = (
+        "ENTRY_MANAGED:"
+        + (
+            broker_order_id
+            or managed_trade_id
+            or symbol
+        )
+    )
+
+    send_lifecycle_once(
+        state,
+        entry_key,
+        (
+            "🟢 JALWE — تم الدخول PAPER\n\n"
+            f"📌 السهم: ${symbol}\n"
+            f"💲 سعر الدخول الفعلي: ${format_number(trade.entry_price)}\n"
+            f"🔢 الكمية: ${trade.initial_quantity}\n"
+            f"🛑 الستوب: ${format_number(trade.current_stop)}\n"
+            f"🎯 T1: ${format_number(trade.target_1)}\n"
+            f"🎯 T2: ${format_number(trade.target_2)}\n"
+            f"🎯 T3: ${format_number(trade.target_3)}\n"
+            f"💼 Trade ID: ${managed_trade_id}"
+        ),
+    )
+
+    execution_metadata = safe_dict(
+        execution.get(
+            "metadata",
+            {},
+        )
+    )
+
+    protective = safe_dict(
+        execution_metadata.get(
+            "protective_stop",
+            {},
+        )
+    )
+
+    if bool(
+        protective.get(
+            "active",
+            False,
+        )
+    ):
+        stop_order_id = str(
+            protective.get(
+                "order_id",
+                "",
+            )
+            or ""
+        )
+
+        stop_key = (
+            "PROTECTIVE_STOP:"
+            + (
+                stop_order_id
+                or managed_trade_id
+                or symbol
+            )
+        )
+
+        send_lifecycle_once(
+            state,
+            stop_key,
+            (
+                "🛡 JALWE — حماية Alpaca مفعلة\n\n"
+                f"📌 السهم: ${symbol}\n"
+                f"🛑 Stop: ${format_number(protective.get('stop_price'))}\n"
+                f"🔢 الكمية المحمية: ${protective.get('quantity', trade.remaining_quantity)}\n"
+                "✅ أمر GTC موجود عند الوسيط حتى لو توقف JALWE مؤقتًا."
+            ),
+        )
+
+
+def _management_action_title(
+    action: str,
+) -> str:
+    titles = {
+        "TAKE_PROFIT_1": "🎯 تم تحقيق Target 1",
+        "TAKE_PROFIT_2": "🎯 تم تحقيق Target 2",
+        "TAKE_PROFIT_3": "🎯 تم تحقيق Target 3",
+        "EXIT_STOP": "🛑 تم الخروج على Stop",
+        "EXIT_TRAILING": "📉 تم الخروج على Trailing Stop",
+        "EXIT_TARGET_3": "🎯 تم إغلاق Target 3",
+        "LOCK_T1": "🔒 تم نقل الحماية إلى Break-even",
+        "LOCK_T2": "🔒 تم رفع الحماية إلى Target 1",
+        "START_RUNNER": "🏃 بدأ Runner",
+        "START_TRAILING": "📈 بدأ Trailing",
+    }
+
+    return titles.get(
+        action,
+        "📌 تحديث إدارة الصفقة",
+    )
+
+
+def notify_management_lifecycle(
+    state: dict,
+    trade_id: str,
+    trade: Any,
+    decision: Any,
+    *,
+    broker_order_id: Optional[str] = None,
+    fill_price: Optional[float] = None,
+    realized_increment: float = 0.0,
+) -> None:
+    action = str(
+        getattr(
+            getattr(
+                decision,
+                "action",
+                "",
+            ),
+            "value",
+            getattr(
+                decision,
+                "action",
+                "",
+            ),
+        )
+        or ""
+    ).upper()
+
+    if action in {
+        "",
+        "HOLD",
+    }:
+        return
+
+    event_key = (
+        "MANAGE:"
+        + str(
+            broker_order_id
+            or (
+                str(trade_id)
+                + ":"
+                + action
+                + ":"
+                + str(
+                    getattr(
+                        trade,
+                        "stage",
+                        "",
+                    )
+                )
+                + ":"
+                + str(
+                    getattr(
+                        trade,
+                        "remaining_quantity",
+                        "",
+                    )
+                )
+            )
+        )
+    )
+
+    realized_total = safe_float(
+        safe_dict(
+            getattr(
+                trade,
+                "metadata",
+                {},
+            )
+        ).get(
+            "realized_pnl"
+        )
+    ) or 0.0
+
+    lines = [
+        _management_action_title(
+            action
+        ),
+        "",
+        (
+            "📌 السهم: "
+            + str(
+                getattr(
+                    trade,
+                    "symbol",
+                    "",
+                )
+            )
+        ),
+        (
+            "💲 السعر الحالي: $"
+            + format_number(
+                getattr(
+                    decision,
+                    "current_price",
+                    None,
+                )
+            )
+        ),
+        (
+            "🔢 الكمية المتبقية: "
+            + str(
+                getattr(
+                    trade,
+                    "remaining_quantity",
+                    0,
+                )
+            )
+        ),
+        (
+            "🛡 الستوب الحالي: $"
+            + format_number(
+                getattr(
+                    trade,
+                    "current_stop",
+                    None,
+                )
+            )
+        ),
+    ]
+
+    if fill_price is not None:
+        lines.append(
+            "💲 سعر التنفيذ: $"
+            + format_number(
+                fill_price
+            )
+        )
+
+    if abs(
+        float(
+            realized_increment
+        )
+    ) > 0.0000001:
+        lines.append(
+            "💵 PnL لهذه العملية: $"
+            + format_number(
+                realized_increment
+            )
+        )
+
+    lines.append(
+        "💰 PnL المحقق للصفقة: $"
+        + format_number(
+            realized_total
+        )
+    )
+
+    if int(
+        getattr(
+            trade,
+            "remaining_quantity",
+            0,
+        )
+        or 0
+    ) == 0:
+        try:
+            equity = _strategy_equity_for_alert()
+
+            lines.extend(
+                [
+                    "",
+                    "✅ الصفقة أغلقت بالكامل",
+                    (
+                        "💼 قيمة محفظة JALWE الآن: $"
+                        + format_number(
+                            equity
+                        )
+                    ),
+                    (
+                        "🧠 تم تسجيل النتيجة في سجل JALWE "
+                        "وستدخل دورة التعلم عند توفر شروط التعلم."
+                    ),
+                ]
+            )
+
+        except Exception as exc:
+            logger.warning(
+                "Unable to calculate strategy equity for "
+                "lifecycle alert: %s",
+                exc,
+            )
+
+    send_lifecycle_once(
+        state,
+        event_key,
+        "\n".join(
+            lines
+        ),
+    )
+
+
+def notify_recovered_protective_stop_fills(
+    state: dict,
+    recovery_result: dict,
+) -> None:
+    for item in safe_list(
+        recovery_result.get(
+            "results",
+            [],
+        )
+    ):
+        item = safe_dict(
+            item
+        )
+
+        protective = safe_dict(
+            item.get(
+                "protective_stop",
+                {},
+            )
+        )
+
+        if not bool(
+            protective.get(
+                "filled",
+                False,
+            )
+        ):
+            continue
+
+        trade_id = str(
+            item.get(
+                "trade_id",
+                "",
+            )
+            or ""
+        )
+
+        order_id = str(
+            protective.get(
+                "order_id",
+                "",
+            )
+            or ""
+        )
+
+        row = database.get_managed_trade_row(
+            trade_id
+        )
+
+        if not row:
+            continue
+
+        metadata = {}
+
+        try:
+            metadata = json.loads(
+                row.get(
+                    "metadata_json",
+                    "{}",
+                )
+                or "{}"
+            )
+        except Exception:
+            metadata = {}
+
+        realized_total = safe_float(
+            metadata.get(
+                "realized_pnl"
+            )
+        ) or 0.0
+
+        try:
+            equity_text = (
+                "$"
+                + format_number(
+                    _strategy_equity_for_alert()
+                )
+            )
+        except Exception:
+            equity_text = "N/A"
+
+        send_lifecycle_once(
+            state,
+            (
+                "PROTECTIVE_STOP_FILLED:"
+                + (
+                    order_id
+                    or trade_id
+                )
+            ),
+            (
+                "🛡 JALWE — Alpaca نفذ Protective Stop\n\n"
+                f"📌 السهم: ${row.get('symbol', '')}\n"
+                f"💲 سعر التنفيذ: ${format_number(protective.get('fill_price'))}\n"
+                f"🔢 الكمية المنفذة: ${protective.get('filled_quantity', 0)}\n"
+                f"💰 PnL المحقق للصفقة: ${format_number(realized_total)}\n"
+                f"💼 قيمة محفظة JALWE الآن: ${equity_text}\n"
+                "🧠 النتيجة محفوظة في سجل JALWE للتعلم."
+            ),
+        )
+
+
+# ============================================================
 # PRINT DECISION
 # ============================================================
 
@@ -2581,7 +3235,9 @@ def _sync_protective_stop(
 # ACTIVE PAPER TRADE MANAGEMENT
 # ============================================================
 
-def manage_active_paper_trades() -> int:
+def manage_active_paper_trades(
+    state: dict,
+) -> int:
     """
     Manage confirmed Alpaca PAPER positions.
 
@@ -2620,6 +3276,11 @@ def manage_active_paper_trades() -> int:
             "Active trade management blocked by recovery safety."
         )
         return 0
+
+    notify_recovered_protective_stop_fills(
+        state,
+        recovery_result,
+    )
 
     active = database.load_active_managed_trades()
 
@@ -2670,6 +3331,13 @@ def manage_active_paper_trades() -> int:
                     # on the next loop before any new action.
                     managed_count += 1
                     continue
+
+                notify_management_lifecycle(
+                    state,
+                    trade_id,
+                    trade,
+                    decision,
+                )
 
                 managed_count += 1
                 continue
@@ -2808,6 +3476,28 @@ def manage_active_paper_trades() -> int:
                     trade,
                     execution_engine,
                 )
+
+            notify_management_lifecycle(
+                state,
+                trade_id,
+                trade,
+                decision,
+                broker_order_id=(
+                    reconciled.order_id
+                ),
+                fill_price=(
+                    reconciliation_result.get(
+                        "fill_price"
+                    )
+                ),
+                realized_increment=float(
+                    reconciliation_result.get(
+                        "realized_pnl_increment",
+                        0.0,
+                    )
+                    or 0.0
+                ),
+            )
 
             database.log_event(
                 event_type="PAPER_TRADE_MANAGEMENT",
@@ -3314,6 +4004,9 @@ def process_research(
                 "warnings": list(
                     execution_result.warnings or []
                 ),
+                "metadata": dict(
+                    execution_result.metadata or {}
+                ),
             }
 
         # ====================================================
@@ -3335,6 +4028,11 @@ def process_research(
                 payload,
                 state,
             )
+        )
+
+        notify_execution_lifecycle(
+            payload,
+            state,
         )
 
         # ====================================================
@@ -3689,7 +4387,9 @@ def main() -> None:
             )
 
             managed_trades = (
-                manage_active_paper_trades()
+                manage_active_paper_trades(
+                    state
+                )
             )
 
             if emergency_closes:

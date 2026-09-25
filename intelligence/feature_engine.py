@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
@@ -356,6 +356,120 @@ class FeatureEngine:
             return False
 
         return True
+
+    def diagnose_input(
+        self,
+        bars: pd.DataFrame,
+    ) -> dict[str, Any]:
+        required_rows = self._minimum_rows()
+
+        if bars is None:
+            return {
+                "received_rows": 0,
+                "valid_rows": 0,
+                "required_rows": required_rows,
+                "missing_columns": sorted(
+                    self.REQUIRED_COLUMNS
+                ),
+                "latest_bar_time": None,
+                "latest_bar_age_minutes": None,
+                "data_quality_ok": False,
+                "freshness_enforced": False,
+            }
+
+        received_rows = len(bars)
+
+        missing_columns = sorted(
+            self.REQUIRED_COLUMNS.difference(
+                bars.columns
+            )
+        )
+
+        normalized = bars.copy()
+
+        valid_rows = 0
+        latest_bar_time = None
+        latest_bar_age_minutes = None
+
+        try:
+            normalized = self._ensure_utc_index(
+                normalized
+            )
+
+            for column in self.REQUIRED_COLUMNS:
+                if column in normalized.columns:
+                    normalized[column] = pd.to_numeric(
+                        normalized[column],
+                        errors="coerce",
+                    )
+
+            if not missing_columns:
+                normalized = normalized.dropna(
+                    subset=list(
+                        self.REQUIRED_COLUMNS
+                    )
+                )
+
+            valid_rows = len(normalized)
+
+            if not normalized.empty:
+                latest_timestamp = (
+                    self._timestamp_from_index(
+                        normalized.index[-1]
+                    )
+                )
+
+                latest_bar_time = (
+                    latest_timestamp.isoformat()
+                )
+
+                latest_bar_age_minutes = max(
+                    0.0,
+                    (
+                        datetime.now(timezone.utc)
+                        - latest_timestamp
+                    ).total_seconds()
+                    / 60.0,
+                )
+
+        except Exception:
+            valid_rows = 0
+
+        return {
+            "received_rows": int(
+                received_rows
+            ),
+            "valid_rows": int(
+                valid_rows
+            ),
+            "required_rows": int(
+                required_rows
+            ),
+            "missing_columns": (
+                missing_columns
+            ),
+            "latest_bar_time": (
+                latest_bar_time
+            ),
+            "latest_bar_age_minutes": (
+                round(
+                    latest_bar_age_minutes,
+                    2,
+                )
+                if latest_bar_age_minutes
+                is not None
+                else None
+            ),
+            "data_quality_ok": bool(
+                not missing_columns
+                and valid_rows >= required_rows
+            ),
+            # Current V4 does not yet hard-reject based on
+            # a standalone bar-age threshold inside
+            # FeatureEngine. Keep this explicit so alerts do
+            # not mislabel a quality failure as staleness.
+            "freshness_enforced": False,
+        }
 
     # ========================================================
     # BUILD FEATURES

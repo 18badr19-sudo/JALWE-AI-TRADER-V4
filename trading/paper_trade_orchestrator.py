@@ -243,6 +243,7 @@ class PaperTradeOrchestrator:
     ) -> str:
         for key in (
             "transaction_time",
+            "at",
             "date",
             "timestamp",
             "created_at",
@@ -438,6 +439,12 @@ class PaperTradeOrchestrator:
                 activity.get("id")
                 or activity.get(
                     "activity_id"
+                )
+                or activity.get(
+                    "event_id"
+                )
+                or activity.get(
+                    "ref_id"
                 )
                 or ""
             ).strip()

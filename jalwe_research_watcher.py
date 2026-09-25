@@ -126,6 +126,16 @@ MAX_REPORTS_PER_SCAN = max(
     ),
 )
 
+WATCHING_UPDATE_SECONDS = max(
+    60,
+    int(
+        os.getenv(
+            "JALWE_WATCHING_UPDATE_SECONDS",
+            "300",
+        )
+    ),
+)
+
 
 # ============================================================
 # TELEGRAM
@@ -312,6 +322,8 @@ def load_state() -> dict:
         "last_notified": {},
 
         "watching": {},
+
+        "last_watch_update": {},
     }
 
     if not STATE_FILE.exists():
@@ -372,6 +384,18 @@ def load_state() -> dict:
 
             watching = {}
 
+        last_watch_update = data.get(
+            "last_watch_update",
+            {},
+        )
+
+        if not isinstance(
+            last_watch_update,
+            dict,
+        ):
+
+            last_watch_update = {}
+
         return {
 
             "processed":
@@ -382,6 +406,9 @@ def load_state() -> dict:
 
             "watching":
                 watching,
+
+            "last_watch_update":
+                last_watch_update,
         }
 
     except Exception as exc:
@@ -428,6 +455,12 @@ def save_state(
         "watching":
             state.get(
                 "watching",
+                {},
+            ),
+
+        "last_watch_update":
+            state.get(
+                "last_watch_update",
                 {},
             ),
     }
@@ -1170,6 +1203,74 @@ def build_telegram_message(
         )
     )
 
+    trigger_watch = safe_dict(
+        decision_metadata.get(
+            "trigger_watch",
+            {},
+        )
+    )
+
+    if (
+        state == "WATCHING"
+        and trigger_watch
+    ):
+        current_price = safe_float(
+            trigger_watch.get(
+                "current_price"
+            )
+        )
+
+        trigger_price = safe_float(
+            trigger_watch.get(
+                "trigger_price"
+            )
+        )
+
+        distance_pct = safe_float(
+            trigger_watch.get(
+                "distance_to_trigger_pct"
+            )
+        )
+
+        lines.extend(
+            [
+                "",
+                "⏱ متابعة لحظية للـ Trigger",
+                (
+                    "السعر الحالي: $"
+                    + format_number(
+                        current_price
+                    )
+                ),
+                (
+                    "سعر الـ Trigger: $"
+                    + format_number(
+                        trigger_price
+                    )
+                ),
+            ]
+        )
+
+        if distance_pct is not None:
+            lines.append(
+                "المتبقي للاختراق: "
+                + format_number(
+                    abs(
+                        distance_pct
+                    ),
+                    3,
+                )
+                + "%"
+            )
+
+        lines.append(
+            "إعادة الفحص: كل "
+            + str(
+                POLL_SECONDS
+            )
+            + " ثانية"
+        )
+
     backfill = safe_dict(
         decision_metadata.get(
             "market_data_backfill",
@@ -1673,7 +1774,51 @@ def notify_if_changed(
         ""
     )
 
-    if previous == fingerprint:
+    jalwe = safe_dict(
+        payload.get(
+            "jalwe",
+            {},
+        )
+    )
+
+    jalwe_state = str(
+        jalwe.get(
+            "state",
+            "",
+        )
+        or ""
+    ).upper()
+
+    last_watch_update = state.setdefault(
+        "last_watch_update",
+        {},
+    )
+
+    now_epoch = time.time()
+
+    last_watch_epoch = safe_float(
+        last_watch_update.get(
+            symbol
+        )
+    ) or 0.0
+
+    watching_heartbeat_due = bool(
+        jalwe_state == "WATCHING"
+        and (
+            now_epoch
+            - last_watch_epoch
+            >= WATCHING_UPDATE_SECONDS
+        )
+    )
+
+    same_fingerprint = (
+        previous == fingerprint
+    )
+
+    if (
+        same_fingerprint
+        and not watching_heartbeat_due
+    ):
 
         return (
             "UNCHANGED_NO_NOTIFICATION"
@@ -1697,9 +1842,27 @@ def notify_if_changed(
             symbol
         ] = fingerprint
 
+        if jalwe_state == "WATCHING":
+            last_watch_update[
+                symbol
+            ] = now_epoch
+        else:
+            last_watch_update.pop(
+                symbol,
+                None,
+            )
+
         save_state(
             state
         )
+
+        if (
+            same_fingerprint
+            and watching_heartbeat_due
+        ):
+            return (
+                "WATCHING_HEARTBEAT_SENT"
+            )
 
         return (
             "SENT"

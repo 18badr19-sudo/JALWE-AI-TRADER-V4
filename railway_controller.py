@@ -15,6 +15,12 @@ from pathlib import Path
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
+from core.runtime_controls import (
+    load_runtime_controls,
+    request_emergency_close,
+    set_new_entries_allowed,
+)
+
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(
@@ -137,6 +143,11 @@ BTN_TRADES = "🧾 آخر الصفقات"
 BTN_LEARNING = "🧠 حالة التعلم"
 BTN_LEARN_NOW = "🎓 تعلم الآن"
 
+BTN_PAUSE_ENTRIES = "⏸ منع صفقات جديدة"
+BTN_RESUME_ENTRIES = "▶️ السماح بصفقات جديدة"
+BTN_EMERGENCY_CLOSE = "🚨 إغلاق صفقات PAPER"
+BTN_CONFIRM_EMERGENCY_CLOSE = "✅ تأكيد إغلاق PAPER"
+
 BTN_APEX_ON = "🧠 تشغيل APEX"
 BTN_APEX_OFF = "⛔ إيقاف APEX"
 BTN_JALWE_ON = "👁 تشغيل JALWE"
@@ -152,6 +163,8 @@ KEYBOARD = {
         [{"text": BTN_PORTFOLIO}, {"text": BTN_TODAY}],
         [{"text": BTN_WEEK}, {"text": BTN_TRADES}],
         [{"text": BTN_LEARNING}, {"text": BTN_LEARN_NOW}],
+        [{"text": BTN_PAUSE_ENTRIES}, {"text": BTN_RESUME_ENTRIES}],
+        [{"text": BTN_EMERGENCY_CLOSE}, {"text": BTN_CONFIRM_EMERGENCY_CLOSE}],
         [{"text": BTN_APEX_ON}, {"text": BTN_APEX_OFF}],
         [{"text": BTN_JALWE_ON}, {"text": BTN_JALWE_OFF}],
         [{"text": BTN_BRIDGE}, {"text": BTN_HELP}],
@@ -1317,6 +1330,72 @@ def restart_all() -> str:
     return start_all()
 
 
+def pause_new_entries() -> str:
+    set_new_entries_allowed(
+        False,
+        updated_by="TELEGRAM",
+        reason="USER_PAUSE",
+    )
+
+    return (
+        "⏸ تم منع الصفقات الجديدة.\n\n"
+        "✅ الصفقات المفتوحة ستستمر تحت المراقبة "
+        "والأهداف/الستوب تبقى فعالة."
+    )
+
+
+def resume_new_entries() -> str:
+    set_new_entries_allowed(
+        True,
+        updated_by="TELEGRAM",
+        reason="USER_RESUME",
+    )
+
+    return (
+        "▶️ تم السماح بالصفقات الجديدة.\n\n"
+        "JALWE سيعود للتنفيذ على Alpaca PAPER "
+        "فقط عندما تمر جميع بوابات القرار والمخاطر."
+    )
+
+
+def emergency_close_prompt() -> str:
+    return (
+        "🚨 إغلاق صفقات JALWE على PAPER\n\n"
+        "هذا سيطلب من JALWE إغلاق جميع الصفقات "
+        "التي يديرها حاليًا على Alpaca PAPER.\n"
+        "لن يفتح صفقات جديدة أثناء التنفيذ.\n\n"
+        "إذا كنت متأكدًا اضغط:\n"
+        "✅ تأكيد إغلاق PAPER"
+    )
+
+
+def confirm_emergency_close() -> str:
+    set_new_entries_allowed(
+        False,
+        updated_by="TELEGRAM",
+        reason="EMERGENCY_CLOSE",
+    )
+
+    controls = request_emergency_close(
+        requested_by="TELEGRAM",
+    )
+
+    request_id = str(
+        controls.get(
+            "emergency_close_request_id",
+            "",
+        )
+    )
+
+    return (
+        "🚨 تم إرسال أمر الإغلاق الطارئ إلى JALWE.\n\n"
+        "⏸ تم منع الصفقات الجديدة تلقائيًا.\n"
+        "سيغلق JALWE الصفقات المدارة على PAPER "
+        "ويحدّث قاعدة البيانات بعد تأكيد التنفيذ من Alpaca.\n"
+        f"Request: {request_id}"
+    )
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
     raw = os.getenv(name)
 
@@ -1364,6 +1443,10 @@ def status_text() -> str:
         f"{'مفعّل' if AUTO_LEARNING else 'معطّل'}\n"
         f"📄 تنفيذ JALWE على Alpaca PAPER: "
         f"{'مفعّل' if paper_auto else 'معطّل'}\n"
+        f"🚦 الصفقات الجديدة: "
+        f"{'مسموحة' if load_runtime_controls().get('allow_new_entries', True) else 'موقوفة'}\n"
+        f"🚨 طلب إغلاق طارئ: "
+        f"{'نعم' if load_runtime_controls().get('emergency_close_requested', False) else 'لا'}\n"
         "🔒 التداول الحقيقي LIVE: معطل"
     )
 
@@ -1404,6 +1487,10 @@ def help_text() -> str:
         "/trades - آخر الأوامر المنفذة\n"
         "/learning - حالة التعلم الذاتي\n"
         "/learn_now - تشغيل دورة تعلم الآن\n"
+        "/pause_entries - منع صفقات جديدة مع استمرار إدارة المفتوحة\n"
+        "/resume_entries - السماح بصفقات جديدة\n"
+        "/emergency_close - عرض تأكيد الإغلاق الطارئ\n"
+        "/confirm_emergency_close - تأكيد إغلاق صفقات JALWE PAPER\n"
         "/apex_on /apex_off\n"
         "/jalwe_on /jalwe_off\n"
         "/bridge - فحص الربط\n"
@@ -1450,6 +1537,21 @@ def handle(text: str) -> str:
 
     if cmd == BTN_LEARN_NOW or low == "/learn_now":
         return run_learning_now_text()
+
+    if cmd == BTN_PAUSE_ENTRIES or low == "/pause_entries":
+        return pause_new_entries()
+
+    if cmd == BTN_RESUME_ENTRIES or low == "/resume_entries":
+        return resume_new_entries()
+
+    if cmd == BTN_EMERGENCY_CLOSE or low == "/emergency_close":
+        return emergency_close_prompt()
+
+    if (
+        cmd == BTN_CONFIRM_EMERGENCY_CLOSE
+        or low == "/confirm_emergency_close"
+    ):
+        return confirm_emergency_close()
 
     if cmd == BTN_APEX_ON or low == "/apex_on":
         return apex.start()

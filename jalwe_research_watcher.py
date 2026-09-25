@@ -18,6 +18,12 @@ from core.config import (
     settings,
 )
 from core.database import database
+from core.runtime_controls import (
+    clear_emergency_close_request,
+    emergency_close_requested,
+    load_runtime_controls,
+    new_entries_allowed,
+)
 
 from intelligence.decision_engine import (
     get_decision_engine,
@@ -47,6 +53,8 @@ from trading.recovery_engine import (
 
 from trading.trade_manager import (
     EXIT_ACTIONS,
+    TradeAction,
+    TradeManagementDecision,
     get_trade_manager,
 )
 
@@ -2036,6 +2044,303 @@ def manage_active_paper_trades() -> int:
 
 
 # ============================================================
+# EMERGENCY PAPER CLOSE
+# ============================================================
+
+def process_emergency_paper_close() -> int:
+    """
+    Close all JALWE-managed Alpaca PAPER positions.
+
+    The request persists until every managed trade is closed.
+    New entries are paused separately by RuntimeControls.
+    """
+
+    if not emergency_close_requested():
+        return 0
+
+    if not auto_paper_execution_ready():
+        logger.warning(
+            "Emergency close requested but PAPER execution "
+            "configuration is not ready."
+        )
+        return 0
+
+    recovery = get_recovery_engine()
+
+    try:
+        recovery_result = recovery.recover_all()
+    except Exception as exc:
+        logger.exception(
+            "Emergency close recovery failed: %s",
+            exc,
+        )
+        return 0
+
+    if not bool(
+        recovery_result.get(
+            "safe_to_trade",
+            False,
+        )
+    ):
+        logger.warning(
+            "Emergency close waiting for recovery safety."
+        )
+        return 0
+
+    active = database.load_active_managed_trades()
+
+    if not active:
+        clear_emergency_close_request(
+            updated_by="JALWE_WATCHER",
+        )
+
+        try:
+            database.log_event(
+                event_type="PAPER_EMERGENCY_CLOSE_COMPLETE",
+                severity="INFO",
+                message=(
+                    "Emergency PAPER close completed; "
+                    "no active managed trades remain."
+                ),
+                metadata={
+                    "timestamp": utc_now_iso(),
+                },
+            )
+        except Exception:
+            pass
+
+        return 0
+
+    market_data = get_market_data()
+    trade_manager = get_trade_manager()
+    execution_engine = get_execution_engine()
+    reconciliation_engine = get_reconciliation_engine()
+
+    processed = 0
+    errors = 0
+
+    for trade_id, trade in active.items():
+        try:
+            if trade.has_pending_exit:
+                continue
+
+            quantity = int(
+                trade.remaining_quantity
+            )
+
+            if quantity <= 0:
+                database.save_managed_trade(
+                    trade_id,
+                    trade,
+                )
+                continue
+
+            current_price = float(
+                market_data.get_last_price(
+                    trade.symbol
+                )
+            )
+
+            decision = TradeManagementDecision(
+                symbol=trade.symbol,
+                action=TradeAction.EXIT_TRAILING,
+                quantity=quantity,
+                current_price=current_price,
+                stage_before=trade.stage,
+                stage_after=trade.stage,
+                stop_before=trade.current_stop,
+                stop_after=trade.current_stop,
+                reason="EMERGENCY_PAPER_CLOSE",
+                metadata={
+                    "emergency": True,
+                },
+            )
+
+            broker_order = execution_engine.submit_exit(
+                symbol=trade.symbol,
+                quantity=quantity,
+                requested_price=current_price,
+                reason="EMERGENCY_PAPER_CLOSE",
+            )
+
+            trade_manager.register_exit_order(
+                trade,
+                decision,
+                broker_order,
+            )
+
+            database.save_managed_trade(
+                trade_id,
+                trade,
+            )
+
+            reconciled = (
+                reconciliation_engine
+                .wait_for_terminal_state(
+                    broker_order,
+                    timeout_seconds=30.0,
+                    poll_interval_seconds=1.0,
+                )
+            )
+
+            reconciliation_result = (
+                trade_manager
+                .apply_exit_reconciliation(
+                    trade,
+                    reconciled,
+                )
+            )
+
+            new_fill_quantity = int(
+                reconciliation_result.get(
+                    "new_fill_quantity",
+                    0,
+                )
+                or 0
+            )
+
+            if new_fill_quantity > 0:
+                cumulative_filled = int(
+                    reconciliation_result.get(
+                        "cumulative_filled",
+                        0,
+                    )
+                    or 0
+                )
+
+                event_key = (
+                    f"{reconciled.order_id}:"
+                    f"{cumulative_filled}"
+                )
+
+                filled_at = getattr(
+                    reconciled,
+                    "filled_at",
+                    None,
+                )
+
+                event_time = (
+                    filled_at.isoformat()
+                    if filled_at is not None
+                    else utc_now_iso()
+                )
+
+                database.record_strategy_pnl_event(
+                    event_key=event_key,
+                    trade_id=trade_id,
+                    order_id=reconciled.order_id,
+                    symbol=trade.symbol,
+                    action="EMERGENCY_CLOSE",
+                    quantity=new_fill_quantity,
+                    fill_price=(
+                        reconciliation_result.get(
+                            "fill_price"
+                        )
+                    ),
+                    entry_price=trade.entry_price,
+                    realized_pnl=float(
+                        reconciliation_result.get(
+                            "realized_pnl_increment",
+                            0.0,
+                        )
+                        or 0.0
+                    ),
+                    event_time=event_time,
+                    metadata={
+                        "emergency": True,
+                        "stage": trade.stage.value,
+                        "remaining_quantity": (
+                            trade.remaining_quantity
+                        ),
+                    },
+                )
+
+            database.save_managed_trade(
+                trade_id,
+                trade,
+            )
+
+            database.log_event(
+                event_type="PAPER_EMERGENCY_CLOSE_ORDER",
+                severity="WARNING",
+                message=(
+                    f"{trade.symbol}: emergency PAPER "
+                    f"close qty={quantity}"
+                ),
+                metadata={
+                    "trade_id": trade_id,
+                    "symbol": trade.symbol,
+                    "quantity": quantity,
+                    "broker_order_id": (
+                        reconciled.order_id
+                    ),
+                    "broker_status": (
+                        reconciled.status.value
+                    ),
+                    "remaining_quantity": (
+                        trade.remaining_quantity
+                    ),
+                },
+            )
+
+            processed += 1
+
+        except Exception as exc:
+            errors += 1
+
+            logger.exception(
+                "Emergency PAPER close failed | "
+                "trade_id=%s symbol=%s error=%s",
+                trade_id,
+                getattr(
+                    trade,
+                    "symbol",
+                    "",
+                ),
+                exc,
+            )
+
+            try:
+                database.log_event(
+                    event_type="PAPER_EMERGENCY_CLOSE_ERROR",
+                    severity="ERROR",
+                    message=str(exc),
+                    metadata={
+                        "trade_id": trade_id,
+                        "symbol": getattr(
+                            trade,
+                            "symbol",
+                            "",
+                        ),
+                    },
+                )
+            except Exception:
+                pass
+
+    remaining = database.load_active_managed_trades()
+
+    if not remaining and errors == 0:
+        clear_emergency_close_request(
+            updated_by="JALWE_WATCHER",
+        )
+
+        database.log_event(
+            event_type="PAPER_EMERGENCY_CLOSE_COMPLETE",
+            severity="INFO",
+            message=(
+                "All JALWE-managed PAPER positions "
+                "were closed."
+            ),
+            metadata={
+                "processed": processed,
+                "timestamp": utc_now_iso(),
+            },
+        )
+
+    return processed
+
+
+# ============================================================
 # PROCESS ONE REPORT
 # ============================================================
 
@@ -2072,7 +2377,10 @@ def process_research(
 
         execution_result = None
 
-        if auto_paper_execution_ready():
+        if (
+            auto_paper_execution_ready()
+            and new_entries_allowed()
+        ):
             execution_result = (
                 get_paper_trade_orchestrator()
                 .run_symbol(
@@ -2108,6 +2416,22 @@ def process_research(
                 decision,
             )
         )
+
+        runtime_controls = (
+            load_runtime_controls()
+        )
+
+        payload[
+            "runtime_controls"
+        ] = runtime_controls
+
+        if (
+            auto_paper_execution_ready()
+            and not new_entries_allowed()
+        ):
+            payload["execution"][
+                "blocked_by_runtime_pause"
+            ] = True
 
         if execution_result is not None:
             execution_state = getattr(
@@ -2507,9 +2831,20 @@ def main() -> None:
                 )
             )
 
+            emergency_closes = (
+                process_emergency_paper_close()
+            )
+
             managed_trades = (
                 manage_active_paper_trades()
             )
+
+            if emergency_closes:
+                print(
+                    utc_now_iso(),
+                    "| emergency PAPER closes:",
+                    emergency_closes,
+                )
 
             heartbeat(
                 discovered,

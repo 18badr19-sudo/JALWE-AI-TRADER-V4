@@ -1900,10 +1900,76 @@ def manage_active_paper_trades() -> int:
                 )
             )
 
-            trade_manager.apply_exit_reconciliation(
-                trade,
-                reconciled,
+            reconciliation_result = (
+                trade_manager
+                .apply_exit_reconciliation(
+                    trade,
+                    reconciled,
+                )
             )
+
+            new_fill_quantity = int(
+                reconciliation_result.get(
+                    "new_fill_quantity",
+                    0,
+                )
+                or 0
+            )
+
+            if new_fill_quantity > 0:
+                cumulative_filled = int(
+                    reconciliation_result.get(
+                        "cumulative_filled",
+                        0,
+                    )
+                    or 0
+                )
+
+                event_key = (
+                    f"{reconciled.order_id}:"
+                    f"{cumulative_filled}"
+                )
+
+                filled_at = getattr(
+                    reconciled,
+                    "filled_at",
+                    None,
+                )
+
+                event_time = (
+                    filled_at.isoformat()
+                    if filled_at is not None
+                    else utc_now_iso()
+                )
+
+                database.record_strategy_pnl_event(
+                    event_key=event_key,
+                    trade_id=trade_id,
+                    order_id=reconciled.order_id,
+                    symbol=trade.symbol,
+                    action=decision.action.value,
+                    quantity=new_fill_quantity,
+                    fill_price=(
+                        reconciliation_result.get(
+                            "fill_price"
+                        )
+                    ),
+                    entry_price=trade.entry_price,
+                    realized_pnl=float(
+                        reconciliation_result.get(
+                            "realized_pnl_increment",
+                            0.0,
+                        )
+                        or 0.0
+                    ),
+                    event_time=event_time,
+                    metadata={
+                        "stage": trade.stage.value,
+                        "remaining_quantity": (
+                            trade.remaining_quantity
+                        ),
+                    },
+                )
 
             database.save_managed_trade(
                 trade_id,

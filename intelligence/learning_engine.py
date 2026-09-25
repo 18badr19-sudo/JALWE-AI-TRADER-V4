@@ -294,13 +294,21 @@ class LearningEngine:
                     (
                         SELECT fs.snapshot_json
                         FROM feature_snapshots fs
-                        WHERE fs.signal_id = t.signal_id
-                        ORDER BY fs.id DESC
+                        WHERE fs.symbol = t.symbol
+                        ORDER BY
+                            CASE
+                                WHEN t.opened_at IS NOT NULL
+                                THEN ABS(
+                                    julianday(fs.created_at)
+                                    - julianday(t.opened_at)
+                                )
+                                ELSE fs.id * -1
+                            END ASC,
+                            fs.id DESC
                         LIMIT 1
                     ) AS snapshot_json
                 FROM trades t
                 WHERE t.status = 'CLOSED'
-                  AND t.signal_id IS NOT NULL
                 ORDER BY
                     COALESCE(t.closed_at, t.updated_at) DESC
                 LIMIT ?
@@ -895,11 +903,10 @@ class LearningEngine:
                 SELECT COUNT(*) AS total
                 FROM trades
                 WHERE status = 'CLOSED'
-                  AND signal_id IS NOT NULL
                   AND EXISTS (
                       SELECT 1
                       FROM feature_snapshots fs
-                      WHERE fs.signal_id = trades.signal_id
+                      WHERE fs.symbol = trades.symbol
                   )
                 """
             ).fetchone()

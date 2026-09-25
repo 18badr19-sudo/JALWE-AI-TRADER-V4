@@ -357,6 +357,102 @@ class FeatureEngine:
 
         return True
 
+    def _quality_metadata(
+        self,
+        df: Optional[pd.DataFrame],
+        *,
+        stage: str,
+    ) -> dict[str, Any]:
+        required_rows = self._minimum_rows()
+
+        if df is None:
+            return {
+                "validation_stage": stage,
+                "bars_received": 0,
+                "required_rows": required_rows,
+                "missing_columns": sorted(
+                    self.REQUIRED_COLUMNS
+                ),
+                "last_bar_timestamp": None,
+                "last_bar_age_minutes": None,
+            }
+
+        bars_received = len(df)
+
+        columns = set(
+            getattr(
+                df,
+                "columns",
+                [],
+            )
+        )
+
+        missing_columns = sorted(
+            self.REQUIRED_COLUMNS
+            - columns
+        )
+
+        last_bar_timestamp = None
+        last_bar_age_minutes = None
+
+        if bars_received > 0:
+            try:
+                latest = pd.Timestamp(
+                    df.index[-1]
+                )
+
+                if latest.tzinfo is None:
+                    latest = latest.tz_localize(
+                        "UTC"
+                    )
+                else:
+                    latest = latest.tz_convert(
+                        "UTC"
+                    )
+
+                now = pd.Timestamp.now(
+                    tz="UTC"
+                )
+
+                age = (
+                    now
+                    - latest
+                ).total_seconds() / 60.0
+
+                last_bar_timestamp = (
+                    latest.isoformat()
+                )
+
+                last_bar_age_minutes = round(
+                    max(
+                        float(age),
+                        0.0,
+                    ),
+                    2,
+                )
+
+            except Exception:
+                pass
+
+        return {
+            "validation_stage": stage,
+            "bars_received": int(
+                bars_received
+            ),
+            "required_rows": int(
+                required_rows
+            ),
+            "missing_columns": (
+                missing_columns
+            ),
+            "last_bar_timestamp": (
+                last_bar_timestamp
+            ),
+            "last_bar_age_minutes": (
+                last_bar_age_minutes
+            ),
+        }
+
     # ========================================================
     # BUILD FEATURES
     # ========================================================
@@ -379,15 +475,32 @@ class FeatureEngine:
         if not self._validate_dataframe(
             bars
         ):
+            quality = self._quality_metadata(
+                bars,
+                stage="RAW_INPUT",
+            )
+
             logger.warning(
                 "Insufficient market data "
-                "for feature generation | symbol=%s",
+                "for feature generation | "
+                "symbol=%s bars=%s required=%s "
+                "missing=%s last_age_min=%s",
                 symbol,
+                quality.get("bars_received"),
+                quality.get("required_rows"),
+                quality.get("missing_columns"),
+                quality.get(
+                    "last_bar_age_minutes"
+                ),
             )
 
             return FeatureSnapshot(
                 symbol=symbol,
                 data_quality_ok=False,
+                metadata={
+                    "feature_engine": "JALWE_V4",
+                    "quality_failure": quality,
+                },
             )
 
         df = self._ensure_utc_index(
@@ -414,9 +527,18 @@ class FeatureEngine:
         if not self._validate_dataframe(
             df
         ):
+            quality = self._quality_metadata(
+                df,
+                stage="NORMALIZED_OHLCV",
+            )
+
             return FeatureSnapshot(
                 symbol=symbol,
                 data_quality_ok=False,
+                metadata={
+                    "feature_engine": "JALWE_V4",
+                    "quality_failure": quality,
+                },
             )
 
         close = df["close"]
@@ -853,6 +975,15 @@ class FeatureEngine:
             metadata={
                 "feature_engine": "JALWE_V4",
                 "bars_used": len(df),
+                "required_rows": (
+                    self._minimum_rows()
+                ),
                 "vwap_mode": "NY_SESSION",
+                "quality": (
+                    self._quality_metadata(
+                        df,
+                        stage="FINAL",
+                    )
+                ),
             },
         )

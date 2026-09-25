@@ -1265,7 +1265,41 @@ def restart_all() -> str:
     return start_all()
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+
+    if raw is None:
+        return bool(default)
+
+    return str(raw).strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+
+
 def status_text() -> str:
+    paper_auto = (
+        _env_bool(
+            "JALWE_AUTO_PAPER_EXECUTION",
+            _env_bool(
+                "AUTO_PAPER_EXECUTION",
+                False,
+            ),
+        )
+        and
+        _env_bool(
+            "JALWE_BROKER_SUBMISSION",
+            _env_bool(
+                "BROKER_SUBMISSION_ENABLED",
+                False,
+            ),
+        )
+        and
+        _env_bool(
+            "JALWE_PAPER_TRADING",
+            True,
+        )
+    )
+
     return (
         "📊 حالة JALWE + APEX\n\n"
         f"{apex.status()}\n"
@@ -1276,7 +1310,9 @@ def status_text() -> str:
         f"{'مفعلة' if ERROR_ALERTS_ENABLED else 'معطلة'}\n"
         f"🧠 التعلم الذاتي: "
         f"{'مفعّل' if AUTO_LEARNING else 'معطّل'}\n"
-        "🔒 تنفيذ أوامر التداول من Watcher: معطل"
+        f"📄 تنفيذ JALWE على Alpaca PAPER: "
+        f"{'مفعّل' if paper_auto else 'معطّل'}\n"
+        "🔒 التداول الحقيقي LIVE: معطل"
     )
 
 

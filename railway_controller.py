@@ -85,6 +85,41 @@ ERROR_ALERT_COOLDOWN_SECONDS = max(
     int(os.getenv("JALWE_ERROR_ALERT_COOLDOWN_SECONDS", "300")),
 )
 
+# Alpaca REST resilience. Transient read/connect failures are retried
+# before the controller escalates them to Telegram.
+ALPACA_HTTP_TIMEOUT_SECONDS = max(
+    10,
+    int(os.getenv("JALWE_ALPACA_HTTP_TIMEOUT_SECONDS", "30")),
+)
+
+ALPACA_HTTP_RETRIES = max(
+    1,
+    min(
+        int(os.getenv("JALWE_ALPACA_HTTP_RETRIES", "3")),
+        5,
+    ),
+)
+
+ALPACA_HTTP_RETRY_DELAY_SECONDS = max(
+    0.5,
+    float(os.getenv("JALWE_ALPACA_HTTP_RETRY_DELAY_SECONDS", "2.0")),
+)
+
+ORDER_POLL_FAILURES_BEFORE_ALERT = max(
+    1,
+    int(os.getenv("JALWE_ORDER_POLL_FAILURES_BEFORE_ALERT", "3")),
+)
+
+ORDER_POLL_ERROR_ALERT_COOLDOWN_SECONDS = max(
+    300,
+    int(
+        os.getenv(
+            "JALWE_ORDER_POLL_ERROR_ALERT_COOLDOWN_SECONDS",
+            "1800",
+        )
+    ),
+)
+
 ORDER_ALERTS_ENABLED = os.getenv(
     "JALWE_ORDER_ALERTS",
     "true",
@@ -661,12 +696,18 @@ def alpaca_get(
     path: str,
     params: Optional[dict[str, Any]] = None,
     *,
-    timeout: int = 25,
+    timeout: Optional[int] = None,
 ) -> Any:
     if not alpaca_ready():
         raise RuntimeError(
             "Alpaca PAPER credentials/base URL are not ready."
         )
+
+    effective_timeout = int(
+        timeout
+        if timeout is not None
+        else ALPACA_HTTP_TIMEOUT_SECONDS
+    )
 
     query = urllib.parse.urlencode(
         {
@@ -691,10 +732,57 @@ def alpaca_get(
         method="GET",
     )
 
-    with urllib.request.urlopen(req, timeout=timeout) as response:
-        body = response.read().decode("utf-8", errors="replace")
+    last_error: Optional[BaseException] = None
 
-    return json.loads(body)
+    for attempt in range(
+        1,
+        ALPACA_HTTP_RETRIES + 1,
+    ):
+        try:
+            with urllib.request.urlopen(
+                req,
+                timeout=effective_timeout,
+            ) as response:
+                body = response.read().decode(
+                    "utf-8",
+                    errors="replace",
+                )
+
+            return json.loads(body)
+
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+
+            # Authentication / request errors are not transient.
+            if exc.code < 500 and exc.code != 429:
+                raise
+
+        except (
+            TimeoutError,
+            urllib.error.URLError,
+            ConnectionError,
+        ) as exc:
+            last_error = exc
+
+        except OSError as exc:
+            # Some Python/network stacks surface socket read timeouts
+            # as OSError rather than TimeoutError.
+            last_error = exc
+
+        if attempt >= ALPACA_HTTP_RETRIES:
+            break
+
+        time.sleep(
+            ALPACA_HTTP_RETRY_DELAY_SECONDS
+            * attempt
+        )
+
+    if last_error is not None:
+        raise last_error
+
+    raise RuntimeError(
+        "Alpaca request failed without a captured error."
+    )
 
 
 def get_account() -> dict[str, Any]:
@@ -1352,15 +1440,60 @@ def poll_filled_order_alerts() -> None:
 
     try:
         orders = get_recent_filled_orders(100)
+
+        # A successful read clears the transient failure streak.
+        controller_state[
+            "order_poll_consecutive_failures"
+        ] = 0
+
     except Exception as exc:
+        failures = int(
+            controller_state.get(
+                "order_poll_consecutive_failures",
+                0,
+            )
+            or 0
+        ) + 1
+
+        controller_state[
+            "order_poll_consecutive_failures"
+        ] = failures
+
         print(
-            f"Filled-order poll failed: {exc}",
+            "Filled-order poll failed "
+            f"(attempt streak={failures}): {exc}",
             flush=True,
         )
-        notify_error(
-            "مراقبة أوامر Alpaca",
-            exc,
+
+        now_error_epoch = time.time()
+        last_alert_epoch = safe_float(
+            controller_state.get(
+                "last_order_poll_error_alert_epoch"
+            )
+        ) or 0.0
+
+        alert_due = bool(
+            failures >= ORDER_POLL_FAILURES_BEFORE_ALERT
+            and (
+                now_error_epoch
+                - last_alert_epoch
+                >= ORDER_POLL_ERROR_ALERT_COOLDOWN_SECONDS
+            )
         )
+
+        if alert_due:
+            notify_error(
+                "مراقبة أوامر Alpaca",
+                (
+                    f"فشل الاتصال بعد {failures} محاولات مراقبة متتالية. "
+                    f"آخر خطأ: {exc}"
+                ),
+            )
+
+            controller_state[
+                "last_order_poll_error_alert_epoch"
+            ] = now_error_epoch
+
         save_state(controller_state)
         return
 

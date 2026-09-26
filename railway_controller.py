@@ -73,6 +73,15 @@ AUTO_RESTART = os.getenv("JALWE_AUTO_RESTART", "true").strip().lower() in {
     "1", "true", "yes", "on"
 }
 
+# When Apex is deployed as its own Railway service, the JALWE
+# controller must not launch a second embedded Apex child.
+MANAGE_APEX_CHILD = os.getenv(
+    "JALWE_MANAGE_APEX_CHILD",
+    "true",
+).strip().lower() in {
+    "1", "true", "yes", "on"
+}
+
 ERROR_ALERTS_ENABLED = os.getenv(
     "JALWE_ERROR_ALERTS",
     "true",
@@ -1868,14 +1877,24 @@ jalwe = ManagedProcess("JALWE Watcher", JALWE_SCRIPT)
 
 
 def start_all() -> str:
-    a = apex.start()
-    time.sleep(1)
+    if MANAGE_APEX_CHILD:
+        a = apex.start()
+        time.sleep(1)
+    else:
+        apex.desired_running = False
+        a = "APEX: خارجي (Railway service مستقل)"
+
     j = jalwe.start()
     return f"🟢 تشغيل النظام\n\n{a}\n{j}"
 
 
 def stop_all() -> str:
-    a = apex.stop()
+    if MANAGE_APEX_CHILD:
+        a = apex.stop()
+    else:
+        apex.desired_running = False
+        a = "APEX: خارجي — لم يتم إيقافه من JALWE"
+
     j = jalwe.stop()
     return f"🛑 إيقاف النظام\n\n{a}\n{j}"
 
@@ -2534,9 +2553,19 @@ def handle(text: str) -> str:
         return confirm_emergency_close()
 
     if cmd == BTN_APEX_ON or low == "/apex_on":
+        if not MANAGE_APEX_CHILD:
+            return (
+                "APEX يعمل كخدمة Railway مستقلة؛ "
+                "JALWE Controller لا يدير عملية Apex الداخلية."
+            )
         return apex.start()
 
     if cmd == BTN_APEX_OFF or low == "/apex_off":
+        if not MANAGE_APEX_CHILD:
+            return (
+                "APEX يعمل كخدمة Railway مستقلة؛ "
+                "لن يتم إيقافه من JALWE Controller."
+            )
         return apex.stop()
 
     if cmd == BTN_JALWE_ON or low == "/jalwe_on":
@@ -2564,7 +2593,13 @@ def handle(text: str) -> str:
 
 
 def monitor_children() -> None:
-    for managed in (apex, jalwe):
+    managed_children = (
+        (apex, jalwe)
+        if MANAGE_APEX_CHILD
+        else (jalwe,)
+    )
+
+    for managed in managed_children:
         if (
             managed.desired_running
             and managed.process is not None
@@ -2595,7 +2630,10 @@ def monitor_children() -> None:
 
 def shutdown(*_: Any) -> None:
     print("Controller shutting down...", flush=True)
-    apex.stop()
+
+    if MANAGE_APEX_CHILD:
+        apex.stop()
+
     jalwe.stop()
     raise SystemExit(0)
 

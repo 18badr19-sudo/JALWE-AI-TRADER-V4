@@ -63,7 +63,7 @@ from trading.trade_manager import (
 # JALWE RESEARCH WATCHER V2
 # ============================================================
 
-VERSION = "2.0"
+VERSION = "2.2"
 
 
 # ============================================================
@@ -132,6 +132,35 @@ WATCHING_UPDATE_SECONDS = max(
         os.getenv(
             "JALWE_WATCHING_UPDATE_SECONDS",
             "300",
+        )
+    ),
+)
+
+# Repeated WATCHING heartbeats are OFF by default.
+# The watcher still re-analyzes in the background, but Telegram
+# stays quiet unless the setup changes materially.
+WATCHING_HEARTBEAT_ENABLED = (
+    os.getenv(
+        "JALWE_WATCHING_HEARTBEAT_ENABLED",
+        "false",
+    )
+    .strip()
+    .lower()
+    in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+)
+
+# Small score noise should not create a new Telegram alert.
+NOTIFICATION_SCORE_STEP = max(
+    1.0,
+    float(
+        os.getenv(
+            "JALWE_NOTIFICATION_SCORE_STEP",
+            "5.0",
         )
     ),
 )
@@ -1669,6 +1698,36 @@ def send_telegram(
 
 
 # ============================================================
+# NOTIFICATION MATERIALITY
+# ============================================================
+
+def notification_score_bucket(
+    value: Any,
+) -> Optional[float]:
+    number = safe_float(
+        value
+    )
+
+    if number is None:
+        return None
+
+    step = float(
+        NOTIFICATION_SCORE_STEP
+    )
+
+    return round(
+        round(
+            number
+            /
+            step
+        )
+        *
+        step,
+        2,
+    )
+
+
+# ============================================================
 # NOTIFICATION FINGERPRINT
 # ============================================================
 
@@ -1702,9 +1761,12 @@ def notification_fingerprint(
                 "verdict"
             ),
 
-        "apex_score":
-            apex.get(
-                "score"
+        # Bucket scores so tiny changes do not spam Telegram.
+        "apex_score_bucket":
+            notification_score_bucket(
+                apex.get(
+                    "score"
+                )
             ),
 
         "jalwe_state":
@@ -1841,7 +1903,8 @@ def notify_if_changed(
     ) or 0.0
 
     watching_heartbeat_due = bool(
-        jalwe_state == "WATCHING"
+        WATCHING_HEARTBEAT_ENABLED
+        and jalwe_state == "WATCHING"
         and (
             now_epoch
             - last_watch_epoch

@@ -3256,6 +3256,8 @@ def _sync_protective_stop(
     metadata[
         "protective_stop_fill_applied"
     ] = False
+    metadata["protective_stop_applied_qty"] = 0
+    metadata["protective_stop_applied_notional"] = 0.0
 
     trade.metadata = metadata
 
@@ -3498,6 +3500,7 @@ def manage_active_paper_trades(
                 )
 
                 database.record_strategy_pnl_event(
+                    trade_state=trade,
                     event_key=event_key,
                     trade_id=trade_id,
                     order_id=reconciled.order_id,
@@ -3815,6 +3818,7 @@ def process_emergency_paper_close() -> int:
                 )
 
                 database.record_strategy_pnl_event(
+                    trade_state=trade,
                     event_key=event_key,
                     trade_id=trade_id,
                     order_id=reconciled.order_id,

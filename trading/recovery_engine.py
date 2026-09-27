@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -801,208 +802,77 @@ class RecoveryEngine:
     # BROKER PROTECTIVE STOP RECOVERY
     # ========================================================
 
-    def _reconcile_protective_stop(
-        self,
-        trade_id: str,
-        trade: Any,
-    ) -> dict[str, Any]:
-        metadata = (
-            trade.metadata
-            if isinstance(
-                trade.metadata,
-                dict,
-            )
-            else {}
-        )
-
-        order_id = str(
-            metadata.get(
-                "protective_stop_order_id",
-                "",
-            )
-            or ""
-        ).strip()
-
+    def _reconcile_protective_stop(self, trade_id: str, trade: Any) -> dict[str, Any]:
+        metadata = dict(trade.metadata or {})
+        order_id = str(metadata.get("protective_stop_order_id") or "").strip()
         if not order_id:
-            return {
-                "checked": False,
-                "active": False,
-                "filled": False,
-            }
+            return {"checked": False, "active": False, "filled": False}
 
-        raw_order = self.broker.get_order(
-            order_id
-        )
-
-        status = self._map_order_status(
-            getattr(
-                raw_order,
-                "status",
-                None,
-            )
-        )
-
-        filled_quantity = self._safe_int(
-            getattr(
-                raw_order,
-                "filled_qty",
-                0,
-            )
-        )
-
-        fill_price = self._safe_float(
-            getattr(
-                raw_order,
-                "filled_avg_price",
-                None,
-            )
-        )
-
+        raw = self.broker.get_order(order_id)
+        status = self._map_order_status(getattr(raw, "status", None))
+        filled = self._safe_int(getattr(raw, "filled_qty", 0))
+        average = self._safe_float(getattr(raw, "filled_avg_price", None))
         active = status in {
-            OrderStatus.ACCEPTED,
-            OrderStatus.SUBMITTED,
+            OrderStatus.ACCEPTED, OrderStatus.SUBMITTED,
             OrderStatus.PARTIALLY_FILLED,
         }
-
-        metadata[
-            "protective_stop_status"
-        ] = status.value
-
-        metadata[
-            "protective_stop_active"
-        ] = bool(
-            active
-        )
-
-        if status == OrderStatus.FILLED:
-            already_applied = bool(
-                metadata.get(
-                    "protective_stop_fill_applied",
-                    False,
-                )
+        # Migrate already-reconciled full stops without applying them again.
+        previous_qty = int(metadata.get("protective_stop_applied_qty",
+            filled if metadata.get("protective_stop_fill_applied") else 0))
+        if filled < previous_qty:
+            raise ValueError("Protective stop cumulative fills moved backwards.")
+        new_qty = filled - previous_qty
+        if new_qty:
+            if average is None or not math.isfinite(average) or average <= 0:
+                raise ValueError("Protective stop fill price is unavailable.")
+            if new_qty > int(trade.remaining_quantity):
+                raise ValueError("Protective stop fill exceeds local remaining quantity.")
+            cumulative_notional = filled * average
+            prior_notional = float(metadata.get("protective_stop_applied_notional", 0.0))
+            if previous_qty and prior_notional <= 0:
+                raise ValueError("Previous protective stop proceeds unavailable.")
+            proceeds = cumulative_notional - prior_notional
+            if not math.isfinite(proceeds) or proceeds <= 0:
+                raise ValueError("Invalid protective stop cumulative proceeds.")
+            realized = proceeds - new_qty * trade.entry_price
+            trade.remaining_quantity -= new_qty
+            trade.realized_quantity += new_qty
+            metadata["realized_pnl"] = float(metadata.get("realized_pnl") or 0.0) + realized
+            metadata["protective_stop_applied_qty"] = filled
+            metadata["protective_stop_applied_notional"] = cumulative_notional
+            if trade.remaining_quantity == 0:
+                trade.trailing_active = False
+                trade.stage = TradeStage.CLOSED
+            metadata["protective_stop_status"] = status.value
+            metadata["protective_stop_active"] = active
+            metadata["protective_stop_fill_applied"] = status == OrderStatus.FILLED
+            trade.metadata = metadata
+            database.record_strategy_pnl_event(
+                trade_state=trade,
+                event_key=f"{order_id}:{filled}", trade_id=trade_id,
+                order_id=order_id, symbol=trade.symbol,
+                action="BROKER_PROTECTIVE_STOP", quantity=new_qty,
+                fill_price=proceeds / new_qty, entry_price=trade.entry_price,
+                realized_pnl=realized,
+                event_time=(getattr(raw, "filled_at", None) or
+                            datetime.now(timezone.utc)).isoformat(),
+                metadata={"source": "RECOVERY_ENGINE", "protective_stop": True},
             )
 
-            if (
-                not already_applied
-                and filled_quantity > 0
-            ):
-                applied_quantity = min(
-                    int(
-                        trade.remaining_quantity
-                    ),
-                    filled_quantity,
-                )
 
-                if applied_quantity > 0:
-                    trade.remaining_quantity -= (
-                        applied_quantity
-                    )
-
-                    trade.realized_quantity += (
-                        applied_quantity
-                    )
-
-                    if fill_price is not None:
-                        realized = (
-                            (
-                                fill_price
-                                - trade.entry_price
-                            )
-                            * applied_quantity
-                        )
-
-                        trade.metadata[
-                            "realized_pnl"
-                        ] = float(
-                            trade.metadata.get(
-                                "realized_pnl",
-                                0.0,
-                            )
-                            or 0.0
-                        ) + realized
-
-                        event_key = (
-                            f"{order_id}:"
-                            f"{filled_quantity}"
-                        )
-
-                        database.record_strategy_pnl_event(
-                            event_key=event_key,
-                            trade_id=trade_id,
-                            order_id=order_id,
-                            symbol=trade.symbol,
-                            action=(
-                                "BROKER_PROTECTIVE_STOP"
-                            ),
-                            quantity=applied_quantity,
-                            fill_price=fill_price,
-                            entry_price=(
-                                trade.entry_price
-                            ),
-                            realized_pnl=realized,
-                            event_time=(
-                                datetime.now(
-                                    timezone.utc
-                                ).isoformat()
-                            ),
-                            metadata={
-                                "source": (
-                                    "RECOVERY_ENGINE"
-                                ),
-                                "protective_stop": True,
-                            },
-                        )
-
-                metadata[
-                    "protective_stop_fill_applied"
-                ] = True
-
-            if int(
-                trade.remaining_quantity
-            ) <= 0:
-                trade.remaining_quantity = 0
-                trade.trailing_active = False
-                trade.stage = (
-                    TradeStage.CLOSED
-                )
-
-            metadata[
-                "protective_stop_active"
-            ] = False
-
-        elif status in {
-            OrderStatus.CANCELED,
-            OrderStatus.REJECTED,
-        }:
-            metadata[
-                "protective_stop_active"
-            ] = False
-
+        if int(trade.remaining_quantity) == 0:
+            trade.trailing_active = False
+            trade.stage = TradeStage.CLOSED
+        metadata["protective_stop_status"] = status.value
+        metadata["protective_stop_active"] = active
+        metadata["protective_stop_fill_applied"] = status == OrderStatus.FILLED
         trade.metadata = metadata
-
-        database.save_managed_trade(
-            trade_id,
-            trade,
-        )
-
+        database.save_managed_trade(trade_id, trade)
         return {
-            "checked": True,
-            "active": bool(
-                metadata.get(
-                    "protective_stop_active",
-                    False,
-                )
-            ),
-            "filled": (
-                status
-                == OrderStatus.FILLED
-            ),
-            "status": status.value,
-            "order_id": order_id,
-            "filled_quantity": (
-                filled_quantity
-            ),
-            "fill_price": fill_price,
+            "checked": True, "active": active,
+            "filled": status == OrderStatus.FILLED,
+            "status": status.value, "order_id": order_id,
+            "filled_quantity": filled, "fill_price": average,
         }
 
     # ========================================================
@@ -1133,6 +1003,7 @@ class RecoveryEngine:
                     )
 
                     database.record_strategy_pnl_event(
+                        trade_state=trade,
                         event_key=event_key,
                         trade_id=trade_id,
                         order_id=broker_order.order_id,

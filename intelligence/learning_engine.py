@@ -304,11 +304,10 @@ class LearningEngine:
                         SELECT fs.snapshot_json
                         FROM feature_snapshots fs
                         WHERE fs.symbol = mt.symbol
+                          AND julianday(fs.created_at) <= julianday(mt.created_at)
+                          AND julianday(fs.created_at) >= julianday(mt.created_at) - (30.0 / 1440.0)
                         ORDER BY
-                            ABS(
-                                julianday(fs.created_at)
-                                - julianday(mt.created_at)
-                            ) ASC,
+                            julianday(fs.created_at) DESC,
                             fs.id DESC
                         LIMIT 1
                     ) AS snapshot_json

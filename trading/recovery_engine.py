@@ -835,7 +835,20 @@ class RecoveryEngine:
             if not math.isfinite(proceeds) or proceeds <= 0:
                 raise ValueError("Invalid protective stop cumulative proceeds.")
             realized = proceeds - new_qty * trade.entry_price
+            trade.remaining_quantity -= new_qty
+            trade.realized_quantity += new_qty
+            metadata["realized_pnl"] = float(metadata.get("realized_pnl") or 0.0) + realized
+            metadata["protective_stop_applied_qty"] = filled
+            metadata["protective_stop_applied_notional"] = cumulative_notional
+            if trade.remaining_quantity == 0:
+                trade.trailing_active = False
+                trade.stage = TradeStage.CLOSED
+            metadata["protective_stop_status"] = status.value
+            metadata["protective_stop_active"] = active
+            metadata["protective_stop_fill_applied"] = status == OrderStatus.FILLED
+            trade.metadata = metadata
             database.record_strategy_pnl_event(
+                trade_state=trade,
                 event_key=f"{order_id}:{filled}", trade_id=trade_id,
                 order_id=order_id, symbol=trade.symbol,
                 action="BROKER_PROTECTIVE_STOP", quantity=new_qty,
@@ -845,11 +858,7 @@ class RecoveryEngine:
                             datetime.now(timezone.utc)).isoformat(),
                 metadata={"source": "RECOVERY_ENGINE", "protective_stop": True},
             )
-            trade.remaining_quantity -= new_qty
-            trade.realized_quantity += new_qty
-            metadata["realized_pnl"] = float(metadata.get("realized_pnl") or 0.0) + realized
-            metadata["protective_stop_applied_qty"] = filled
-            metadata["protective_stop_applied_notional"] = cumulative_notional
+
 
         if int(trade.remaining_quantity) == 0:
             trade.trailing_active = False
@@ -994,6 +1003,7 @@ class RecoveryEngine:
                     )
 
                     database.record_strategy_pnl_event(
+                        trade_state=trade,
                         event_key=event_key,
                         trade_id=trade_id,
                         order_id=broker_order.order_id,

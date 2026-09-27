@@ -3500,6 +3500,7 @@ def manage_active_paper_trades(
                 )
 
                 database.record_strategy_pnl_event(
+                    trade_state=trade,
                     event_key=event_key,
                     trade_id=trade_id,
                     order_id=reconciled.order_id,
@@ -3817,6 +3818,7 @@ def process_emergency_paper_close() -> int:
                 )
 
                 database.record_strategy_pnl_event(
+                    trade_state=trade,
                     event_key=event_key,
                     trade_id=trade_id,
                     order_id=reconciled.order_id,

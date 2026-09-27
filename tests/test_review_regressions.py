@@ -18,6 +18,25 @@ from trading.recovery_engine import RecoveryEngine
 
 
 class ReviewRegressionTests(unittest.TestCase):
+    def test_fill_ledger_and_trade_state_commit_together(self):
+        trade = TradeManager().create_trade('TEST', 10, 10, 9, 11, 12, 13)
+        with tempfile.TemporaryDirectory() as d:
+            db = Database(d + '/atomic.db')
+            event = dict(event_key='order:2', trade_id='t', order_id='order',
+                         symbol='TEST', action='EXIT', quantity=2, fill_price=9,
+                         entry_price=10, realized_pnl=-2,
+                         event_time='2026-09-25T14:00:00+00:00', trade_state=trade)
+            with patch.object(db, 'save_managed_trade', side_effect=RuntimeError('disk failure')):
+                with self.assertRaises(RuntimeError):
+                    db.record_strategy_pnl_event(**event)
+            self.assertEqual(db.get_strategy_realized_pnl_total(), 0)
+            trade.remaining_quantity = 8
+            db.record_strategy_pnl_event(**event)
+            self.assertEqual(db.get_strategy_realized_pnl_total(), -2)
+            self.assertEqual(db.load_managed_trade('t').remaining_quantity, 8)
+            db.record_strategy_pnl_event(**event)
+            self.assertEqual(db.get_strategy_realized_pnl_total(), -2)
+
     def test_five_crash_recovery_scenarios_without_network(self):
         with tempfile.TemporaryDirectory() as d:
             env = {**os.environ, 'JALWE_DATABASE_PATH': d + '/crash.db',

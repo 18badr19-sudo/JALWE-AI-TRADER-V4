@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
@@ -702,6 +702,7 @@ class Database:
         trade: Any,
         entry_order_id: Optional[str] = None,
         entry_fill_price: Optional[float] = None,
+        _connection: Optional[sqlite3.Connection] = None,
     ) -> None:
         """
         Persist the TradeManager state.
@@ -742,7 +743,7 @@ class Database:
             stage == "CLOSED"
         )
 
-        with self.connection() as conn:
+        with (nullcontext(_connection) if _connection is not None else self.connection()) as conn:
 
             conn.execute(
                 """
@@ -2319,6 +2320,7 @@ class Database:
         realized_pnl: float,
         event_time: str,
         metadata: Optional[dict[str, Any]] = None,
+        trade_state: Optional[Any] = None,
     ) -> bool:
         """
         Persist one broker-confirmed realized PnL increment.
@@ -2382,6 +2384,11 @@ class Database:
                     metadata_json,
                 ),
             )
+
+            if trade_state is not None:
+                if not trade_id:
+                    raise ValueError("trade_id required with trade_state")
+                self.save_managed_trade(trade_id, trade_state, _connection=conn)
 
             return bool(
                 cursor.rowcount

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
+import math
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
 
@@ -581,6 +583,26 @@ class DecisionEngine:
     # MAIN ANALYSIS
     # ========================================================
 
+    @staticmethod
+    def _apply_feature_freshness(features: Any, timeframe: str) -> dict[str, Any]:
+        # Bar timestamps mark the start of the interval. Allow two intervals
+        # (at least 15 minutes), without treating future timestamps as fresh.
+        minutes = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "1d": 1440}
+        interval = minutes.get(str(timeframe).strip().lower())
+        max_age = max(15, 2 * interval) if interval else None
+        age = None
+        try:
+            timestamp = features.timestamp
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - timestamp).total_seconds() / 60
+            fresh = max_age is not None and math.isfinite(age) and 0 <= age <= max_age
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            fresh = False
+        features.data_is_stale = bool(features.data_is_stale or not fresh)
+        return {"freshness_enforced": True, "latest_bar_age_minutes": age,
+                "max_bar_age_minutes": max_age, "data_is_stale": features.data_is_stale}
+
     def analyze(
         self,
         symbol: str,
@@ -704,6 +726,8 @@ class DecisionEngine:
                 warnings=warnings + [str(exc)],
                 metadata=base_metadata,
             )
+
+        feature_diagnostics.update(self._apply_feature_freshness(features, timeframe))
 
         if not features.data_quality_ok or features.data_is_stale:
             valid_rows = int(

@@ -501,11 +501,12 @@ class NewsEngine:
                 f"News unavailable for {symbol}"
             ) from exc
 
-        raw_articles = getattr(
-            response,
-            "news",
-            [],
-        )
+        # Alpaca returns NewsSet.data['news']; it has no .news attribute.
+        # A changed/malformed response must not masquerade as an empty feed.
+        data = getattr(response, "data", None)
+        if not isinstance(data, dict) or not isinstance(data.get("news"), list):
+            raise NewsEngineError(f"Invalid news response for {symbol}")
+        raw_articles = data["news"]
 
         if not raw_articles:
             return []
@@ -572,6 +573,11 @@ class NewsEngine:
             created_at = self._to_utc(
                 created_at_raw
             )
+
+            # Do not score future or out-of-window articles even if returned
+            # by the provider. Use the same bounds sent in this request.
+            if not start <= created_at <= end:
+                continue
 
             score, importance = (
                 self._score_article(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -82,6 +83,9 @@ class StrategyRouter:
     def _clamp_score(
         score: float,
     ) -> float:
+
+        if not math.isfinite(score):
+            return 0.0
 
         return max(
             0.0,
@@ -442,7 +446,7 @@ class StrategyRouter:
         # setup, but it cannot create a setup from nothing.
         # ====================================================
 
-        if not opportunity.approved:
+        if not opportunity.approved or not math.isfinite(opportunity.score):
 
             warnings.append(
                 "OpportunityEngine rejected the setup. "
@@ -500,6 +504,7 @@ class StrategyRouter:
         if (
             opportunity.recommended_risk_pct
             is None
+            or not math.isfinite(opportunity.recommended_risk_pct)
             or opportunity.recommended_risk_pct <= 0
         ):
 
@@ -552,10 +557,10 @@ class StrategyRouter:
         # REGIME CONFIDENCE SAFETY
         # ====================================================
 
-        if market.confidence < 0.50:
+        if not 0.50 <= market.confidence <= 1.0:
 
             warnings.append(
-                "Market regime confidence is too low."
+                "Market regime confidence is invalid or too low."
             )
 
             return RoutedOpportunity(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional
@@ -112,7 +113,8 @@ class OpportunityEngine:
             if value is None:
                 return default
 
-            return float(value)
+            number = float(value)
+            return number if math.isfinite(number) else default
 
         except (
             TypeError,

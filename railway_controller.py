@@ -1985,6 +1985,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
 def status_text() -> str:
     from service_health import apex_status_text, read_apex_health
     apex_status = apex.status() if MANAGE_APEX_CHILD else apex_status_text(read_apex_health())
+    print("APEX service health | " + apex_status, flush=True)
     paper_auto = (
         _env_bool(
             "JALWE_AUTO_PAPER_EXECUTION",

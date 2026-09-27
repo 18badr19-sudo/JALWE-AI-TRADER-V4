@@ -1767,6 +1767,7 @@ class TradeManager:
         )
 
         trade.pending_filled_quantity = 0
+        trade.metadata["pending_exit_notional"] = 0.0
 
         trade.pending_status = (
             broker_order.status.value
@@ -1910,6 +1911,25 @@ class TradeManager:
                 is not None
                 else None
             )
+
+            # Alpaca reports the average across ALL fills in this order.
+            # Convert cumulative proceeds into the price of the new fills.
+            if fill_price is None or not math.isfinite(fill_price) or fill_price <= 0:
+                raise ValueError("Confirmed fill is missing a valid average price.")
+            cumulative_notional = fill_price * cumulative_filled
+            previous_notional = float(trade.metadata.get(
+                "pending_exit_notional",
+                trade.pending_filled_quantity * float(
+                    trade.metadata.get("last_exit_fill_price", 0.0)
+                ),
+            ))
+            if trade.pending_filled_quantity and previous_notional <= 0:
+                raise ValueError("Previous fill proceeds unavailable for reconciliation.")
+            incremental_notional = cumulative_notional - previous_notional
+            if not math.isfinite(incremental_notional) or incremental_notional <= 0:
+                raise ValueError("Invalid cumulative fill proceeds.")
+            fill_price = incremental_notional / new_fill_quantity
+            trade.metadata["pending_exit_notional"] = cumulative_notional
 
             trade.remaining_quantity -= (
                 new_fill_quantity

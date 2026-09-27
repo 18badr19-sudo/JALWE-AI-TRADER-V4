@@ -364,9 +364,9 @@ def storage_status_text() -> str:
 # TELEGRAM UI
 # ============================================================
 
-BTN_START = "🟢 تشغيل الكل"
-BTN_STOP = "🔴 إيقاف الكل"
-BTN_RESTART = "♻️ إعادة تشغيل النظام"
+BTN_START = "🟢 تشغيل الكل" if MANAGE_APEX_CHILD else "🟢 تشغيل JALWE"
+BTN_STOP = "🔴 إيقاف الكل" if MANAGE_APEX_CHILD else "🔴 إيقاف JALWE"
+BTN_RESTART = "♻️ إعادة تشغيل النظام" if MANAGE_APEX_CHILD else "♻️ إعادة تشغيل JALWE"
 BTN_STATUS = "📊 حالة النظام"
 
 BTN_PORTFOLIO = "💼 محفظتي"
@@ -1983,6 +1983,8 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 
 def status_text() -> str:
+    from service_health import apex_status_text, read_apex_health
+    apex_status = apex.status() if MANAGE_APEX_CHILD else apex_status_text(read_apex_health())
     paper_auto = (
         _env_bool(
             "JALWE_AUTO_PAPER_EXECUTION",
@@ -2008,7 +2010,7 @@ def status_text() -> str:
 
     return (
         "📊 حالة JALWE + APEX\n\n"
-        f"{apex.status() if MANAGE_APEX_CHILD else 'ℹ️ APEX: خدمة مستقلة على Railway (حالته تُفحص هناك)'}\n"
+        f"{apex_status}\n"
         f"{jalwe.status()}\n\n"
         f"🔔 تنبيهات تنفيذ الصفقات: "
         f"{'مفعلة' if ORDER_ALERTS_ENABLED else 'معطلة'}\n"
@@ -2507,13 +2509,13 @@ def handle(text: str) -> str:
     cmd = str(text or "").strip()
     low = cmd.lower()
 
-    if cmd == BTN_START or low == "/run":
+    if cmd in {BTN_START, "🟢 تشغيل الكل"} or low == "/run":
         return start_all()
 
-    if cmd == BTN_STOP or low == "/stop":
+    if cmd in {BTN_STOP, "🔴 إيقاف الكل"} or low == "/stop":
         return stop_all()
 
-    if cmd == BTN_RESTART or low == "/restart":
+    if cmd in {BTN_RESTART, "♻️ إعادة تشغيل النظام"} or low == "/restart":
         return restart_all()
 
     if cmd == BTN_STATUS or low == "/status":

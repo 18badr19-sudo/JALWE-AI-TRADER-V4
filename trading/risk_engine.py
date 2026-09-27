@@ -7,6 +7,7 @@ from typing import Optional
 
 from broker.alpaca_client import get_alpaca_client
 from core.config import settings
+from core.database import database
 
 from core.models import (
     FeatureSnapshot,
@@ -674,6 +675,22 @@ class RiskEngine:
     # POSITION SIZING
     # ========================================================
 
+    @staticmethod
+    def _strategy_available_cash(equity, broker_cash, positions) -> float:
+        if not all(math.isfinite(float(v)) and float(v) >= 0
+                   for v in (equity, broker_cash)):
+            raise ValueError("Invalid wallet balance.")
+        invested = 0.0
+        for position in positions:
+            qty = float(position["remaining_quantity"])
+            entry = float(position["entry_price"])
+            if not math.isfinite(qty) or not math.isfinite(entry) or qty < 0 or entry <= 0:
+                raise ValueError("Invalid open position cost basis.")
+            invested += qty * entry
+        if not math.isfinite(invested):
+            raise ValueError("Invalid total position cost basis.")
+        return max(0.0, min(float(broker_cash), float(equity) - invested))
+
     def _calculate_quantity(
         self,
         entry: float,
@@ -1049,11 +1066,19 @@ class RiskEngine:
             broker_equity,
         )
 
-        # No leverage.
-        available_cash = min(
-            broker_cash,
-            effective_equity,
-        )
+        # Strategy equity includes capital already invested in open trades.
+        # Deduct its cost basis so the large PAPER account cannot finance
+        # several positions beyond the isolated JALWE wallet.
+        try:
+            available_cash = self._strategy_available_cash(
+                effective_equity, broker_cash,
+                database.get_active_managed_trade_rows(),
+            )
+        except (ValueError, TypeError, KeyError, OverflowError):
+            return self._reject("Invalid open strategy position values.")
+        except Exception:
+            logger.exception("Unable to verify available strategy cash.")
+            return self._reject("Open strategy positions unavailable.")
 
         if available_cash <= 0:
 

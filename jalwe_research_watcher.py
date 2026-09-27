@@ -3256,6 +3256,8 @@ def _sync_protective_stop(
     metadata[
         "protective_stop_fill_applied"
     ] = False
+    metadata["protective_stop_applied_qty"] = 0
+    metadata["protective_stop_applied_notional"] = 0.0
 
     trade.metadata = metadata
 

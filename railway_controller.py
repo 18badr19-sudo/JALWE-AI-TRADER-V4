@@ -2008,7 +2008,7 @@ def status_text() -> str:
 
     return (
         "📊 حالة JALWE + APEX\n\n"
-        f"{apex.status()}\n"
+        f"{apex.status() if MANAGE_APEX_CHILD else 'ℹ️ APEX: خدمة مستقلة على Railway (حالته تُفحص هناك)'}\n"
         f"{jalwe.status()}\n\n"
         f"🔔 تنبيهات تنفيذ الصفقات: "
         f"{'مفعلة' if ORDER_ALERTS_ENABLED else 'معطلة'}\n"

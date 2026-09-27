@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional
@@ -96,7 +97,7 @@ class TriggerEngine:
 
             value = float(value)
 
-            if pd.isna(value):
+            if not math.isfinite(value):
                 return None
 
             return value
@@ -131,17 +132,8 @@ class TriggerEngine:
         ):
             return None
 
-        closes = pd.to_numeric(
-            bars["close"],
-            errors="coerce",
-        ).dropna()
-
-        if closes.empty:
-            return None
-
-        return float(
-            closes.iloc[-1]
-        )
+        # A corrupt latest close must not silently fall back to an older bar.
+        return TriggerEngine._safe_float(bars["close"].iloc[-1])
 
     # ========================================================
     # BREAKOUT AGE

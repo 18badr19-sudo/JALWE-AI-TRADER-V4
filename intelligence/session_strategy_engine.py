@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional
@@ -106,7 +107,8 @@ class SessionStrategyEngine:
             if value is None:
                 return default
 
-            return float(value)
+            number = float(value)
+            return number if math.isfinite(number) else default
 
         except (
             TypeError,
@@ -118,6 +120,9 @@ class SessionStrategyEngine:
     def _clamp(
         value: float,
     ) -> float:
+
+        if not math.isfinite(value):
+            return 0.0
 
         return max(
             0.0,
@@ -960,6 +965,7 @@ class SessionStrategyEngine:
             candidate
             for candidate in candidates
             if candidate.valid
+            and math.isfinite(candidate.score)
         ]
 
         valid_candidates.sort(

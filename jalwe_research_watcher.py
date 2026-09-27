@@ -3734,6 +3734,17 @@ def process_emergency_paper_close() -> int:
                 },
             )
 
+            # The broker-side SELL stop may reserve the whole position.
+            # Confirm its cancellation before submitting another SELL;
+            # if it filled during cancellation, recovery will apply it.
+            protective_cancel = _cancel_protective_stop(
+                trade_id,
+                trade,
+                execution_engine,
+            )
+            if protective_cancel == "FILLED":
+                continue
+
             broker_order = execution_engine.submit_exit(
                 symbol=trade.symbol,
                 quantity=quantity,

@@ -12,6 +12,19 @@ jobs:
   safety-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: test-only
+          POSTGRES_DB: bridge_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
 
     steps:
       - name: Checkout
@@ -35,5 +48,6 @@ jobs:
           ALPACA_BASE_URL: https://paper-api.alpaca.markets
           PAPER_TRADING: "true"
           ALLOW_LIVE_TRADING: "false"
+          TEST_POSTGRES_DSN: postgresql://postgres:test-only@localhost:5432/bridge_test
         run: |
           python -m unittest discover -s tests -v

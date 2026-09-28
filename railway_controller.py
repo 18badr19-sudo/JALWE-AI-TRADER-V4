@@ -620,6 +620,35 @@ def tg_call(
     return result
 
 
+class TelegramPollHealth:
+    """Delay alerts for short Telegram getUpdates transport outages."""
+
+    def __init__(self, alert_after_seconds: float = 90) -> None:
+        self.alert_after_seconds = max(30.0, alert_after_seconds)
+        self.failed_since: Optional[float] = None
+
+    @staticmethod
+    def is_transient(exc: Exception) -> bool:
+        if isinstance(exc, (TimeoutError, urllib.error.URLError, ConnectionError)):
+            return True
+        # tg_call converts Telegram HTTP 5xx into RuntimeError with
+        # the provider's description. Keep authentication errors visible.
+        message = str(exc).lower()
+        return any(term in message for term in (
+            "bad gateway", "gateway timeout", "service unavailable",
+            "http 500", "http 502", "http 503", "http 504",
+            "read operation timed out", "timed out",
+        ))
+
+    def success(self) -> None:
+        self.failed_since = None
+
+    def failure_age(self, now: float) -> float:
+        if self.failed_since is None:
+            self.failed_since = now
+        return max(0.0, now - self.failed_since)
+
+
 def send_message(text: str) -> None:
     if not TELEGRAM_CHAT_ID:
         return
@@ -2709,15 +2738,14 @@ def main() -> None:
             flush=True,
         )
 
-    me = tg_call(
-        "getMe",
-        {},
-        timeout=15,
-    )
-    username = (
-        me.get("result", {})
-        .get("username", "UNKNOWN")
-    )
+    try:
+        me = tg_call("getMe", {}, timeout=15)
+        username = me.get("result", {}).get("username", "UNKNOWN")
+    except Exception as exc:
+        if not TelegramPollHealth.is_transient(exc):
+            raise
+        print(f"Telegram getMe temporary failure: {exc}", flush=True)
+        username = "UNAVAILABLE"
 
     print(
         "JALWE Railway Controller started | "
@@ -2744,6 +2772,9 @@ def main() -> None:
 
     offset = 0
     telegram_conflict_started_at: Optional[float] = None
+    telegram_poll_health = TelegramPollHealth(
+        float(os.getenv("JALWE_TELEGRAM_POLL_ALERT_AFTER_SECONDS", "90"))
+    )
     telegram_conflict_alert_after_seconds = max(
         30,
         int(
@@ -2761,6 +2792,7 @@ def main() -> None:
         maybe_run_learning_cycle()
 
         try:
+            polling_updates = True
             updates = tg_call(
                 "getUpdates",
                 {
@@ -2772,6 +2804,8 @@ def main() -> None:
                 },
                 timeout=25,
             ).get("result", [])
+            polling_updates = False
+            telegram_poll_health.success()
 
             # A successful poll means any deployment-overlap
             # conflict has cleared.
@@ -2813,6 +2847,23 @@ def main() -> None:
         except Exception as exc:
             error_text = str(exc)
 
+            if polling_updates and telegram_poll_health.is_transient(exc):
+                telegram_conflict_started_at = None
+                outage_age = telegram_poll_health.failure_age(time.monotonic())
+                print(
+                    f"Telegram getUpdates temporary failure "
+                    f"({outage_age:.0f}s): {error_text}",
+                    flush=True,
+                )
+                if outage_age >= telegram_poll_health.alert_after_seconds:
+                    notify_error(
+                        "وحدة تحكم Telegram",
+                        "تعذر اتصال getUpdates بتيليجرام بشكل مستمر؛ "
+                        "سيعيد النظام المحاولة. راجع سجلات Railway للتفاصيل.",
+                    )
+                time.sleep(5)
+                continue
+
             if (
                 "Telegram getUpdates: Conflict:"
                 in error_text
@@ -2842,10 +2893,8 @@ def main() -> None:
                 ):
                     notify_error(
                         "وحدة تحكم Telegram",
-                        (
-                            f"{error_text} | "
-                            f"مستمر منذ {conflict_age:.0f} ثانية"
-                        ),
+                        "Telegram getUpdates: Conflict مستمر؛ "
+                        "تحقق من وجود نسخة أخرى تسحب التحديثات.",
                     )
 
                 time.sleep(5)

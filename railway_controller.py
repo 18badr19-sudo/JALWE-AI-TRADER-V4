@@ -2058,6 +2058,33 @@ def status_text() -> str:
     )
 
 
+def shared_apex_diagnostics_lines() -> list[str]:
+    from intelligence.external_research_bridge import get_external_research_bridge
+    from service_health import apex_status_text, read_apex_health
+
+    lines = ["📡 APEX: الخدمة المستقلة", apex_status_text(read_apex_health()),
+             "مصدر التشخيص: التقارير المشتركة في قاعدة البيانات"]
+    try:
+        bridge = get_external_research_bridge()
+        reports = bridge.list_recent_research(limit=20, source="APEX")
+        fresh = [r for r in reports if (bridge.get_age_minutes(r) is not None
+                 and 0 <= bridge.get_age_minutes(r) <= 30)]
+        lines.append(f"تقارير حديثة خلال 30 دقيقة: {len(fresh)}")
+        if not reports:
+            lines.append("لا توجد تقارير APEX في الجسر حتى الآن.")
+        for report in reports[:5]:
+            timestamp = parse_dt(report.created_at)
+            time_text = timestamp.astimezone(NY_TZ).strftime("%Y-%m-%d %H:%M NY") if timestamp else "وقت غير معروف"
+            age = bridge.get_age_minutes(report)
+            freshness = "حديث" if age is not None and 0 <= age <= 30 else "قديم — لا يصلح للدخول"
+            verdict = report.metadata.get("verdict", "UNKNOWN")
+            lines.append(f"• {report.symbol} | {verdict} | {freshness} | {time_text}")
+        lines.append("أعداد الماسح الكاملة متاحة في سجل خدمة APEX على Railway.")
+    except Exception as exc:
+        lines.append(f"⚠️ تعذر قراءة تقارير APEX المشتركة: {exc}")
+    return lines
+
+
 def no_trade_diagnostics_text() -> str:
     lines = [
         "🔎 تشخيص عدم وجود صفقة",
@@ -2068,7 +2095,9 @@ def no_trade_diagnostics_text() -> str:
     # APEX LAST CYCLE
     # --------------------------------------------------------
 
-    if APEX_DIAGNOSTICS_FILE.exists():
+    if not MANAGE_APEX_CHILD:
+        lines.extend(shared_apex_diagnostics_lines())
+    elif APEX_DIAGNOSTICS_FILE.exists():
         try:
             apex_payload = json.loads(
                 APEX_DIAGNOSTICS_FILE.read_text(
@@ -2341,6 +2370,7 @@ def no_trade_diagnostics_text() -> str:
                     created_at
                 FROM system_events
                 WHERE event_type = 'APEX_RESEARCH_DECISION'
+                  AND julianday(created_at) >= julianday('now', '-1 day')
                 ORDER BY id DESC
                 LIMIT 5
                 """
@@ -2349,7 +2379,7 @@ def no_trade_diagnostics_text() -> str:
         lines.extend(
             [
                 "",
-                "🧠 آخر قرارات JALWE:",
+                "🧠 آخر قرارات JALWE خلال 24 ساعة:",
             ]
         )
 
@@ -2442,7 +2472,7 @@ def no_trade_diagnostics_text() -> str:
 
             lines.append(
                 f"• {symbol} | {state} | "
-                f"{score_text}"
+                f"{score_text} | {row['created_at']}"
             )
 
             if reason:

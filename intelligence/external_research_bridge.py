@@ -651,6 +651,42 @@ class ExternalResearchBridge:
     # GET LATEST
     # ========================================================
 
+    def _read_postgres_reports(self, *, limit, symbol=None, source=None):
+        """Read both deployed Apex schemas, keeping the newest symbol/source."""
+        conn = self._connect_postgres()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT to_regclass('external_research_latest')")
+                legacy_exists = cur.fetchone()[0] is not None
+                selects = ["""SELECT symbol,source,news_score,sentiment,catalyst,
+                    confidence,summary,market_bias,technical_notes_json,
+                    headlines_json,risk_flags_json,metadata_json,created_at,updated_at
+                    FROM research_latest"""]
+                if legacy_exists:
+                    selects.append("""SELECT symbol,source,news_score,sentiment,catalyst,
+                        confidence,summary,market_bias,
+                        json_build_array(technical_notes)::text AS technical_notes_json,
+                        headlines_json,risk_flags_json,metadata_json,created_at,
+                        created_at AS updated_at FROM external_research_latest""")
+                filters, params = [], []
+                if symbol:
+                    filters.append("symbol = %s")
+                    params.append(clean_symbol(symbol))
+                if source:
+                    filters.append("source = %s")
+                    params.append(clean_source(source))
+                where = " WHERE " + " AND ".join(filters) if filters else ""
+                # Identifiers are fixed above; values always use parameters.
+                query = """SELECT * FROM (
+                    SELECT DISTINCT ON (symbol,source) * FROM ("""
+                query += " UNION ALL ".join(selects) + ") reports" + where
+                query += """ ORDER BY symbol,source,created_at::timestamptz DESC
+                    ) latest ORDER BY created_at::timestamptz DESC LIMIT %s"""
+                cur.execute(query, (*params, limit))
+                return cur.fetchall()
+        finally:
+            conn.close()
+
     def get_latest_research(
         self,
         symbol: str,
@@ -661,42 +697,8 @@ class ExternalResearchBridge:
             return None
 
         if self.backend == "POSTGRES":
-            conn = self._connect_postgres()
-            try:
-                with conn.cursor() as cur:
-                    if source:
-                        cur.execute(
-                            """
-                            SELECT symbol,source,news_score,sentiment,catalyst,
-                                   confidence,summary,market_bias,
-                                   technical_notes_json,headlines_json,
-                                   risk_flags_json,metadata_json,
-                                   created_at,updated_at
-                            FROM research_latest
-                            WHERE symbol = %s AND source = %s
-                            ORDER BY created_at DESC
-                            LIMIT 1
-                            """,
-                            (symbol, clean_source(source)),
-                        )
-                    else:
-                        cur.execute(
-                            """
-                            SELECT symbol,source,news_score,sentiment,catalyst,
-                                   confidence,summary,market_bias,
-                                   technical_notes_json,headlines_json,
-                                   risk_flags_json,metadata_json,
-                                   created_at,updated_at
-                            FROM research_latest
-                            WHERE symbol = %s
-                            ORDER BY created_at DESC
-                            LIMIT 1
-                            """,
-                            (symbol,),
-                        )
-                    return self._row_to_research(cur.fetchone())
-            finally:
-                conn.close()
+            rows = self._read_postgres_reports(limit=1, symbol=symbol, source=source)
+            return self._row_to_research(rows[0]) if rows else None
 
         conn = self._connect_sqlite()
         with self._lock:
@@ -786,41 +788,7 @@ class ExternalResearchBridge:
         limit = max(1, min(int(limit), 500))
 
         if self.backend == "POSTGRES":
-            conn = self._connect_postgres()
-            try:
-                with conn.cursor() as cur:
-                    if source:
-                        cur.execute(
-                            """
-                            SELECT symbol,source,news_score,sentiment,catalyst,
-                                   confidence,summary,market_bias,
-                                   technical_notes_json,headlines_json,
-                                   risk_flags_json,metadata_json,
-                                   created_at,updated_at
-                            FROM research_latest
-                            WHERE source = %s
-                            ORDER BY created_at DESC
-                            LIMIT %s
-                            """,
-                            (clean_source(source), limit),
-                        )
-                    else:
-                        cur.execute(
-                            """
-                            SELECT symbol,source,news_score,sentiment,catalyst,
-                                   confidence,summary,market_bias,
-                                   technical_notes_json,headlines_json,
-                                   risk_flags_json,metadata_json,
-                                   created_at,updated_at
-                            FROM research_latest
-                            ORDER BY created_at DESC
-                            LIMIT %s
-                            """,
-                            (limit,),
-                        )
-                    rows = cur.fetchall()
-            finally:
-                conn.close()
+            rows = self._read_postgres_reports(limit=limit, source=source)
         else:
             conn = self._connect_sqlite()
             with self._lock:
@@ -970,7 +938,14 @@ class ExternalResearchBridge:
             conn = self._connect_postgres()
             try:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT COUNT(*) FROM research_latest")
+                    cur.execute("SELECT to_regclass('external_research_latest')")
+                    if cur.fetchone()[0] is not None:
+                        cur.execute("""SELECT COUNT(*) FROM (
+                            SELECT symbol,source FROM research_latest
+                            UNION SELECT symbol,source FROM external_research_latest
+                            ) reports""")
+                    else:
+                        cur.execute("SELECT COUNT(*) FROM research_latest")
                     row = cur.fetchone()
                     return int(row[0] if row else 0)
             finally:

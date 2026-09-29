@@ -802,6 +802,10 @@ class DecisionEngine:
         # 3. OPTIONAL NATIVE JALWE EVIDENCE
         # ====================================================
 
+        base_metadata["quality_inputs"] = {
+            name: getattr(features, name, None)
+            for name in ("rvol", "liquidity_score", "dollar_volume", "volume_acceleration")
+        }
         self._apply_news(features, warnings)
         self._apply_options(features, warnings)
 

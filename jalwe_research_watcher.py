@@ -11,6 +11,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+from research_recheck import update_recheck, recheck_due
 
 
 from core.config import (
@@ -362,6 +363,7 @@ def load_state() -> dict:
     default_state = {
 
         "processed": {},
+        "rechecks": {},
 
         "last_notified": {},
 
@@ -456,6 +458,8 @@ def load_state() -> dict:
 
         return {
 
+            "rechecks": safe_dict(data.get("rechecks", {})),
+
             "processed":
                 processed,
 
@@ -494,6 +498,8 @@ def save_state(
     )
 
     payload = {
+
+        "rechecks": state.get("rechecks", {}),
 
         "version":
             VERSION,
@@ -732,10 +738,9 @@ def should_process(
                 "FAST_TRIGGER_RECHECK",
             )
 
-        return (
-            False,
-            "ALREADY_PROCESSED",
-        )
+        if recheck_due(state, symbol, version, time.time()):
+            return True, "BOUNDED_REJECT_RECHECK"
+        return False, "ALREADY_PROCESSED"
 
     return (
         True,
@@ -786,6 +791,9 @@ def build_decision_payload(
             {},
         )
     )
+
+    if state == "REJECTED":
+        lines.extend(["", payload.get("recheck_notice", "المتابعة: بانتظار تقرير APEX جديد.")])
 
     decision_metadata = safe_dict(
         getattr(
@@ -1269,6 +1277,15 @@ def build_telegram_message(
             {},
         )
     )
+
+    quality = safe_dict(decision_metadata.get("quality_inputs", {}))
+    if quality:
+        lines.extend([
+            "",
+            "جودة البيانات المستخدمة:",
+            f"RVOL: {format_number(quality.get('rvol'))} | السيولة: {format_number(quality.get('liquidity_score'))}/100",
+            f"حجم التداول بالدولار: {format_number(quality.get('dollar_volume'))} | تسارع الحجم: {format_number(quality.get('volume_acceleration'))}",
+        ])
 
     trigger_watch = safe_dict(
         decision_metadata.get(
@@ -4028,6 +4045,16 @@ def process_research(
             {},
         )
 
+        retry_active = update_recheck(
+            state, symbol, research_version(research), jalwe_state,
+            str(safe_dict(payload.get("jalwe", {})).get("reason", "")),
+            time.time(),
+        )
+        payload["recheck_notice"] = (
+            "المتابعة: إعادة تقييم بعد 60 ثانية ضمن نافذة 10 دقائق من بدء المراقبة؛ بشرط بقاء التقرير حديثًا واجتياز جميع البوابات."
+            if retry_active else "المتابعة: بانتظار تقرير APEX جديد."
+        )
+
         if jalwe_state == "WATCHING":
             watching[
                 symbol
@@ -4253,6 +4280,10 @@ def scan_bridge(
 
             continue
 
+        # Reconcile/protect existing positions between expensive analyses too.
+        process_emergency_paper_close()
+        manage_active_paper_trades(state)
+
         if process_research(
             research,
             decision_engine,
@@ -4448,6 +4479,10 @@ def main() -> None:
     while True:
 
         try:
+
+            # Existing positions and emergency exits take priority over discovery.
+            process_emergency_paper_close()
+            manage_active_paper_trades(state)
 
             (
                 discovered,

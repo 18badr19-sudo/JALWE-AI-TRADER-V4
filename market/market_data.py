@@ -16,6 +16,7 @@ from alpaca.data.requests import (
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 from core.config import settings
+from market.bar_quality import INTRADAY_MINUTES, completed_intraday_bars
 
 
 logger = logging.getLogger(__name__)
@@ -258,7 +259,8 @@ class MarketData:
 
             # IMPORTANT:
             # Request the newest bars first.
-            limit=limit,
+            # The API may include the current unfinished interval.
+            limit=min(limit + 1, 10000) if timeframe.lower() in INTRADAY_MINUTES else limit,
             sort=Sort.DESC,
 
             feed=self.feed,
@@ -378,6 +380,10 @@ class MarketData:
             )
 
         # Defensive final limit.
+        df = completed_intraday_bars(df, timeframe, end)
+        if df.empty:
+            raise MarketDataError(f"No completed market bars returned for {symbol}")
+        df.attrs["data_feed"] = self.get_feed_name()
         return df.tail(limit)
 
     # ========================================================

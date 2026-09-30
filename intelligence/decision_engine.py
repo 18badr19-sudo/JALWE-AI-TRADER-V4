@@ -806,6 +806,13 @@ class DecisionEngine:
             name: getattr(features, name, None)
             for name in ("rvol", "liquidity_score", "dollar_volume", "volume_acceleration")
         }
+        base_metadata["quality_inputs"].update({
+            "feed": bars.attrs.get("data_feed"),
+            "timeframe": timeframe,
+            "bar_timestamp": features.timestamp.isoformat() if features.timestamp else None,
+            "bar_completion": bars.attrs.get("completed_bar_diagnostics", {}),
+            "dollar_volume_scope": "latest_bar_only",
+        })
         self._apply_news(features, warnings)
         self._apply_options(features, warnings)
 

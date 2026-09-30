@@ -1084,8 +1084,12 @@ def get_opportunity_engine(
     global _opportunity_engine
 
     if _opportunity_engine is None:
+        from core.config import settings
+
         _opportunity_engine = (
-            OpportunityEngine()
+            OpportunityEngine(
+                minimum_score=settings.MIN_OPPORTUNITY_SCORE,
+            )
         )
 
     return _opportunity_engine

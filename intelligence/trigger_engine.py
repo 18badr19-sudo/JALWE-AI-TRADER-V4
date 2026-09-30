@@ -143,6 +143,7 @@ class TriggerEngine:
     def _bars_since_breakout(
         bars: Optional[pd.DataFrame],
         trigger: float,
+        current_price: Optional[float] = None,
     ) -> Optional[int]:
 
         if (
@@ -161,6 +162,23 @@ class TriggerEngine:
             return None
 
         values = closes.tolist()
+
+        # The decision engine can supply a live last-trade price while
+        # the bar frame intentionally contains completed candles only.
+        # If the latest completed close was still below the trigger and
+        # the live price has just crossed it, this is a new breakout now.
+        # Without this guard, an older historical cross can be mistaken
+        # for the active breakout and the entry is rejected as "too late".
+        live_price = TriggerEngine._safe_float(current_price)
+        latest_completed_close = TriggerEngine._safe_float(values[-1])
+
+        if (
+            live_price is not None
+            and latest_completed_close is not None
+            and latest_completed_close < trigger
+            and live_price >= trigger
+        ):
+            return 0
 
         last_cross_index = None
 
@@ -446,6 +464,7 @@ class TriggerEngine:
             self._bars_since_breakout(
                 bars,
                 trigger,
+                current_price=current,
             )
         )
 

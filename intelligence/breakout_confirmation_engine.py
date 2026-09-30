@@ -1022,9 +1022,14 @@ def get_breakout_confirmation_engine(
     global _breakout_confirmation_engine
 
     if _breakout_confirmation_engine is None:
+        from core.config import settings
 
         _breakout_confirmation_engine = (
-            BreakoutConfirmationEngine()
+            BreakoutConfirmationEngine(
+                minimum_score=settings.MIN_BREAKOUT_SCORE,
+                minimum_volume_ratio=settings.MIN_BREAKOUT_VOLUME_RATIO,
+                maximum_upper_wick_ratio=settings.MAX_BREAKOUT_UPPER_WICK_RATIO,
+            )
         )
 
     return _breakout_confirmation_engine

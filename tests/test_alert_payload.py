@@ -25,7 +25,10 @@ class AlertPayloadTests(unittest.TestCase):
             with self.subTest(state=state):
                 research = SimpleNamespace(symbol="TEST", metadata={"verdict": "WATCH"})
                 decision = SimpleNamespace(state=state, reason="test reason", metadata={
-                    "quality_inputs": {"rvol": 1.2, "liquidity_score": 40},
+                    "quality_inputs": {"rvol": 1.2, "liquidity_score": 40,
+                        "feed": "iex", "timeframe": "5m",
+                        "bar_timestamp": "2026-09-30T14:05:00+00:00",
+                        "bar_completion": {"completed_intraday_only": True}},
                     "trigger_watch": {"current_price": 1.18, "trigger_price": 1.19,
                                       "distance_to_trigger_pct": 0.84}})
                 payload = self.ns["build_decision_payload"](research, decision)
@@ -35,6 +38,9 @@ class AlertPayloadTests(unittest.TestCase):
                 message = self.ns["build_telegram_message"](payload)
                 self.assertIn("TEST", message)
                 self.assertIn("RVOL", message)
+                self.assertIn("IEX فقط", message)
+                self.assertIn("شموع مكتملة فقط", message)
+                self.assertIn("آخر شمعة فقط", message)
                 self.assertEqual("bounded retry notice" in message, state == "REJECTED")
 
 

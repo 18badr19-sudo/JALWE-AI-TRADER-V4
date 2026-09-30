@@ -1283,9 +1283,15 @@ def build_telegram_message(
         lines.extend([
             "",
             "جودة البيانات المستخدمة:",
+            f"المصدر: {quality.get('feed') or 'غير محدد'} | فترة الشمعة: {quality.get('timeframe') or 'غير محددة'}",
             f"RVOL: {format_number(quality.get('rvol'))} | السيولة: {format_number(quality.get('liquidity_score'))}/100",
-            f"حجم التداول بالدولار: {format_number(quality.get('dollar_volume'))} | تسارع الحجم: {format_number(quality.get('volume_acceleration'))}",
+            f"قيمة تداول آخر شمعة فقط: ${format_number(quality.get('dollar_volume'))} | تسارع الحجم: {format_number(quality.get('volume_acceleration'))}",
+            f"بداية الشمعة: {quality.get('bar_timestamp') or 'غير محددة'}",
         ])
+        if safe_dict(quality.get("bar_completion", {})).get("completed_intraday_only"):
+            lines.append("حساب الحجم: من شموع مكتملة فقط.")
+        if str(quality.get("feed", "")).lower() == "iex":
+            lines.append("تغطية الحجم: IEX فقط؛ ليست سيولة السوق كاملة.")
 
     trigger_watch = safe_dict(
         decision_metadata.get(

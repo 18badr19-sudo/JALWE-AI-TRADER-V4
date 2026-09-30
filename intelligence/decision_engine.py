@@ -9,6 +9,7 @@ from enum import Enum
 from typing import Any, Optional
 
 from intelligence.ai_engine import AIEngine
+from core.config import settings
 from core.database import database
 from intelligence.breakout_confirmation_engine import get_breakout_confirmation_engine
 from intelligence.external_research_bridge import get_external_research_bridge
@@ -133,7 +134,9 @@ class DecisionEngine:
         self.feature_engine = FeatureEngine()
         self.news_engine = get_news_engine()
         self.options_engine = get_options_flow_engine()
-        self.ai_engine = AIEngine()
+        self.ai_engine = AIEngine(
+            minimum_buy_score=settings.MIN_SIGNAL_SCORE,
+        )
         self.opportunity_engine = get_opportunity_engine()
         self.market_context_engine = get_market_context_engine()
         self.strategy_router = get_strategy_router()

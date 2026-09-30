@@ -1050,9 +1050,12 @@ def get_session_strategy_engine(
     global _session_strategy_engine
 
     if _session_strategy_engine is None:
+        from core.config import settings
 
         _session_strategy_engine = (
-            SessionStrategyEngine()
+            SessionStrategyEngine(
+                minimum_score=settings.MIN_SESSION_STRATEGY_SCORE,
+            )
         )
 
     return _session_strategy_engine

@@ -792,9 +792,6 @@ def build_decision_payload(
         )
     )
 
-    if state == "REJECTED":
-        lines.extend(["", payload.get("recheck_notice", "المتابعة: بانتظار تقرير APEX جديد.")])
-
     decision_metadata = safe_dict(
         getattr(
             decision,
@@ -1277,6 +1274,9 @@ def build_telegram_message(
             {},
         )
     )
+
+    if state == "REJECTED":
+        lines.extend(["", payload.get("recheck_notice", "المتابعة: بانتظار تقرير APEX جديد.")])
 
     quality = safe_dict(decision_metadata.get("quality_inputs", {}))
     if quality:

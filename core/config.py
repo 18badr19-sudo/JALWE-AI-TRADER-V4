@@ -364,7 +364,7 @@ class Settings:
     MIN_SIGNAL_SCORE: float = (
         _get_float(
             "MIN_SIGNAL_SCORE",
-            82.0,
+            76.0,
         )
     )
 
@@ -611,7 +611,7 @@ class Settings:
     MIN_OPPORTUNITY_SCORE: float = (
         _get_float(
             "MIN_OPPORTUNITY_SCORE",
-            74.0,
+            70.0,
         )
     )
 
@@ -622,7 +622,7 @@ class Settings:
     MIN_SESSION_STRATEGY_SCORE: float = (
         _get_float(
             "MIN_SESSION_STRATEGY_SCORE",
-            75.0,
+            72.0,
         )
     )
 

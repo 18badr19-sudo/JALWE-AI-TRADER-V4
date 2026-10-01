@@ -183,6 +183,27 @@ class AIEngine:
         bullish = 0.0
         bearish = 0.0
 
+        feature_metadata = getattr(
+            features,
+            "metadata",
+            {},
+        )
+        if not isinstance(feature_metadata, dict):
+            feature_metadata = {}
+
+        scoring_rvol = max(
+            float(features.rvol)
+            if self._available(features.rvol)
+            else 0.0,
+            float(
+                feature_metadata.get(
+                    "scoring_rvol",
+                    0.0,
+                )
+                or 0.0
+            ),
+        )
+
         evidence_count = 0
         possible_evidence = 0
 
@@ -230,25 +251,25 @@ class AIEngine:
         ):
             evidence_count += 1
 
-            if features.rvol >= 3.0:
+            if scoring_rvol >= 3.0:
                 bullish += self.learning.apply("rvol", 18)
                 reasons.append(
-                    "Very strong relative volume."
+                    "Very strong recent relative volume."
                 )
 
-            elif features.rvol >= 2.0:
+            elif scoring_rvol >= 2.0:
                 bullish += self.learning.apply("rvol", 14)
                 reasons.append(
-                    "Strong relative volume."
+                    "Strong recent relative volume."
                 )
 
-            elif features.rvol >= 1.5:
+            elif scoring_rvol >= 1.5:
                 bullish += self.learning.apply("rvol", 9)
                 reasons.append(
-                    "Elevated relative volume."
+                    "Elevated recent relative volume."
                 )
 
-            elif features.rvol < 0.8:
+            elif scoring_rvol < 0.8:
                 bearish += self.learning.apply("rvol", 8)
                 warnings.append(
                     "Relative volume is weak."

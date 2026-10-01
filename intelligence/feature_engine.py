@@ -693,6 +693,56 @@ class FeatureEngine:
             ]
         )
 
+        recent_rvol = (
+            pd.to_numeric(
+                df["rvol"].tail(3),
+                errors="coerce",
+            )
+            .replace([np.inf, -np.inf], np.nan)
+            .dropna()
+        )
+
+        recent_acceleration = (
+            pd.to_numeric(
+                df["volume_acceleration"].tail(3),
+                errors="coerce",
+            )
+            .replace([np.inf, -np.inf], np.nan)
+            .dropna()
+        )
+
+        recent_rvol_mean_3 = (
+            float(recent_rvol.mean())
+            if not recent_rvol.empty
+            else None
+        )
+
+        recent_acceleration_mean_3 = (
+            float(recent_acceleration.mean())
+            if not recent_acceleration.empty
+            else None
+        )
+
+        scoring_rvol = max(
+            value
+            for value in (
+                rvol,
+                recent_rvol_mean_3,
+                0.0,
+            )
+            if value is not None
+        )
+
+        scoring_volume_acceleration = max(
+            value
+            for value in (
+                volume_acceleration,
+                recent_acceleration_mean_3,
+                0.0,
+            )
+            if value is not None
+        )
+
         vwap = self._safe_float(
             latest["vwap"]
         )
@@ -819,23 +869,20 @@ class FeatureEngine:
         ):
             momentum_score += 20.0
 
-        if rvol is not None:
+        if scoring_rvol > 0:
 
             momentum_score += min(
                 max(
-                    rvol - 1.0,
+                    scoring_rvol - 1.0,
                     0.0,
                 ) * 15.0,
                 20.0,
             )
 
-        if (
-            volume_acceleration is not None
-            and volume_acceleration > 1.0
-        ):
+        if scoring_volume_acceleration > 1.0:
             momentum_score += min(
                 (
-                    volume_acceleration
+                    scoring_volume_acceleration
                     - 1.0
                 ) * 10.0,
                 10.0,
@@ -866,24 +913,20 @@ class FeatureEngine:
             elif dollar_volume >= 1_000_000:
                 liquidity_score += 20.0
 
-        if rvol is not None:
+        if scoring_rvol >= 3.0:
+            liquidity_score += 30.0
 
-            if rvol >= 3.0:
-                liquidity_score += 30.0
+        elif scoring_rvol >= 2.0:
+            liquidity_score += 25.0
 
-            elif rvol >= 2.0:
-                liquidity_score += 25.0
+        elif scoring_rvol >= 1.5:
+            liquidity_score += 15.0
 
-            elif rvol >= 1.5:
-                liquidity_score += 15.0
+        if scoring_volume_acceleration >= 2.0:
+            liquidity_score += 20.0
 
-        if volume_acceleration is not None:
-
-            if volume_acceleration >= 2.0:
-                liquidity_score += 20.0
-
-            elif volume_acceleration >= 1.25:
-                liquidity_score += 10.0
+        elif scoring_volume_acceleration >= 1.25:
+            liquidity_score += 10.0
 
         liquidity_score = min(
             max(
@@ -968,5 +1011,14 @@ class FeatureEngine:
                 "feature_engine": "JALWE_V4",
                 "bars_used": len(df),
                 "vwap_mode": "NY_SESSION",
+                "recent_rvol_mean_3": recent_rvol_mean_3,
+                "recent_volume_acceleration_mean_3": (
+                    recent_acceleration_mean_3
+                ),
+                "scoring_rvol": scoring_rvol,
+                "scoring_volume_acceleration": (
+                    scoring_volume_acceleration
+                ),
+                "activity_context_bars": 3,
             },
         )

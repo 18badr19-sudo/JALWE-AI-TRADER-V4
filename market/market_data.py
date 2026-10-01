@@ -12,6 +12,7 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import (
     StockBarsRequest,
     StockLatestQuoteRequest,
+    StockLatestTradeRequest,
 )
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
@@ -494,27 +495,40 @@ class MarketData:
             symbol
         )
 
+        # Trigger/chase logic must use a real executed trade price.
+        # A bid/ask midpoint can jump when the spread widens on a
+        # thin stock and can create false trigger crosses or false
+        # "too extended" rejections.
+        request = StockLatestTradeRequest(
+            symbol_or_symbols=symbol,
+            feed=self.feed,
+        )
+
         try:
-            quote = self.get_latest_quote(
-                symbol
+            trades = (
+                self.client
+                .get_stock_latest_trade(
+                    request
+                )
             )
 
-            mid = quote.get(
-                "mid"
+            trade = trades[symbol]
+
+            price = float(
+                trade.price
             )
 
-            if (
-                mid is not None
-                and mid > 0
-            ):
-                return float(mid)
+            if price > 0:
+                return price
 
-        except MarketDataError:
+        except Exception as exc:
 
             logger.warning(
-                "Quote unavailable for %s. "
-                "Using latest real bar.",
+                "Latest trade unavailable for %s "
+                "on feed=%s; using latest real bar: %s",
                 symbol,
+                self.get_feed_name(),
+                exc,
             )
 
         bars = self.get_bars(

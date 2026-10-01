@@ -743,6 +743,27 @@ class DecisionEngine:
             )
 
             if breakout_state == "WAITING":
+                self._breakout_latches[symbol] = {
+                    "created_at": datetime.now(timezone.utc).timestamp(),
+                    "expires_at": (
+                        datetime.now(timezone.utc).timestamp()
+                        + 420.0
+                    ),
+                    "trigger_price": trigger.trigger_price,
+                    "stop_price": (
+                        breakout.stop_price
+                        if breakout.stop_price is not None
+                        else trigger.stop_price
+                    ),
+                    "market_regime": market_name,
+                    "strategy": session_strategy_name,
+                    "setup_grade": routed.grade.value,
+                    "opportunity_score": routed.routed_score,
+                    "session_strategy_score": session_strategy.score,
+                    "ai_score": getattr(ai, "score", None),
+                    "risk_pct": routed.final_risk_pct,
+                }
+
                 return self._watch(
                     symbol=symbol,
                     reason=breakout.reason,
@@ -1087,6 +1108,20 @@ class DecisionEngine:
             )
 
         gates["features"] = True
+
+        latched_result = self._resume_breakout_latch(
+            symbol=symbol,
+            bars=bars,
+            features=features,
+            gates=gates,
+            warnings=warnings,
+            base_metadata=base_metadata,
+            strategy_equity=strategy_equity,
+            daily_start_equity=daily_start_equity,
+        )
+
+        if latched_result is not None:
+            return latched_result
 
         # ====================================================
         # 3. OPTIONAL NATIVE JALWE EVIDENCE

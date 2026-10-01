@@ -364,7 +364,7 @@ class Settings:
     MIN_SIGNAL_SCORE: float = (
         _get_float(
             "MIN_SIGNAL_SCORE",
-            76.0,
+            74.0,
         )
     )
 

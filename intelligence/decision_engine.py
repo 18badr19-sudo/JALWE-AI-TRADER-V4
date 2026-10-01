@@ -1155,12 +1155,50 @@ class DecisionEngine:
         )
 
         if not breakout.approved_for_entry:
+            breakout_state = getattr(
+                breakout.state,
+                "value",
+                str(breakout.state),
+            )
+
+            breakout_metadata = self._merge_metadata(
+                base_metadata,
+                {
+                    "breakout_confirmation_state": breakout_state,
+                    "breakout_volume_ratio": breakout.volume_ratio,
+                    "breakout_extension_pct": breakout.extension_pct,
+                },
+            )
+
+            # WAITING is not a failed setup. TriggerEngine can cross on a
+            # live last-trade while breakout confirmation intentionally uses
+            # completed candles. Keep the setup under bounded recheck until
+            # a completed candle can confirm or invalidate the breakout.
+            if breakout_state == "WAITING":
+                return self._watch(
+                    symbol=symbol,
+                    reason=breakout.reason,
+                    gates=gates,
+                    warnings=warnings + list(breakout.warnings),
+                    metadata=breakout_metadata,
+                    market_regime=market_name,
+                    strategy=session_strategy_name,
+                    setup_grade=routed.grade.value,
+                    opportunity_score=routed.routed_score,
+                    session_strategy_score=session_strategy.score,
+                    breakout_score=breakout.score,
+                    ai_score=getattr(ai, "score", None),
+                    risk_pct=routed.final_risk_pct,
+                    entry_price=trigger.trigger_price,
+                    stop_price=breakout.stop_price,
+                )
+
             return self._reject(
                 symbol=symbol,
                 reason=breakout.reason,
                 gates=gates,
                 warnings=warnings + list(breakout.warnings),
-                metadata=base_metadata,
+                metadata=breakout_metadata,
                 market_regime=market_name,
                 strategy=session_strategy_name,
                 setup_grade=routed.grade.value,

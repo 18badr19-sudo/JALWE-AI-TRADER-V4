@@ -214,11 +214,26 @@ class OpportunityEngine:
         reasons: list[str] = []
         warnings: list[str] = []
 
-        rvol = self._num(
-            self._get(
-                f,
-                "rvol",
-            )
+        feature_metadata = self._get(
+            f,
+            "metadata",
+            {},
+        )
+        if not isinstance(feature_metadata, dict):
+            feature_metadata = {}
+
+        rvol = max(
+            self._num(
+                self._get(
+                    f,
+                    "rvol",
+                )
+            ),
+            self._num(
+                feature_metadata.get(
+                    "scoring_rvol"
+                )
+            ),
         )
 
         liquidity = self._num(
@@ -228,11 +243,18 @@ class OpportunityEngine:
             )
         )
 
-        volume_acceleration = self._num(
-            self._get(
-                f,
-                "volume_acceleration",
-            )
+        volume_acceleration = max(
+            self._num(
+                self._get(
+                    f,
+                    "volume_acceleration",
+                )
+            ),
+            self._num(
+                feature_metadata.get(
+                    "scoring_volume_acceleration"
+                )
+            ),
         )
 
         vwap_distance = self._num(

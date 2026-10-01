@@ -366,6 +366,7 @@ def load_state() -> dict:
         "rechecks": {},
 
         "last_notified": {},
+        "last_notified_state": {},
 
         "watching": {},
 
@@ -420,6 +421,18 @@ def load_state() -> dict:
 
             last_notified = {}
 
+        last_notified_state = data.get(
+            "last_notified_state",
+            {},
+        )
+
+        if not isinstance(
+            last_notified_state,
+            dict,
+        ):
+
+            last_notified_state = {}
+
         watching = data.get(
             "watching",
             {},
@@ -465,6 +478,9 @@ def load_state() -> dict:
 
             "last_notified":
                 last_notified,
+
+            "last_notified_state":
+                last_notified_state,
 
             "watching":
                 watching,
@@ -516,6 +532,12 @@ def save_state(
         "last_notified":
             state.get(
                 "last_notified",
+                {},
+            ),
+
+        "last_notified_state":
+            state.get(
+                "last_notified_state",
                 {},
             ),
 
@@ -1812,34 +1834,78 @@ def notification_fingerprint(
                 "strategy"
             ),
 
+        # Track only material score movement while a setup is being
+        # watched. Exact live price/stop changes were causing a new
+        # Telegram alert almost every re-analysis.
+        "opportunity_score_bucket":
+            notification_score_bucket(
+                jalwe.get(
+                    "opportunity_score"
+                )
+            ),
+
+        "ai_score_bucket":
+            notification_score_bucket(
+                jalwe.get(
+                    "ai_score"
+                )
+            ),
+
+        "session_score_bucket":
+            notification_score_bucket(
+                jalwe.get(
+                    "session_strategy_score"
+                )
+            ),
+
+        "breakout_score_bucket":
+            notification_score_bucket(
+                jalwe.get(
+                    "breakout_score"
+                )
+            ),
+
+        # Exact execution levels matter once the setup is actually ready.
         "entry":
-            jalwe.get(
-                "entry_price"
+            (
+                jalwe.get("entry_price")
+                if bool(jalwe.get("ready_for_execution"))
+                else None
             ),
 
         "stop":
-            jalwe.get(
-                "stop_price"
+            (
+                jalwe.get("stop_price")
+                if bool(jalwe.get("ready_for_execution"))
+                else None
             ),
 
         "t1":
-            jalwe.get(
-                "target_1"
+            (
+                jalwe.get("target_1")
+                if bool(jalwe.get("ready_for_execution"))
+                else None
             ),
 
         "t2":
-            jalwe.get(
-                "target_2"
+            (
+                jalwe.get("target_2")
+                if bool(jalwe.get("ready_for_execution"))
+                else None
             ),
 
         "t3":
-            jalwe.get(
-                "target_3"
+            (
+                jalwe.get("target_3")
+                if bool(jalwe.get("ready_for_execution"))
+                else None
             ),
 
         "quantity":
-            jalwe.get(
-                "quantity"
+            (
+                jalwe.get("quantity")
+                if bool(jalwe.get("ready_for_execution"))
+                else None
             ),
     }
 
@@ -1912,6 +1978,40 @@ def notify_if_changed(
         or ""
     ).upper()
 
+    last_notified_state = state.setdefault(
+        "last_notified_state",
+        {},
+    )
+
+    previous_state = str(
+        last_notified_state.get(
+            symbol,
+            "",
+        )
+        or ""
+    ).upper()
+
+    # Do not send hundreds of first-pass rejection messages. A rejection
+    # is useful to the user only when a setup had already been surfaced as
+    # WATCHING/READY and then failed or expired.
+    if (
+        jalwe_state == "REJECTED"
+        and previous_state
+        not in {
+            "WATCHING",
+            "READY_FOR_PAPER_EXECUTION",
+        }
+    ):
+        last_notified_state[
+            symbol
+        ] = "REJECTED"
+        save_state(
+            state
+        )
+        return (
+            "REJECTED_SILENT"
+        )
+
     last_watch_update = state.setdefault(
         "last_watch_update",
         {},
@@ -1965,6 +2065,10 @@ def notify_if_changed(
         last_notified[
             symbol
         ] = fingerprint
+
+        last_notified_state[
+            symbol
+        ] = jalwe_state
 
         if jalwe_state == "WATCHING":
             last_watch_update[

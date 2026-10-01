@@ -585,6 +585,291 @@ class DecisionEngine:
             warnings.append(f"Options data unavailable: {exc}")
 
     # ========================================================
+    # BOUNDED BREAKOUT CONFIRMATION LATCH
+    # ========================================================
+
+    def _resume_breakout_latch(
+        self,
+        *,
+        symbol: str,
+        bars: Any,
+        features: Any,
+        gates: dict[str, bool],
+        warnings: list[str],
+        base_metadata: dict[str, Any],
+        strategy_equity: float,
+        daily_start_equity: float,
+    ) -> Optional[FinalTradeDecision]:
+        latch = self._breakout_latches.get(symbol)
+
+        if not latch:
+            return None
+
+        now_ts = datetime.now(timezone.utc).timestamp()
+        expires_at = float(latch.get("expires_at", 0.0) or 0.0)
+
+        if expires_at <= now_ts:
+            self._breakout_latches.pop(symbol, None)
+            return None
+
+        try:
+            trigger_price = float(latch["trigger_price"])
+            stop_price = float(latch["stop_price"])
+        except (KeyError, TypeError, ValueError):
+            self._breakout_latches.pop(symbol, None)
+            return None
+
+        for gate_name in (
+            "ai",
+            "opportunity",
+            "market_regime",
+            "strategy_router",
+            "session_strategy",
+            "trigger",
+        ):
+            gates[gate_name] = True
+
+        # Keep a hard macro safety gate live during the short latch.
+        try:
+            current_market = self.market_context_engine.get_regime_result()
+            current_market_name = getattr(
+                current_market.regime,
+                "value",
+                str(current_market.regime),
+            )
+            if (
+                current_market_name in {"PANIC", "UNKNOWN"}
+                or current_market.confidence < 0.50
+            ):
+                self._breakout_latches.pop(symbol, None)
+                return self._reject(
+                    symbol=symbol,
+                    reason="Latched breakout cancelled by current market regime.",
+                    gates=gates,
+                    warnings=warnings,
+                    metadata=self._merge_metadata(
+                        base_metadata,
+                        {"breakout_latch": dict(latch)},
+                    ),
+                    market_regime=current_market_name,
+                    strategy=latch.get("strategy"),
+                    setup_grade=latch.get("setup_grade"),
+                    opportunity_score=latch.get("opportunity_score"),
+                    session_strategy_score=latch.get("session_strategy_score"),
+                    ai_score=latch.get("ai_score"),
+                    entry_price=trigger_price,
+                    stop_price=stop_price,
+                )
+        except Exception as exc:
+            warnings.append(
+                f"Latched market-regime refresh unavailable: {exc}"
+            )
+
+        try:
+            current_price = float(
+                self.market_data.get_last_price(symbol)
+            )
+        except Exception:
+            current_price = float(
+                getattr(features, "price", 0.0)
+                or 0.0
+            )
+
+        if current_price <= stop_price:
+            self._breakout_latches.pop(symbol, None)
+            return self._reject(
+                symbol=symbol,
+                reason="Latched setup reached its invalidation level before candle confirmation.",
+                gates=gates,
+                warnings=warnings,
+                metadata=self._merge_metadata(
+                    base_metadata,
+                    {"breakout_latch": dict(latch)},
+                ),
+                market_regime=latch.get("market_regime"),
+                strategy=latch.get("strategy"),
+                setup_grade=latch.get("setup_grade"),
+                opportunity_score=latch.get("opportunity_score"),
+                session_strategy_score=latch.get("session_strategy_score"),
+                ai_score=latch.get("ai_score"),
+                risk_pct=0.0,
+                entry_price=trigger_price,
+                stop_price=stop_price,
+            )
+
+        latched_trigger = TriggerDecision(
+            symbol=symbol,
+            state=TriggerState.ENTRY_CONFIRMED,
+            approved_for_entry=True,
+            current_price=current_price,
+            trigger_price=trigger_price,
+            stop_price=stop_price,
+            reason="Previously crossed trigger is latched while candle confirmation completes.",
+            metadata={
+                "latched": True,
+                "expires_at": expires_at,
+            },
+        )
+
+        breakout = self.breakout_engine.evaluate(
+            latched_trigger,
+            bars,
+            features,
+        )
+
+        gates["breakout_confirmation"] = bool(
+            breakout.approved_for_entry
+        )
+
+        latch_metadata = self._merge_metadata(
+            base_metadata,
+            {
+                "breakout_latch": dict(latch),
+                "breakout_confirmation_state": getattr(
+                    breakout.state,
+                    "value",
+                    str(breakout.state),
+                ),
+                "breakout_volume_ratio": breakout.volume_ratio,
+                "breakout_extension_pct": breakout.extension_pct,
+            },
+        )
+
+        if not breakout.approved_for_entry:
+            breakout_state = getattr(
+                breakout.state,
+                "value",
+                str(breakout.state),
+            )
+
+            if breakout_state == "WAITING":
+                return self._watch(
+                    symbol=symbol,
+                    reason=breakout.reason,
+                    gates=gates,
+                    warnings=warnings + list(breakout.warnings),
+                    metadata=latch_metadata,
+                    market_regime=latch.get("market_regime"),
+                    strategy=latch.get("strategy"),
+                    setup_grade=latch.get("setup_grade"),
+                    opportunity_score=latch.get("opportunity_score"),
+                    session_strategy_score=latch.get("session_strategy_score"),
+                    breakout_score=breakout.score,
+                    ai_score=latch.get("ai_score"),
+                    risk_pct=float(latch.get("risk_pct", 0.0) or 0.0),
+                    entry_price=trigger_price,
+                    stop_price=stop_price,
+                )
+
+            self._breakout_latches.pop(symbol, None)
+            return self._reject(
+                symbol=symbol,
+                reason=breakout.reason,
+                gates=gates,
+                warnings=warnings + list(breakout.warnings),
+                metadata=latch_metadata,
+                market_regime=latch.get("market_regime"),
+                strategy=latch.get("strategy"),
+                setup_grade=latch.get("setup_grade"),
+                opportunity_score=latch.get("opportunity_score"),
+                session_strategy_score=latch.get("session_strategy_score"),
+                breakout_score=breakout.score,
+                ai_score=latch.get("ai_score"),
+                risk_pct=0.0,
+                entry_price=breakout.close_price,
+                stop_price=breakout.stop_price,
+            )
+
+        latched_ai_score = float(
+            latch.get("ai_score", settings.MIN_SIGNAL_SCORE)
+            or settings.MIN_SIGNAL_SCORE
+        )
+
+        latched_ai = AIAnalysis(
+            symbol=symbol,
+            action=SignalAction.BUY,
+            score=latched_ai_score,
+            probability=min(1.0, max(0.0, latched_ai_score / 100.0)),
+            confidence=1.0,
+            bullish_score=latched_ai_score,
+            bearish_score=max(0.0, 100.0 - latched_ai_score),
+            reasons=["AI BUY gate was passed before breakout latch."],
+            metadata={"latched": True},
+        )
+
+        risk = self.risk_engine.evaluate(
+            features=features,
+            ai_analysis=latched_ai,
+            daily_start_equity=daily_start_equity,
+            strategy_equity=strategy_equity,
+            recommended_risk_pct=float(
+                latch.get("risk_pct", 0.0)
+                or 0.0
+            ),
+            setup_grade=latch.get("setup_grade"),
+            confirmed_entry_price=breakout.close_price,
+            confirmed_stop_price=breakout.stop_price,
+            confirmation_approved=True,
+        )
+
+        gates["risk"] = bool(risk.approved)
+
+        if not risk.approved:
+            self._breakout_latches.pop(symbol, None)
+            return self._reject(
+                symbol=symbol,
+                reason=risk.reason,
+                gates=gates,
+                warnings=warnings,
+                metadata=self._merge_metadata(
+                    latch_metadata,
+                    {"risk_metadata": risk.metadata},
+                ),
+                market_regime=latch.get("market_regime"),
+                strategy=latch.get("strategy"),
+                setup_grade=latch.get("setup_grade"),
+                opportunity_score=latch.get("opportunity_score"),
+                session_strategy_score=latch.get("session_strategy_score"),
+                breakout_score=breakout.score,
+                ai_score=latched_ai_score,
+                risk_pct=0.0,
+                entry_price=breakout.close_price,
+                stop_price=breakout.stop_price,
+            )
+
+        self._breakout_latches.pop(symbol, None)
+
+        return FinalTradeDecision(
+            symbol=symbol,
+            state=DecisionState.READY_FOR_PAPER_EXECUTION,
+            ready_for_execution=True,
+            market_regime=latch.get("market_regime"),
+            strategy=latch.get("strategy"),
+            setup_grade=latch.get("setup_grade"),
+            opportunity_score=latch.get("opportunity_score"),
+            session_strategy_score=latch.get("session_strategy_score"),
+            breakout_score=breakout.score,
+            ai_score=latched_ai_score,
+            risk_pct=risk.risk_pct,
+            quantity=risk.quantity,
+            entry_price=breakout.close_price,
+            stop_price=risk.stop_price,
+            target_1=risk.target_1,
+            target_2=risk.target_2,
+            target_3=risk.target_3,
+            reason="Latched breakout confirmed and all remaining safety/risk gates passed.",
+            gates=gates,
+            warnings=warnings,
+            metadata=self._merge_metadata(
+                latch_metadata,
+                {
+                    "risk_metadata": risk.metadata,
+                    "latched_breakout_completed": True,
+                },
+            ),
+        )
+
+    # ========================================================
     # MAIN ANALYSIS
     # ========================================================
 

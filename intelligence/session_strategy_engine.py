@@ -871,17 +871,25 @@ class SessionStrategyEngine:
             else compression_high * 0.99
         )
 
+        # Invalidation must sit below the compression structure.
+        # Using the higher of compression_low and the ATR stop made the
+        # stop too tight on low-priced names and could place it inside
+        # the normal bid/ask noise. RiskEngine will reduce quantity when
+        # the structural stop is wider.
         stop = round(
-            max(
+            min(
                 compression_low,
                 atr_stop,
             ),
             4,
         )
 
-        if stop >= trigger:
+        if stop <= 0 or stop >= trigger:
             stop = round(
-                trigger * 0.99,
+                min(
+                    compression_low,
+                    trigger * 0.99,
+                ),
                 4,
             )
 

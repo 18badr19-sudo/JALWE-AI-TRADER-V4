@@ -173,12 +173,27 @@ class SessionStrategyEngine:
         reasons: list[str] = []
         warnings: list[str] = []
 
-        rvol = self._num(
-            getattr(
-                features,
-                "rvol",
-                None,
-            )
+        feature_metadata = getattr(
+            features,
+            "metadata",
+            {},
+        )
+        if not isinstance(feature_metadata, dict):
+            feature_metadata = {}
+
+        rvol = max(
+            self._num(
+                getattr(
+                    features,
+                    "rvol",
+                    None,
+                )
+            ),
+            self._num(
+                feature_metadata.get(
+                    "scoring_rvol"
+                )
+            ),
         )
 
         liquidity = self._num(
@@ -189,12 +204,19 @@ class SessionStrategyEngine:
             )
         )
 
-        volume_acceleration = self._num(
-            getattr(
-                features,
-                "volume_acceleration",
-                None,
-            )
+        volume_acceleration = max(
+            self._num(
+                getattr(
+                    features,
+                    "volume_acceleration",
+                    None,
+                )
+            ),
+            self._num(
+                feature_metadata.get(
+                    "scoring_volume_acceleration"
+                )
+            ),
         )
 
         momentum = self._num(

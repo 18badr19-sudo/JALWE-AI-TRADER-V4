@@ -568,8 +568,13 @@ def get_trigger_engine(
     global _trigger_engine
 
     if _trigger_engine is None:
+        from core.config import settings
+
         _trigger_engine = (
-            TriggerEngine()
+            TriggerEngine(
+                waiting_zone_pct=settings.WAITING_ZONE_PCT,
+                max_chase_pct=settings.MAX_CHASE_PCT,
+            )
         )
 
     return _trigger_engine

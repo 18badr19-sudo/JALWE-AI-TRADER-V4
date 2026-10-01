@@ -8,9 +8,10 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
 
-from intelligence.ai_engine import AIEngine
+from intelligence.ai_engine import AIAnalysis, AIEngine
 from core.config import settings
 from core.database import database
+from core.models import SignalAction
 from intelligence.breakout_confirmation_engine import get_breakout_confirmation_engine
 from intelligence.external_research_bridge import get_external_research_bridge
 from intelligence.feature_engine import FeatureEngine
@@ -19,7 +20,7 @@ from intelligence.opportunity_engine import get_opportunity_engine
 from intelligence.options_flow_engine import get_options_flow_engine
 from intelligence.session_strategy_engine import get_session_strategy_engine
 from intelligence.strategy_router import get_strategy_router
-from intelligence.trigger_engine import TriggerState, get_trigger_engine
+from intelligence.trigger_engine import TriggerDecision, TriggerState, get_trigger_engine
 from market.market_context import get_market_context_engine
 from market.market_data import get_market_data
 from market.session_features import get_session_feature_engine
@@ -146,6 +147,7 @@ class DecisionEngine:
         self.breakout_engine = get_breakout_confirmation_engine()
         self.risk_engine = get_risk_engine()
         self.external_research_bridge = get_external_research_bridge()
+        self._breakout_latches: dict[str, dict[str, Any]] = {}
 
     # ========================================================
     # RESULT HELPERS

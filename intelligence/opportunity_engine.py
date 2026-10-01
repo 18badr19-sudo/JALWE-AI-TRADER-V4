@@ -146,7 +146,7 @@ class OpportunityEngine:
         if score >= 82:
             return OpportunityGrade.A
 
-        if score >= 74:
+        if score >= 70:
             return OpportunityGrade.B
 
         return OpportunityGrade.REJECT

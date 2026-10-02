@@ -8,7 +8,7 @@ import time
 import urllib.parse
 import urllib.request
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
@@ -3448,6 +3448,117 @@ def _sync_protective_stop(
 
 
 # ============================================================
+# ACTIVE PAPER TRADE PRICE WINDOW
+# ============================================================
+
+MANAGEMENT_TRADE_SCAN_MAX_GAP_SECONDS = 120
+MANAGEMENT_TRADE_SCAN_OVERLAP_SECONDS = 2
+
+
+def _parse_utc_datetime(
+    value: Any,
+) -> Optional[datetime]:
+
+    text = str(
+        value or ""
+    ).strip()
+
+    if not text:
+        return None
+
+    try:
+        parsed = datetime.fromisoformat(
+            text.replace(
+                "Z",
+                "+00:00",
+            )
+        )
+    except ValueError:
+        return None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(
+            tzinfo=timezone.utc
+        )
+    else:
+        parsed = parsed.astimezone(
+            timezone.utc
+        )
+
+    return parsed
+
+
+def _management_trade_scan_start(
+    trade: Any,
+    now_utc: datetime,
+) -> tuple[datetime, bool]:
+
+    metadata = (
+        trade.metadata
+        if isinstance(
+            trade.metadata,
+            dict,
+        )
+        else {}
+    )
+
+    previous = _parse_utc_datetime(
+        metadata.get(
+            "management_trade_scan_at"
+        )
+    )
+
+    if previous is None:
+        return (
+            now_utc,
+            False,
+        )
+
+    scan_count = int(
+        metadata.get(
+            "management_trade_scan_count",
+            0,
+        )
+        or 0
+    )
+
+    overlap_seconds = (
+        MANAGEMENT_TRADE_SCAN_OVERLAP_SECONDS
+        if scan_count > 0
+        else 0
+    )
+
+    candidate = (
+        previous
+        - timedelta(
+            seconds=overlap_seconds
+        )
+    )
+
+    oldest_allowed = (
+        now_utc
+        - timedelta(
+            seconds=(
+                MANAGEMENT_TRADE_SCAN_MAX_GAP_SECONDS
+            )
+        )
+    )
+
+    truncated = (
+        candidate
+        < oldest_allowed
+    )
+
+    return (
+        max(
+            candidate,
+            oldest_allowed,
+        ),
+        truncated,
+    )
+
+
+# ============================================================
 # ACTIVE PAPER TRADE MANAGEMENT
 # ============================================================
 
@@ -3512,15 +3623,134 @@ def manage_active_paper_trades(
 
     for trade_id, trade in active.items():
         try:
-            current_price = float(
-                market_data.get_last_price(
-                    trade.symbol
-                )
+            now_utc = datetime.now(
+                timezone.utc
             )
+
+            (
+                scan_start,
+                scan_gap_truncated,
+            ) = _management_trade_scan_start(
+                trade,
+                now_utc,
+            )
+
+            observed_high = None
+            trade_range = None
+
+            try:
+                trade_range = (
+                    market_data
+                    .get_trade_range(
+                        symbol=trade.symbol,
+                        start=scan_start,
+                        end=now_utc,
+                    )
+                )
+
+                observed_high_raw = (
+                    trade_range.get(
+                        "high"
+                    )
+                )
+
+                if observed_high_raw is not None:
+                    observed_high = float(
+                        observed_high_raw
+                    )
+
+                last_trade_raw = (
+                    trade_range.get(
+                        "last"
+                    )
+                )
+
+                if last_trade_raw is not None:
+                    current_price = float(
+                        last_trade_raw
+                    )
+                else:
+                    current_price = float(
+                        market_data.get_last_price(
+                            trade.symbol
+                        )
+                    )
+
+                metadata = (
+                    trade.metadata
+                    if isinstance(
+                        trade.metadata,
+                        dict,
+                    )
+                    else {}
+                )
+
+                metadata[
+                    "management_trade_scan_at"
+                ] = now_utc.isoformat()
+
+                metadata[
+                    "management_trade_scan_count"
+                ] = int(
+                    metadata.get(
+                        "management_trade_scan_count",
+                        0,
+                    )
+                    or 0
+                ) + 1
+
+                metadata[
+                    "management_trade_last_high"
+                ] = observed_high
+
+                metadata[
+                    "management_trade_last_count"
+                ] = int(
+                    trade_range.get(
+                        "count",
+                        0,
+                    )
+                    or 0
+                )
+
+                metadata[
+                    "management_trade_feed"
+                ] = str(
+                    trade_range.get(
+                        "feed",
+                        ""
+                    )
+                    or ""
+                )
+
+                metadata[
+                    "management_trade_scan_gap_truncated"
+                ] = bool(
+                    scan_gap_truncated
+                )
+
+                trade.metadata = metadata
+
+            except Exception as exc:
+                logger.warning(
+                    "Trade-range target scan failed | "
+                    "symbol=%s error=%s",
+                    trade.symbol,
+                    exc,
+                )
+
+                current_price = float(
+                    market_data.get_last_price(
+                        trade.symbol
+                    )
+                )
 
             decision = trade_manager.evaluate(
                 trade,
                 current_price,
+                observed_high=(
+                    observed_high
+                ),
             )
 
             # HOLD / stop-ratchet / runner-state changes still

@@ -8,6 +8,7 @@ import time
 from datetime import datetime, time as dt_time, timezone
 from enum import Enum
 from pathlib import Path
+from core.storage import data_directory
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
@@ -41,10 +42,7 @@ ENV_FILE = (
     / ".env"
 )
 
-DATA_DIR = (
-    BASE_DIR
-    / "data"
-)
+DATA_DIR = data_directory()
 
 DATA_DIR.mkdir(
     parents=True,

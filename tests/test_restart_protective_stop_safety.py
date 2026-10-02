@@ -5,7 +5,7 @@ import unittest
 
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 import jalwe_research_watcher as watcher
 
@@ -373,6 +373,7 @@ class RestartAndProtectiveStopSafetyTests(
             symbol="CANE",
             quantity=5,
             stop_price=11.79,
+            client_order_id=ANY,
         )
 
         self.assertTrue(

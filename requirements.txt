@@ -1,9 +1,8 @@
-alpaca-py
-alpaca-trade-api
-python-dotenv
-numpy
-pandas
-psycopg2-binary
-requests
-scikit-learn
-finvizfinance
+alpaca-py>=0.39.0,<1
+python-dotenv>=1.0.1,<2
+numpy>=1.26,<3
+pandas>=2.1,<3
+psycopg2-binary>=2.9,<3
+requests>=2.31,<3
+scikit-learn>=1.4,<2
+finvizfinance>=0.14,<1

@@ -1,6 +1,14 @@
+# CANONICAL ENGINE NOTE
+# This root module is the research-path engine.
+# Live decisioning uses intelligence/ai_engine.py (and intelligence/news_engine.py).
+# Do not treat the two copies as interchangeable. Research imports this file;
+# DecisionEngine imports the intelligence package.
+# A merge was not applied because the public APIs differ.
+
 from __future__ import annotations
 
 import logging
+import re
 import os
 
 from datetime import datetime, timezone
@@ -548,88 +556,42 @@ class NewsEngine:
     # TEXT SENTIMENT
     # ========================================================
 
-    def _score_text(
-        self,
-        text: str,
-    ) -> float:
-
-        normalized = str(
-            text
-            or ""
-        ).lower()
-
+    def _score_text(self, text: str) -> float:
+        normalized = str(text or '').lower()
+        keywords = dict(self.POSITIVE_KEYWORDS)
+        keywords.update(self.NEGATIVE_KEYWORDS)
+        # Consume longer phrases first: "fda approval" must not also count "approval".
+        occupied = set()
         score = 0.0
-
-        for (
-            keyword,
-            weight,
-        ) in (
-            self.POSITIVE_KEYWORDS.items()
-        ):
-
-            if keyword in normalized:
-
-                score += (
-                    weight
-                )
-
-        for (
-            keyword,
-            weight,
-        ) in (
-            self.NEGATIVE_KEYWORDS.items()
-        ):
-
-            if keyword in normalized:
-
-                score += (
-                    weight
-                )
-
-        return max(
-            -1.0,
-            min(
-                float(score),
-                1.0,
-            ),
-        )
+        for keyword in sorted(keywords, key=len, reverse=True):
+            for match in re.finditer(r'(?<!\w)' + re.escape(keyword) + r'(?!\w)', normalized):
+                span = set(range(match.start(), match.end()))
+                if span & occupied:
+                    continue
+                occupied.update(span)
+                weight = keywords[keyword]
+                context = normalized[max(0, match.start()-32):match.end()+32]
+                negated = re.search(r'\b(?:no|not|without|denied|rejected|revoked|cancelled|canceled|fails?|failed)\b', context)
+                score += -abs(weight) if weight > 0 and negated else weight
+                break
+        return max(-1.0, min(float(score), 1.0))
 
 
     # ========================================================
     # CATALYST DETECTION
     # ========================================================
 
-    def _detect_catalysts(
-        self,
-        text: str,
-    ) -> list[str]:
-
-        normalized = str(
-            text
-            or ""
-        ).lower()
-
-        catalysts: list[str] = []
-
-        for (
-            keyword,
-            catalyst,
-        ) in (
-            self.CATALYST_KEYWORDS.items()
-        ):
-
-            if (
-                keyword in normalized
-
-                and
-
-                catalyst not in catalysts
-            ):
-
-                catalysts.append(
-                    catalyst
-                )
-
+    def _detect_catalysts(self, text: str) -> list[str]:
+        normalized = str(text or '').lower()
+        catalysts = []
+        for keyword, catalyst in self.CATALYST_KEYWORDS.items():
+            match = re.search(r'(?<!\w)' + re.escape(keyword) + r'(?!\w)', normalized)
+            if match is None or catalyst in catalysts:
+                continue
+            context = normalized[max(0, match.start()-32):match.end()+32]
+            if catalyst == 'APPROVAL' and re.search(r'\b(?:no|not|without|denied|rejected|revoked|cancelled|canceled|failed)\b', context):
+                continue
+            catalysts.append(catalyst)
         return catalysts
 
 

@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import requests
 
-from alpaca_trade_api.rest import REST
+from broker.paper_data_client import PaperAssetClient
 from dotenv import load_dotenv
 
 from finvizfinance.screener.custom import Custom
@@ -238,7 +238,7 @@ class ScannerEngine:
         ).strip()
 
         self.alpaca: Optional[
-            REST
+            PaperAssetClient
         ] = None
 
         self.data_feed = (
@@ -352,11 +352,9 @@ class ScannerEngine:
 
         try:
 
-            self.alpaca = REST(
+            self.alpaca = PaperAssetClient(
                 self.api_key,
                 self.api_secret,
-                self.base_url,
-                api_version="v2",
             )
 
         except Exception as exc:
@@ -1669,35 +1667,10 @@ class ScannerEngine:
                 else None
             )
 
-            change_pct = (
-                self._number(
-                    row.get(
-                        change_column
-                    )
-                )
-                if change_column
-                else None
-            )
-
-            # ------------------------------------------------
-            # Some Finviz versions already convert
-            # percentages to decimal form.
-            # ------------------------------------------------
-
-            if (
-                change_pct is not None
-                and
-                abs(
-                    change_pct
-                )
-                <= 1.0
-            ):
-
-                change_pct = (
-                    change_pct
-                    *
-                    100.0
-                )
+            raw_change = row.get(change_column) if change_column else None
+            change_pct = self._number(raw_change)
+            if change_pct is not None and not isinstance(raw_change, str):
+                change_pct *= 100.0
 
             float_shares = (
                 self._number(

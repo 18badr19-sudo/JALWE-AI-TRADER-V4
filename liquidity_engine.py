@@ -10,8 +10,9 @@ from typing import Any, Iterable, Optional
 
 import numpy as np
 import pandas as pd
+from market.research_bar_quality import validated_research_bars
 
-import alpaca_trade_api as tradeapi
+from broker.paper_data_client import PaperBarsClient
 from dotenv import load_dotenv
 
 
@@ -273,15 +274,9 @@ class LiquidityEngine:
 
         try:
 
-            self.alpaca = tradeapi.REST(
-
+            self.alpaca = PaperBarsClient(
                 self.api_key,
-
                 self.api_secret,
-
-                self.base_url,
-
-                api_version="v2",
             )
 
         except Exception as exc:
@@ -494,128 +489,30 @@ class LiquidityEngine:
     # FETCH BARS
     # ========================================================
 
-    def _fetch_bars(
-        self,
-        symbol: str,
-        *,
-        timeframe: str,
-        lookback_days: int,
-        keep_bars: int,
-    ) -> pd.DataFrame:
-
+    def _fetch_bars(self, symbol: str, *, timeframe: str, lookback_days: int, keep_bars: int) -> pd.DataFrame:
         if self.alpaca is None:
-
             return pd.DataFrame()
-
-        end_dt = datetime.now(
-            timezone.utc
-        )
-
-        start_dt = (
-
-            end_dt
-
-            -
-
-            timedelta(
-                days=int(
-                    lookback_days
-                )
-            )
-        )
-
-        start = (
-            start_dt
-            .isoformat()
-            .replace(
-                "+00:00",
-                "Z",
-            )
-        )
-
-        end = (
-            end_dt
-            .isoformat()
-            .replace(
-                "+00:00",
-                "Z",
-            )
-        )
-
+        end_dt = datetime.now(timezone.utc)
+        start_dt = end_dt - timedelta(days=int(lookback_days))
+        start = start_dt.isoformat().replace('+00:00', 'Z')
+        end = end_dt.isoformat().replace('+00:00', 'Z')
         try:
-
             try:
-
-                bars = (
-                    self.alpaca.get_bars(
-
-                        symbol,
-
-                        timeframe,
-
-                        start=start,
-
-                        end=end,
-
-                        limit=1000,
-
-                        feed="iex",
-
-                        adjustment="raw",
-                    )
-                )
-
+                bars = self.alpaca.get_bars(symbol, timeframe, start=start, end=end, limit=1000, feed='iex', adjustment='raw')
             except TypeError:
-
-                bars = (
-                    self.alpaca.get_bars(
-
-                        symbol,
-
-                        timeframe,
-
-                        start=start,
-
-                        end=end,
-
-                        limit=1000,
-                    )
-                )
-
+                bars = self.alpaca.get_bars(symbol, timeframe, start=start, end=end, limit=1000)
         except Exception as exc:
-
-            logger.warning(
-                "Liquidity bars failed %s %s: %s",
-                symbol,
-                timeframe,
-                exc,
-            )
-
+            logger.warning('Liquidity bars failed %s %s: %s', symbol, timeframe, exc)
             return pd.DataFrame()
-
-        dataframe = getattr(
-            bars,
-            "df",
-            bars,
-        )
-
-        dataframe = (
-            self._normalize_dataframe(
-                dataframe,
-                symbol,
-            )
-        )
-
-        if (
-            not dataframe.empty
-            and
-            len(dataframe) > keep_bars
-        ):
-
-            dataframe = dataframe.tail(
-                keep_bars
-            )
-
+        dataframe = getattr(bars, 'df', bars)
+        dataframe = self._normalize_dataframe(dataframe, symbol)
+        try:
+            dataframe = validated_research_bars(dataframe, timeframe, end_dt)
+        except ValueError as exc:
+            logger.warning("Liquidity data rejected %s %s: %s", symbol, timeframe, exc)
+            return pd.DataFrame()
+        if not dataframe.empty and len(dataframe) > keep_bars:
+            dataframe = dataframe.tail(keep_bars)
         return dataframe
 
 

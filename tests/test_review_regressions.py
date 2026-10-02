@@ -44,7 +44,9 @@ class ReviewRegressionTests(unittest.TestCase):
             result = subprocess.run([sys.executable, '-c',
                 "import runpy, socket; from unittest.mock import patch; "
                 "guard = patch.object(socket.socket, 'connect', side_effect=AssertionError('Network forbidden')); "
-                "guard.start(); runpy.run_path('tests/test_crash_recovery.py', run_name='__main__')"],
+                "guard.start(); import trading.recovery_engine as recovery_module; "
+                "cancel_guard = patch.object(recovery_module.get_recovery_engine().broker, 'cancel_order'); "
+                "cancel_guard.start(); runpy.run_path('tests/test_crash_recovery.py', run_name='__main__')"],
                 env=env, capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 

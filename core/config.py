@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
+from core.storage import database_path
+from broker.entry_pricing import protected_entry_limit
 
 
 # ============================================================
@@ -26,6 +28,11 @@ load_dotenv(
 
 
 # ============================================================
+
+def _default_database_path() -> str:
+    return database_path()
+
+
 # ENV HELPERS
 # ============================================================
 
@@ -303,11 +310,7 @@ class Settings:
     DATABASE_PATH: str = (
         _get_str(
             "JALWE_DATABASE_PATH",
-            str(
-                BASE_DIR
-                / "data"
-                / "jalwe_v4.db"
-            ),
+            _default_database_path(),
         )
     )
 
@@ -761,6 +764,16 @@ class Settings:
         )
     )
 
+
+    # Cap BUY limit above the reference price. Entries are no longer
+    # naked market orders. Exits stay market so a stop is not trapped.
+    MAX_ENTRY_SLIPPAGE_PCT: float = (
+        _get_float(
+            "JALWE_MAX_ENTRY_SLIPPAGE_PCT",
+            0.35,
+        )
+    )
+
     # ========================================================
     # DATA / BROKER SAFETY
     # ========================================================
@@ -898,6 +911,10 @@ def telegram_credentials_ready() -> bool:
 def validate_settings() -> None:
 
     errors: list[str] = []
+    try:
+        protected_entry_limit(1.0, settings.MAX_ENTRY_SLIPPAGE_PCT)
+    except ValueError as exc:
+        errors.append(str(exc))
 
     # ========================================================
     # HARD PAPER LOCK

@@ -532,13 +532,13 @@ class ExecutionEngine:
 
         broker_response = (
             self.broker
-            .submit_market_order(
+            .submit_protected_entry(
 
                 symbol=symbol,
 
                 quantity=quantity,
 
-                side="BUY",
+                reference_price=float(features.price),
 
                 client_order_id=(
                     client_order_id
@@ -1092,13 +1092,13 @@ class ExecutionEngine:
 
         broker_response = (
             self.broker
-            .submit_market_order(
+            .submit_protected_entry(
 
                 symbol=symbol,
 
                 quantity=quantity,
 
-                side="BUY",
+                reference_price=float(decision.entry_price),
 
                 client_order_id=(
                     final_client_order_id
@@ -1396,194 +1396,42 @@ class ExecutionEngine:
     # EXIT ORDER
     # ========================================================
 
-    def submit_exit(
-        self,
-
-        symbol: str,
-
-        quantity: int,
-
-        requested_price: Optional[
-            float
-        ] = None,
-
-        reason: Optional[
-            str
-        ] = None,
-
-    ) -> BrokerOrder:
+    def submit_exit(self, symbol: str, quantity: int, requested_price: Optional[float]=None, reason: Optional[str]=None, client_order_id: Optional[str]=None, before_submit=None) -> BrokerOrder:
         """
-        Submit a partial or full PAPER SELL order.
+            Submit a partial or full PAPER SELL order.
 
-        This method does NOT change ManagedTrade state.
+            This method does NOT change ManagedTrade state.
 
-        Correct flow:
+            Correct flow:
 
-            ExecutionEngine.submit_exit()
-                      ↓
-            TradeManager.register_exit_order()
-                      ↓
-            ReconciliationEngine.reconcile_order()
-                      ↓
-            TradeManager.apply_exit_reconciliation()
-        """
-
-        symbol = (
-            self._normalize_symbol(
-                symbol
-            )
-        )
-
-        quantity = int(
-            quantity
-        )
-
+                ExecutionEngine.submit_exit()
+                          ↓
+                TradeManager.register_exit_order()
+                          ↓
+                ReconciliationEngine.reconcile_order()
+                          ↓
+                TradeManager.apply_exit_reconciliation()
+            """
+        symbol = self._normalize_symbol(symbol)
+        quantity = int(quantity)
         if quantity <= 0:
-
-            raise ValueError(
-                "Exit quantity must be "
-                "greater than zero."
-            )
-
-        # ====================================================
-        # MARKET OPEN
-        # ====================================================
-
+            raise ValueError('Exit quantity must be greater than zero.')
         if not self.broker.market_is_open():
-
-            raise RuntimeError(
-                "Market is currently closed. "
-                "Exit order was not submitted."
-            )
-
-        # ====================================================
-        # VERIFY BROKER POSITION
-        # ====================================================
-
-        position = (
-            self.broker
-            .get_position(
-                symbol
-            )
-        )
-
+            raise RuntimeError('Market is currently closed. Exit order was not submitted.')
+        position = self.broker.get_position(symbol)
         if position is None:
-
-            raise RuntimeError(
-                f"No broker position "
-                f"exists for {symbol}."
-            )
-
-        broker_quantity = (
-            self._safe_int(
-                getattr(
-                    position,
-                    "qty",
-                    0,
-                )
-            )
-        )
-
+            raise RuntimeError(f'No broker position exists for {symbol}.')
+        broker_quantity = self._safe_int(getattr(position, 'qty', 0))
         if broker_quantity <= 0:
-
-            raise RuntimeError(
-                f"Broker position quantity "
-                f"for {symbol} is invalid."
-            )
-
-        if (
-            quantity
-            > broker_quantity
-        ):
-
-            raise RuntimeError(
-                "Requested exit quantity "
-                "exceeds broker position quantity."
-            )
-
-        # ====================================================
-        # CLIENT ORDER ID
-        # ====================================================
-
-        client_order_id = (
-            self._new_client_order_id(
-                "JALWE-EXIT"
-            )
-        )
-
-        # ====================================================
-        # SUBMIT PAPER SELL
-        # ====================================================
-
-        logger.info(
-            "Submitting PAPER EXIT | "
-            "symbol=%s qty=%s "
-            "broker_qty=%s reason=%s "
-            "client_order_id=%s",
-
-            symbol,
-
-            quantity,
-
-            broker_quantity,
-
-            reason,
-
-            client_order_id,
-        )
-
-        broker_response = (
-            self.broker
-            .submit_market_order(
-
-                symbol=symbol,
-
-                quantity=quantity,
-
-                side="SELL",
-
-                client_order_id=(
-                    client_order_id
-                ),
-            )
-        )
-
-        return (
-            self._build_broker_order(
-
-                broker_response=(
-                    broker_response
-                ),
-
-                symbol=symbol,
-
-                side=TradeSide.SELL,
-
-                quantity=quantity,
-
-                requested_price=(
-                    requested_price
-                ),
-
-                client_order_id=(
-                    client_order_id
-                ),
-
-                metadata={
-                    "order_role": (
-                        "EXIT"
-                    ),
-
-                    "exit_reason": (
-                        reason
-                    ),
-
-                    "broker_position_before_exit": (
-                        broker_quantity
-                    ),
-                },
-            )
-        )
+            raise RuntimeError(f'Broker position quantity for {symbol} is invalid.')
+        if quantity > broker_quantity:
+            raise RuntimeError('Requested exit quantity exceeds broker position quantity.')
+        client_order_id = self._new_client_order_id('JALWE-EXIT') if client_order_id is None else self._validate_client_order_id(client_order_id, required_prefix='JALWE-EXIT')
+        logger.info('Submitting PAPER EXIT | symbol=%s qty=%s broker_qty=%s reason=%s client_order_id=%s', symbol, quantity, broker_quantity, reason, client_order_id)
+        if before_submit is not None:
+            before_submit()
+        broker_response = self.broker.submit_market_order(symbol=symbol, quantity=quantity, side='SELL', client_order_id=client_order_id)
+        return self._build_broker_order(broker_response=broker_response, symbol=symbol, side=TradeSide.SELL, quantity=quantity, requested_price=requested_price, client_order_id=client_order_id, metadata={'order_role': 'EXIT', 'exit_reason': reason, 'broker_position_before_exit': broker_quantity})
 
 
 # ============================================================

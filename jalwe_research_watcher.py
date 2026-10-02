@@ -10,6 +10,7 @@ import urllib.request
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from core.storage import data_directory
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 from research_recheck import update_recheck, recheck_due
@@ -41,6 +42,8 @@ from opportunity_performance_tracker import (
     get_opportunity_performance_tracker,
 )
 
+from trading.exit_submission import prepare_exit, submit_prepared_exit
+from uuid import uuid4
 from trading.execution_engine import (
     get_execution_engine,
 )
@@ -82,10 +85,7 @@ BASE_DIR = (
     .parent
 )
 
-DATA_DIR = (
-    BASE_DIR
-    / "data"
-)
+DATA_DIR = data_directory()
 
 DATA_DIR.mkdir(
     parents=True,
@@ -3192,259 +3192,74 @@ def _cancel_protective_stop(
         raise
 
 
-def _sync_protective_stop(
-    trade_id: str,
-    trade: Any,
-    execution_engine: Any,
-) -> dict[str, Any]:
-    if not bool(
-        settings
-        .BROKER_PROTECTIVE_STOP_ENABLED
-    ):
-        return {
-            "enabled": False,
-            "active": False,
-            "reason": "DISABLED",
-        }
-
-    quantity = int(
-        trade.remaining_quantity
-    )
-
+def _sync_protective_stop(trade_id: str, trade: Any, execution_engine: Any) -> dict[str, Any]:
+    if not bool(settings.BROKER_PROTECTIVE_STOP_ENABLED):
+        return {'enabled': False, 'active': False, 'reason': 'DISABLED'}
+    if trade.has_pending_exit:
+        return {'enabled': True, 'active': False, 'reason': 'PENDING_EXIT'}
+    quantity = int(trade.remaining_quantity)
     if quantity <= 0:
-        return {
-            "enabled": True,
-            "active": False,
-            "reason": "NO_REMAINING_POSITION",
-        }
-
-    desired_stop = float(
-        trade.current_stop
-    )
-
-    metadata = (
-        trade.metadata
-        if isinstance(
-            trade.metadata,
-            dict,
-        )
-        else {}
-    )
-
-    order_id = str(
-        metadata.get(
-            "protective_stop_order_id",
-            "",
-        )
-        or ""
-    ).strip()
-
-    stored_qty = int(
-        metadata.get(
-            "protective_stop_quantity",
-            0,
-        )
-        or 0
-    )
-
+        return {'enabled': True, 'active': False, 'reason': 'NO_REMAINING_POSITION'}
+    desired_stop = float(trade.current_stop)
+    metadata = trade.metadata if isinstance(trade.metadata, dict) else {}
+    if metadata.get('protective_stop_submission_uncertain'):
+        raise RuntimeError('Protective stop submission requires broker recovery before another stop.')
+    order_id = str(metadata.get('protective_stop_order_id', '') or '').strip()
+    stored_qty = int(metadata.get('protective_stop_quantity', 0) or 0)
     try:
-        stored_stop = float(
-            metadata.get(
-                "protective_stop_price",
-                0.0,
-            )
-            or 0.0
-        )
-    except (
-        TypeError,
-        ValueError,
-    ):
+        stored_stop = float(metadata.get('protective_stop_price', 0.0) or 0.0)
+    except (TypeError, ValueError):
         stored_stop = 0.0
-
     if order_id:
         try:
-            raw = (
-                execution_engine
-                .broker
-                .get_order(
-                    order_id
-                )
-            )
-
-            status = _raw_order_status(
-                raw
-            )
-
-            active = status in {
-                "new",
-                "accepted",
-                "pending_new",
-                "accepted_for_bidding",
-                "held",
-                "partially_filled",
-                "pending_replace",
-                "pending_cancel",
-            }
-
-            if (
-                active
-                and stored_qty == quantity
-                and abs(
-                    stored_stop
-                    - desired_stop
-                )
-                <= 0.0001
-            ):
-                metadata[
-                    "protective_stop_active"
-                ] = True
-                metadata[
-                    "protective_stop_status"
-                ] = status
+            raw = execution_engine.broker.get_order(order_id)
+            status = _raw_order_status(raw)
+            active = status in {'new', 'accepted', 'pending_new', 'accepted_for_bidding', 'held', 'partially_filled', 'pending_replace', 'pending_cancel'}
+            if active and stored_qty == quantity and (abs(stored_stop - desired_stop) <= 0.0001):
+                metadata['protective_stop_active'] = True
+                metadata['protective_stop_status'] = status
                 trade.metadata = metadata
-
-                return {
-                    "enabled": True,
-                    "active": True,
-                    "order_id": order_id,
-                    "quantity": quantity,
-                    "stop_price": desired_stop,
-                    "status": status,
-                    "changed": False,
-                }
-
-            if status == "filled":
-                metadata[
-                    "protective_stop_active"
-                ] = False
-                metadata[
-                    "protective_stop_status"
-                ] = "filled"
+                return {'enabled': True, 'active': True, 'order_id': order_id, 'quantity': quantity, 'stop_price': desired_stop, 'status': status, 'changed': False}
+            if status == 'filled':
+                metadata['protective_stop_active'] = False
+                metadata['protective_stop_status'] = 'filled'
                 trade.metadata = metadata
-                database.save_managed_trade(
-                    trade_id,
-                    trade,
-                )
-
-                return {
-                    "enabled": True,
-                    "active": False,
-                    "filled": True,
-                    "order_id": order_id,
-                }
-
+                database.save_managed_trade(trade_id, trade)
+                return {'enabled': True, 'active': False, 'filled': True, 'order_id': order_id}
         except Exception:
-            logger.exception(
-                "Unable to inspect protective stop | "
-                "trade_id=%s symbol=%s",
-                trade_id,
-                trade.symbol,
-            )
+            logger.exception('Unable to inspect protective stop | trade_id=%s symbol=%s', trade_id, trade.symbol)
             raise
-
-        cancel_state = (
-            _cancel_protective_stop(
-                trade_id,
-                trade,
-                execution_engine,
-            )
-        )
-
-        if cancel_state == "FILLED":
-            return {
-                "enabled": True,
-                "active": False,
-                "filled": True,
-                "order_id": order_id,
-            }
-
-    stop_order = (
-        execution_engine
-        .submit_protective_stop(
-            symbol=trade.symbol,
-            quantity=quantity,
-            stop_price=desired_stop,
-        )
-    )
-
-    database.save_broker_order(
-        stop_order
-    )
-
-    metadata = (
-        trade.metadata
-        if isinstance(
-            trade.metadata,
-            dict,
-        )
-        else {}
-    )
-
-    metadata[
-        "protective_stop_order_id"
-    ] = stop_order.order_id
-
-    metadata[
-        "protective_stop_client_order_id"
-    ] = stop_order.client_order_id
-
-    metadata[
-        "protective_stop_quantity"
-    ] = quantity
-
-    metadata[
-        "protective_stop_price"
-    ] = desired_stop
-
-    metadata[
-        "protective_stop_status"
-    ] = stop_order.status.value
-
-    metadata[
-        "protective_stop_active"
-    ] = True
-
-    metadata[
-        "protective_stop_fill_applied"
-    ] = False
-    metadata["protective_stop_applied_qty"] = 0
-    metadata["protective_stop_applied_notional"] = 0.0
-
+        cancel_state = _cancel_protective_stop(trade_id, trade, execution_engine)
+        if cancel_state == 'FILLED':
+            return {'enabled': True, 'active': False, 'filled': True, 'order_id': order_id}
+    client_id = 'JALWE-STOP-' + uuid4().hex
+    metadata['protective_stop_order_id'] = None
+    metadata['protective_stop_client_order_id'] = client_id
+    metadata['protective_stop_quantity'] = quantity
+    metadata['protective_stop_price'] = desired_stop
+    metadata['protective_stop_submission_uncertain'] = True
+    metadata['protective_stop_applied_qty'] = 0
+    metadata['protective_stop_applied_notional'] = 0.0
+    metadata['protective_stop_fill_applied'] = False
     trade.metadata = metadata
-
-    database.save_managed_trade(
-        trade_id,
-        trade,
-    )
-
-    database.log_event(
-        event_type=(
-            "BROKER_PROTECTIVE_STOP_SYNC"
-        ),
-        severity="INFO",
-        message=(
-            f"{trade.symbol}: broker protective "
-            f"stop synced qty={quantity} "
-            f"stop={desired_stop}"
-        ),
-        metadata={
-            "trade_id": trade_id,
-            "symbol": trade.symbol,
-            "quantity": quantity,
-            "stop_price": desired_stop,
-            "order_id": stop_order.order_id,
-        },
-    )
-
-    return {
-        "enabled": True,
-        "active": True,
-        "order_id": stop_order.order_id,
-        "quantity": quantity,
-        "stop_price": desired_stop,
-        "status": stop_order.status.value,
-        "changed": True,
-    }
+    database.save_managed_trade(trade_id, trade)
+    stop_order = execution_engine.submit_protective_stop(symbol=trade.symbol, quantity=quantity, stop_price=desired_stop, client_order_id=client_id)
+    metadata['protective_stop_submission_uncertain'] = False
+    database.save_broker_order(stop_order)
+    metadata = trade.metadata if isinstance(trade.metadata, dict) else {}
+    metadata['protective_stop_order_id'] = stop_order.order_id
+    metadata['protective_stop_client_order_id'] = stop_order.client_order_id
+    metadata['protective_stop_quantity'] = quantity
+    metadata['protective_stop_price'] = desired_stop
+    metadata['protective_stop_status'] = stop_order.status.value
+    metadata['protective_stop_active'] = True
+    metadata['protective_stop_fill_applied'] = False
+    metadata['protective_stop_applied_qty'] = 0
+    metadata['protective_stop_applied_notional'] = 0.0
+    trade.metadata = metadata
+    database.save_managed_trade(trade_id, trade)
+    database.log_event(event_type='BROKER_PROTECTIVE_STOP_SYNC', severity='INFO', message=f'{trade.symbol}: broker protective stop synced qty={quantity} stop={desired_stop}', metadata={'trade_id': trade_id, 'symbol': trade.symbol, 'quantity': quantity, 'stop_price': desired_stop, 'order_id': stop_order.order_id})
+    return {'enabled': True, 'active': True, 'order_id': stop_order.order_id, 'quantity': quantity, 'stop_price': desired_stop, 'status': stop_order.status.value, 'changed': True}
 
 
 # ============================================================
@@ -3562,9 +3377,7 @@ def _management_trade_scan_start(
 # ACTIVE PAPER TRADE MANAGEMENT
 # ============================================================
 
-def manage_active_paper_trades(
-    state: dict,
-) -> int:
+def manage_active_paper_trades(state: dict) -> int:
     """
     Manage confirmed Alpaca PAPER positions.
 
@@ -3578,430 +3391,98 @@ def manage_active_paper_trades(
 
     No live-trading path exists here.
     """
-
     if not auto_paper_execution_ready():
         return 0
-
     recovery = get_recovery_engine()
-
     try:
         recovery_result = recovery.recover_all()
     except Exception as exc:
-        logger.exception(
-            "Active trade recovery failed: %s",
-            exc,
-        )
+        logger.exception('Active trade recovery failed: %s', exc)
         raise
-
-    if not bool(
-        recovery_result.get(
-            "safe_to_trade",
-            False,
-        )
-    ):
-        logger.warning(
-            "Active trade management blocked by recovery safety."
-        )
+    if not bool(recovery_result.get('safe_to_trade', False)):
+        logger.warning('Active trade management blocked by recovery safety.')
         return 0
-
-    notify_recovered_protective_stop_fills(
-        state,
-        recovery_result,
-    )
-
+    notify_recovered_protective_stop_fills(state, recovery_result)
     active = database.load_active_managed_trades()
-
     if not active:
         return 0
-
     market_data = get_market_data()
     trade_manager = get_trade_manager()
     execution_engine = get_execution_engine()
     reconciliation_engine = get_reconciliation_engine()
-
     managed_count = 0
-
     for trade_id, trade in active.items():
         try:
-            now_utc = datetime.now(
-                timezone.utc
-            )
-
-            (
-                scan_start,
-                scan_gap_truncated,
-            ) = _management_trade_scan_start(
-                trade,
-                now_utc,
-            )
-
+            now_utc = datetime.now(timezone.utc)
+            scan_start, scan_gap_truncated = _management_trade_scan_start(trade, now_utc)
             observed_high = None
             trade_range = None
-
             try:
-                trade_range = (
-                    market_data
-                    .get_trade_range(
-                        symbol=trade.symbol,
-                        start=scan_start,
-                        end=now_utc,
-                    )
-                )
-
-                observed_high_raw = (
-                    trade_range.get(
-                        "high"
-                    )
-                )
-
+                trade_range = market_data.get_trade_range(symbol=trade.symbol, start=scan_start, end=now_utc)
+                observed_high_raw = trade_range.get('high')
                 if observed_high_raw is not None:
-                    observed_high = float(
-                        observed_high_raw
-                    )
-
-                last_trade_raw = (
-                    trade_range.get(
-                        "last"
-                    )
-                )
-
+                    observed_high = float(observed_high_raw)
+                last_trade_raw = trade_range.get('last')
                 if last_trade_raw is not None:
-                    current_price = float(
-                        last_trade_raw
-                    )
+                    current_price = float(last_trade_raw)
                 else:
-                    current_price = float(
-                        market_data.get_last_price(
-                            trade.symbol
-                        )
-                    )
-
-                metadata = (
-                    trade.metadata
-                    if isinstance(
-                        trade.metadata,
-                        dict,
-                    )
-                    else {}
-                )
-
-                metadata[
-                    "management_trade_scan_at"
-                ] = now_utc.isoformat()
-
-                metadata[
-                    "management_trade_scan_count"
-                ] = int(
-                    metadata.get(
-                        "management_trade_scan_count",
-                        0,
-                    )
-                    or 0
-                ) + 1
-
-                metadata[
-                    "management_trade_last_high"
-                ] = observed_high
-
-                metadata[
-                    "management_trade_last_count"
-                ] = int(
-                    trade_range.get(
-                        "count",
-                        0,
-                    )
-                    or 0
-                )
-
-                metadata[
-                    "management_trade_feed"
-                ] = str(
-                    trade_range.get(
-                        "feed",
-                        ""
-                    )
-                    or ""
-                )
-
-                metadata[
-                    "management_trade_scan_gap_truncated"
-                ] = bool(
-                    scan_gap_truncated
-                )
-
+                    current_price = float(market_data.get_last_price(trade.symbol))
+                metadata = trade.metadata if isinstance(trade.metadata, dict) else {}
+                metadata['management_trade_scan_at'] = now_utc.isoformat()
+                metadata['management_trade_scan_count'] = int(metadata.get('management_trade_scan_count', 0) or 0) + 1
+                metadata['management_trade_last_high'] = observed_high
+                metadata['management_trade_last_count'] = int(trade_range.get('count', 0) or 0)
+                metadata['management_trade_feed'] = str(trade_range.get('feed', '') or '')
+                metadata['management_trade_scan_gap_truncated'] = bool(scan_gap_truncated)
                 trade.metadata = metadata
-
             except Exception as exc:
-                logger.warning(
-                    "Trade-range target scan failed | "
-                    "symbol=%s error=%s",
-                    trade.symbol,
-                    exc,
-                )
-
-                current_price = float(
-                    market_data.get_last_price(
-                        trade.symbol
-                    )
-                )
-
-            decision = trade_manager.evaluate(
-                trade,
-                current_price,
-                observed_high=(
-                    observed_high
-                ),
-            )
-
-            # HOLD / stop-ratchet / runner-state changes still
-            # need persistence for restart safety.
+                logger.warning('Trade-range target scan failed | symbol=%s error=%s', trade.symbol, exc)
+                current_price = float(market_data.get_last_price(trade.symbol))
+            decision = trade_manager.evaluate(trade, current_price, observed_high=observed_high)
             if decision.action not in EXIT_ACTIONS:
-                database.save_managed_trade(
-                    trade_id,
-                    trade,
-                )
-
-                stop_sync = (
-                    _sync_protective_stop(
-                        trade_id,
-                        trade,
-                        execution_engine,
-                    )
-                )
-
-                if stop_sync.get(
-                    "filled",
-                    False,
-                ):
-                    # RecoveryEngine applies the broker fill
-                    # on the next loop before any new action.
+                database.save_managed_trade(trade_id, trade)
+                stop_sync = _sync_protective_stop(trade_id, trade, execution_engine)
+                if stop_sync.get('filled', False):
                     managed_count += 1
                     continue
-
-                notify_management_lifecycle(
-                    state,
-                    trade_id,
-                    trade,
-                    decision,
-                )
-
+                notify_management_lifecycle(state, trade_id, trade, decision)
                 managed_count += 1
                 continue
-
             if int(decision.quantity or 0) <= 0:
-                database.save_managed_trade(
-                    trade_id,
-                    trade,
-                )
+                database.save_managed_trade(trade_id, trade)
                 managed_count += 1
                 continue
-
-            protective_cancel = (
-                _cancel_protective_stop(
-                    trade_id,
-                    trade,
-                    execution_engine,
-                )
-            )
-
-            if protective_cancel == "FILLED":
-                # Broker-side protection won the race.
-                # Do not submit a second SELL. RecoveryEngine
-                # will reconcile the stop fill next loop.
+            if not execution_engine.broker.market_is_open():
+                database.save_managed_trade(trade_id, trade)
+                _sync_protective_stop(trade_id, trade, execution_engine)
+                continue
+            prepare_exit(database, trade_id, trade, decision)
+            protective_cancel = _cancel_protective_stop(trade_id, trade, execution_engine)
+            if protective_cancel == 'FILLED':
                 managed_count += 1
                 continue
-
-            broker_order = execution_engine.submit_exit(
-                symbol=trade.symbol,
-                quantity=int(decision.quantity),
-                requested_price=current_price,
-                reason=str(decision.reason or ""),
-            )
-
-            trade_manager.register_exit_order(
-                trade,
-                decision,
-                broker_order,
-            )
-
-            database.save_managed_trade(
-                trade_id,
-                trade,
-            )
-
-            reconciled = (
-                reconciliation_engine
-                .wait_for_terminal_state(
-                    broker_order,
-                    timeout_seconds=30.0,
-                    poll_interval_seconds=1.0,
-                )
-            )
-
-            reconciliation_result = (
-                trade_manager
-                .apply_exit_reconciliation(
-                    trade,
-                    reconciled,
-                )
-            )
-
-            new_fill_quantity = int(
-                reconciliation_result.get(
-                    "new_fill_quantity",
-                    0,
-                )
-                or 0
-            )
-
+            broker_order = submit_prepared_exit(database, trade_id, trade, decision, execution_engine, trade_manager)
+            reconciled = reconciliation_engine.wait_for_terminal_state(broker_order, timeout_seconds=30.0, poll_interval_seconds=1.0)
+            reconciliation_result = trade_manager.apply_exit_reconciliation(trade, reconciled)
+            new_fill_quantity = int(reconciliation_result.get('new_fill_quantity', 0) or 0)
             if new_fill_quantity > 0:
-                cumulative_filled = int(
-                    reconciliation_result.get(
-                        "cumulative_filled",
-                        0,
-                    )
-                    or 0
-                )
-
-                event_key = (
-                    f"{reconciled.order_id}:"
-                    f"{cumulative_filled}"
-                )
-
-                filled_at = getattr(
-                    reconciled,
-                    "filled_at",
-                    None,
-                )
-
-                event_time = (
-                    filled_at.isoformat()
-                    if filled_at is not None
-                    else utc_now_iso()
-                )
-
-                database.record_strategy_pnl_event(
-                    trade_state=trade,
-                    event_key=event_key,
-                    trade_id=trade_id,
-                    order_id=reconciled.order_id,
-                    symbol=trade.symbol,
-                    action=decision.action.value,
-                    quantity=new_fill_quantity,
-                    fill_price=(
-                        reconciliation_result.get(
-                            "fill_price"
-                        )
-                    ),
-                    entry_price=trade.entry_price,
-                    realized_pnl=float(
-                        reconciliation_result.get(
-                            "realized_pnl_increment",
-                            0.0,
-                        )
-                        or 0.0
-                    ),
-                    event_time=event_time,
-                    metadata={
-                        "stage": trade.stage.value,
-                        "remaining_quantity": (
-                            trade.remaining_quantity
-                        ),
-                    },
-                )
-
-            database.save_managed_trade(
-                trade_id,
-                trade,
-            )
-
-            if int(
-                trade.remaining_quantity
-            ) > 0:
-                _sync_protective_stop(
-                    trade_id,
-                    trade,
-                    execution_engine,
-                )
-
-            notify_management_lifecycle(
-                state,
-                trade_id,
-                trade,
-                decision,
-                broker_order_id=(
-                    reconciled.order_id
-                ),
-                fill_price=(
-                    reconciliation_result.get(
-                        "fill_price"
-                    )
-                ),
-                realized_increment=float(
-                    reconciliation_result.get(
-                        "realized_pnl_increment",
-                        0.0,
-                    )
-                    or 0.0
-                ),
-            )
-
-            database.log_event(
-                event_type="PAPER_TRADE_MANAGEMENT",
-                severity="INFO",
-                message=(
-                    f"{trade.symbol}: "
-                    f"{decision.action.value} "
-                    f"qty={decision.quantity} "
-                    f"price={current_price}"
-                ),
-                metadata={
-                    "trade_id": trade_id,
-                    "symbol": trade.symbol,
-                    "action": decision.action.value,
-                    "quantity": decision.quantity,
-                    "current_price": current_price,
-                    "stage": trade.stage.value,
-                    "remaining_quantity": (
-                        trade.remaining_quantity
-                    ),
-                    "broker_order_id": (
-                        reconciled.order_id
-                    ),
-                    "broker_status": (
-                        reconciled.status.value
-                    ),
-                },
-            )
-
+                cumulative_filled = int(reconciliation_result.get('cumulative_filled', 0) or 0)
+                event_key = f'{reconciled.order_id}:{cumulative_filled}'
+                filled_at = getattr(reconciled, 'filled_at', None)
+                event_time = filled_at.isoformat() if filled_at is not None else utc_now_iso()
+                database.record_strategy_pnl_event(trade_state=trade, event_key=event_key, trade_id=trade_id, order_id=reconciled.order_id, symbol=trade.symbol, action=decision.action.value, quantity=new_fill_quantity, fill_price=reconciliation_result.get('fill_price'), entry_price=trade.entry_price, realized_pnl=float(reconciliation_result.get('realized_pnl_increment', 0.0) or 0.0), event_time=event_time, metadata={'stage': trade.stage.value, 'remaining_quantity': trade.remaining_quantity})
+            database.save_managed_trade(trade_id, trade)
+            if int(trade.remaining_quantity) > 0:
+                _sync_protective_stop(trade_id, trade, execution_engine)
+            notify_management_lifecycle(state, trade_id, trade, decision, broker_order_id=reconciled.order_id, fill_price=reconciliation_result.get('fill_price'), realized_increment=float(reconciliation_result.get('realized_pnl_increment', 0.0) or 0.0))
+            database.log_event(event_type='PAPER_TRADE_MANAGEMENT', severity='INFO', message=f'{trade.symbol}: {decision.action.value} qty={decision.quantity} price={current_price}', metadata={'trade_id': trade_id, 'symbol': trade.symbol, 'action': decision.action.value, 'quantity': decision.quantity, 'current_price': current_price, 'stage': trade.stage.value, 'remaining_quantity': trade.remaining_quantity, 'broker_order_id': reconciled.order_id, 'broker_status': reconciled.status.value})
             managed_count += 1
-
         except Exception as exc:
-            logger.exception(
-                "Active trade management failed | "
-                "trade_id=%s symbol=%s error=%s",
-                trade_id,
-                getattr(trade, "symbol", ""),
-                exc,
-            )
-
+            logger.exception('Active trade management failed | trade_id=%s symbol=%s error=%s', trade_id, getattr(trade, 'symbol', ''), exc)
             try:
-                database.log_event(
-                    event_type="PAPER_TRADE_MANAGEMENT_ERROR",
-                    severity="ERROR",
-                    message=str(exc),
-                    metadata={
-                        "trade_id": trade_id,
-                        "symbol": getattr(
-                            trade,
-                            "symbol",
-                            "",
-                        ),
-                    },
-                )
+                database.log_event(event_type='PAPER_TRADE_MANAGEMENT_ERROR', severity='ERROR', message=str(exc), metadata={'trade_id': trade_id, 'symbol': getattr(trade, 'symbol', '')})
             except Exception:
                 pass
-
     return managed_count
 
 
@@ -4016,301 +3497,76 @@ def process_emergency_paper_close() -> int:
     The request persists until every managed trade is closed.
     New entries are paused separately by RuntimeControls.
     """
-
     if not emergency_close_requested():
         return 0
-
     if not auto_paper_execution_ready():
-        logger.warning(
-            "Emergency close requested but PAPER execution "
-            "configuration is not ready."
-        )
+        logger.warning('Emergency close requested but PAPER execution configuration is not ready.')
         return 0
-
     recovery = get_recovery_engine()
-
     try:
         recovery_result = recovery.recover_all()
     except Exception as exc:
-        logger.exception(
-            "Emergency close recovery failed: %s",
-            exc,
-        )
+        logger.exception('Emergency close recovery failed: %s', exc)
         return 0
-
-    if not bool(
-        recovery_result.get(
-            "safe_to_trade",
-            False,
-        )
-    ):
-        logger.warning(
-            "Emergency close waiting for recovery safety."
-        )
+    if not bool(recovery_result.get('safe_to_trade', False)):
+        logger.warning('Emergency close waiting for recovery safety.')
         return 0
-
     active = database.load_active_managed_trades()
-
     if not active:
-        clear_emergency_close_request(
-            updated_by="JALWE_WATCHER",
-        )
-
+        clear_emergency_close_request(updated_by='JALWE_WATCHER')
         try:
-            database.log_event(
-                event_type="PAPER_EMERGENCY_CLOSE_COMPLETE",
-                severity="INFO",
-                message=(
-                    "Emergency PAPER close completed; "
-                    "no active managed trades remain."
-                ),
-                metadata={
-                    "timestamp": utc_now_iso(),
-                },
-            )
+            database.log_event(event_type='PAPER_EMERGENCY_CLOSE_COMPLETE', severity='INFO', message='Emergency PAPER close completed; no active managed trades remain.', metadata={'timestamp': utc_now_iso()})
         except Exception:
             pass
-
         return 0
-
     market_data = get_market_data()
     trade_manager = get_trade_manager()
     execution_engine = get_execution_engine()
     reconciliation_engine = get_reconciliation_engine()
-
     processed = 0
     errors = 0
-
     for trade_id, trade in active.items():
         try:
             if trade.has_pending_exit:
                 continue
-
-            quantity = int(
-                trade.remaining_quantity
-            )
-
+            quantity = int(trade.remaining_quantity)
             if quantity <= 0:
-                database.save_managed_trade(
-                    trade_id,
-                    trade,
-                )
+                database.save_managed_trade(trade_id, trade)
                 continue
-
-            current_price = float(
-                market_data.get_last_price(
-                    trade.symbol
-                )
-            )
-
-            decision = TradeManagementDecision(
-                symbol=trade.symbol,
-                action=TradeAction.EXIT_TRAILING,
-                quantity=quantity,
-                current_price=current_price,
-                stage_before=trade.stage,
-                stage_after=trade.stage,
-                stop_before=trade.current_stop,
-                stop_after=trade.current_stop,
-                reason="EMERGENCY_PAPER_CLOSE",
-                metadata={
-                    "emergency": True,
-                },
-            )
-
-            # The broker-side SELL stop may reserve the whole position.
-            # Confirm its cancellation before submitting another SELL;
-            # if it filled during cancellation, recovery will apply it.
-            protective_cancel = _cancel_protective_stop(
-                trade_id,
-                trade,
-                execution_engine,
-            )
-            if protective_cancel == "FILLED":
+            current_price = float(market_data.get_last_price(trade.symbol))
+            decision = TradeManagementDecision(symbol=trade.symbol, action=TradeAction.EXIT_TRAILING, quantity=quantity, current_price=current_price, stage_before=trade.stage, stage_after=trade.stage, stop_before=trade.current_stop, stop_after=trade.current_stop, reason='EMERGENCY_PAPER_CLOSE', metadata={'emergency': True})
+            if not execution_engine.broker.market_is_open():
+                database.save_managed_trade(trade_id, trade)
+                _sync_protective_stop(trade_id, trade, execution_engine)
                 continue
-
-            broker_order = execution_engine.submit_exit(
-                symbol=trade.symbol,
-                quantity=quantity,
-                requested_price=current_price,
-                reason="EMERGENCY_PAPER_CLOSE",
-            )
-
-            trade_manager.register_exit_order(
-                trade,
-                decision,
-                broker_order,
-            )
-
-            database.save_managed_trade(
-                trade_id,
-                trade,
-            )
-
-            reconciled = (
-                reconciliation_engine
-                .wait_for_terminal_state(
-                    broker_order,
-                    timeout_seconds=30.0,
-                    poll_interval_seconds=1.0,
-                )
-            )
-
-            reconciliation_result = (
-                trade_manager
-                .apply_exit_reconciliation(
-                    trade,
-                    reconciled,
-                )
-            )
-
-            new_fill_quantity = int(
-                reconciliation_result.get(
-                    "new_fill_quantity",
-                    0,
-                )
-                or 0
-            )
-
+            prepare_exit(database, trade_id, trade, decision)
+            protective_cancel = _cancel_protective_stop(trade_id, trade, execution_engine)
+            if protective_cancel == 'FILLED':
+                continue
+            broker_order = submit_prepared_exit(database, trade_id, trade, decision, execution_engine, trade_manager)
+            reconciled = reconciliation_engine.wait_for_terminal_state(broker_order, timeout_seconds=30.0, poll_interval_seconds=1.0)
+            reconciliation_result = trade_manager.apply_exit_reconciliation(trade, reconciled)
+            new_fill_quantity = int(reconciliation_result.get('new_fill_quantity', 0) or 0)
             if new_fill_quantity > 0:
-                cumulative_filled = int(
-                    reconciliation_result.get(
-                        "cumulative_filled",
-                        0,
-                    )
-                    or 0
-                )
-
-                event_key = (
-                    f"{reconciled.order_id}:"
-                    f"{cumulative_filled}"
-                )
-
-                filled_at = getattr(
-                    reconciled,
-                    "filled_at",
-                    None,
-                )
-
-                event_time = (
-                    filled_at.isoformat()
-                    if filled_at is not None
-                    else utc_now_iso()
-                )
-
-                database.record_strategy_pnl_event(
-                    trade_state=trade,
-                    event_key=event_key,
-                    trade_id=trade_id,
-                    order_id=reconciled.order_id,
-                    symbol=trade.symbol,
-                    action="EMERGENCY_CLOSE",
-                    quantity=new_fill_quantity,
-                    fill_price=(
-                        reconciliation_result.get(
-                            "fill_price"
-                        )
-                    ),
-                    entry_price=trade.entry_price,
-                    realized_pnl=float(
-                        reconciliation_result.get(
-                            "realized_pnl_increment",
-                            0.0,
-                        )
-                        or 0.0
-                    ),
-                    event_time=event_time,
-                    metadata={
-                        "emergency": True,
-                        "stage": trade.stage.value,
-                        "remaining_quantity": (
-                            trade.remaining_quantity
-                        ),
-                    },
-                )
-
-            database.save_managed_trade(
-                trade_id,
-                trade,
-            )
-
-            database.log_event(
-                event_type="PAPER_EMERGENCY_CLOSE_ORDER",
-                severity="WARNING",
-                message=(
-                    f"{trade.symbol}: emergency PAPER "
-                    f"close qty={quantity}"
-                ),
-                metadata={
-                    "trade_id": trade_id,
-                    "symbol": trade.symbol,
-                    "quantity": quantity,
-                    "broker_order_id": (
-                        reconciled.order_id
-                    ),
-                    "broker_status": (
-                        reconciled.status.value
-                    ),
-                    "remaining_quantity": (
-                        trade.remaining_quantity
-                    ),
-                },
-            )
-
+                cumulative_filled = int(reconciliation_result.get('cumulative_filled', 0) or 0)
+                event_key = f'{reconciled.order_id}:{cumulative_filled}'
+                filled_at = getattr(reconciled, 'filled_at', None)
+                event_time = filled_at.isoformat() if filled_at is not None else utc_now_iso()
+                database.record_strategy_pnl_event(trade_state=trade, event_key=event_key, trade_id=trade_id, order_id=reconciled.order_id, symbol=trade.symbol, action='EMERGENCY_CLOSE', quantity=new_fill_quantity, fill_price=reconciliation_result.get('fill_price'), entry_price=trade.entry_price, realized_pnl=float(reconciliation_result.get('realized_pnl_increment', 0.0) or 0.0), event_time=event_time, metadata={'emergency': True, 'stage': trade.stage.value, 'remaining_quantity': trade.remaining_quantity})
+            database.save_managed_trade(trade_id, trade)
+            database.log_event(event_type='PAPER_EMERGENCY_CLOSE_ORDER', severity='WARNING', message=f'{trade.symbol}: emergency PAPER close qty={quantity}', metadata={'trade_id': trade_id, 'symbol': trade.symbol, 'quantity': quantity, 'broker_order_id': reconciled.order_id, 'broker_status': reconciled.status.value, 'remaining_quantity': trade.remaining_quantity})
             processed += 1
-
         except Exception as exc:
             errors += 1
-
-            logger.exception(
-                "Emergency PAPER close failed | "
-                "trade_id=%s symbol=%s error=%s",
-                trade_id,
-                getattr(
-                    trade,
-                    "symbol",
-                    "",
-                ),
-                exc,
-            )
-
+            logger.exception('Emergency PAPER close failed | trade_id=%s symbol=%s error=%s', trade_id, getattr(trade, 'symbol', ''), exc)
             try:
-                database.log_event(
-                    event_type="PAPER_EMERGENCY_CLOSE_ERROR",
-                    severity="ERROR",
-                    message=str(exc),
-                    metadata={
-                        "trade_id": trade_id,
-                        "symbol": getattr(
-                            trade,
-                            "symbol",
-                            "",
-                        ),
-                    },
-                )
+                database.log_event(event_type='PAPER_EMERGENCY_CLOSE_ERROR', severity='ERROR', message=str(exc), metadata={'trade_id': trade_id, 'symbol': getattr(trade, 'symbol', '')})
             except Exception:
                 pass
-
     remaining = database.load_active_managed_trades()
-
     if not remaining and errors == 0:
-        clear_emergency_close_request(
-            updated_by="JALWE_WATCHER",
-        )
-
-        database.log_event(
-            event_type="PAPER_EMERGENCY_CLOSE_COMPLETE",
-            severity="INFO",
-            message=(
-                "All JALWE-managed PAPER positions "
-                "were closed."
-            ),
-            metadata={
-                "processed": processed,
-                "timestamp": utc_now_iso(),
-            },
-        )
-
+        clear_emergency_close_request(updated_by='JALWE_WATCHER')
+        database.log_event(event_type='PAPER_EMERGENCY_CLOSE_COMPLETE', severity='INFO', message='All JALWE-managed PAPER positions were closed.', metadata={'processed': processed, 'timestamp': utc_now_iso()})
     return processed
 
 

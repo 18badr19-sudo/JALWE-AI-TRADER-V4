@@ -14,6 +14,8 @@ class SessionStrategyName(str, Enum):
     PREMARKET_HIGH_BREAK = "PREMARKET_HIGH_BREAK"
     OPENING_RANGE_BREAKOUT = "OPENING_RANGE_BREAKOUT"
     GAP_AND_GO = "GAP_AND_GO"
+    BULL_FLAG_BREAKOUT = "BULL_FLAG_BREAKOUT"
+    VWAP_BOUNCE = "VWAP_BOUNCE"
     COMPRESSION_BREAKOUT = "COMPRESSION_BREAKOUT"
 
 
@@ -725,6 +727,381 @@ class SessionStrategyEngine:
         )
 
     # ========================================================
+    # BULL FLAG BREAKOUT
+    # ========================================================
+
+    def _bull_flag_breakout(
+        self,
+        features: Any,
+        bars: Optional[pd.DataFrame],
+    ) -> SessionStrategyCandidate:
+
+        score, reasons, warnings = (
+            self._common_quality(features)
+        )
+
+        if bars is None or len(bars) < 20:
+            return SessionStrategyCandidate(
+                strategy=SessionStrategyName.BULL_FLAG_BREAKOUT,
+                score=0.0,
+                valid=False,
+                warnings=["Not enough bars for bull-flag analysis."],
+            )
+
+        data = bars.copy().tail(20)
+
+        for column in ("open", "high", "low", "close", "volume"):
+            data[column] = pd.to_numeric(
+                data[column],
+                errors="coerce",
+            )
+
+        data = data.dropna(
+            subset=["open", "high", "low", "close", "volume"]
+        )
+
+        if len(data) < 12:
+            return SessionStrategyCandidate(
+                strategy=SessionStrategyName.BULL_FLAG_BREAKOUT,
+                score=0.0,
+                valid=False,
+                warnings=["Bull-flag data is incomplete."],
+            )
+
+        pattern = data.tail(12)
+        impulse = pattern.iloc[:6]
+        flag = pattern.iloc[6:]
+
+        impulse_start = float(impulse["open"].iloc[0])
+        impulse_high = float(impulse["high"].max())
+        impulse_low = float(impulse["low"].min())
+
+        if impulse_start <= 0 or impulse_high <= impulse_low:
+            return SessionStrategyCandidate(
+                strategy=SessionStrategyName.BULL_FLAG_BREAKOUT,
+                score=0.0,
+                valid=False,
+            )
+
+        impulse_move_pct = (
+            (impulse_high - impulse_start)
+            / impulse_start
+            * 100.0
+        )
+
+        impulse_range = impulse_high - impulse_low
+        flag_high = float(flag["high"].max())
+        flag_low = float(flag["low"].min())
+        flag_range = flag_high - flag_low
+
+        retracement_ratio = (
+            (impulse_high - flag_low)
+            / impulse_range
+            if impulse_range > 0
+            else 999.0
+        )
+
+        contraction_ratio = (
+            flag_range / impulse_range
+            if impulse_range > 0
+            else 999.0
+        )
+
+        impulse_volume = float(
+            impulse["volume"].mean()
+        )
+        flag_volume = float(
+            flag["volume"].mean()
+        )
+
+        volume_contraction_ratio = (
+            flag_volume / impulse_volume
+            if impulse_volume > 0
+            else None
+        )
+
+        latest = flag.iloc[-1]
+        latest_close = float(latest["close"])
+        latest_open = float(latest["open"])
+
+        flag_location = (
+            (latest_close - flag_low)
+            / flag_range
+            if flag_range > 0
+            else 0.0
+        )
+
+        if impulse_move_pct < 2.0:
+            return SessionStrategyCandidate(
+                strategy=SessionStrategyName.BULL_FLAG_BREAKOUT,
+                score=self._clamp(score - 20.0),
+                valid=False,
+                warnings=warnings + [
+                    "No strong impulse leg before the flag."
+                ],
+                metadata={
+                    "impulse_move_pct": impulse_move_pct,
+                },
+            )
+
+        if not (0.0 <= retracement_ratio <= 0.55):
+            return SessionStrategyCandidate(
+                strategy=SessionStrategyName.BULL_FLAG_BREAKOUT,
+                score=self._clamp(score - 15.0),
+                valid=False,
+                warnings=warnings + [
+                    "Bull-flag pullback is too deep."
+                ],
+                metadata={
+                    "retracement_ratio": retracement_ratio,
+                },
+            )
+
+        score += 20.0
+        reasons.append("Strong impulse leg before consolidation.")
+
+        if retracement_ratio <= 0.35:
+            score += 18.0
+            reasons.append("Bull-flag retracement is shallow.")
+        else:
+            score += 10.0
+
+        if contraction_ratio <= 0.55:
+            score += 15.0
+            reasons.append("Flag range is contracting.")
+        elif contraction_ratio <= 0.75:
+            score += 8.0
+        else:
+            score -= 12.0
+            warnings.append("Flag range is too loose.")
+
+        if (
+            volume_contraction_ratio is not None
+            and volume_contraction_ratio <= 0.85
+        ):
+            score += 10.0
+            reasons.append("Volume contracted during the flag.")
+
+        if flag_location >= 0.65:
+            score += 10.0
+            reasons.append("Price is holding near the flag high.")
+
+        if latest_close > latest_open:
+            score += 5.0
+
+        trigger = round(
+            flag_high * 1.001,
+            4,
+        )
+
+        stop = round(
+            flag_low * 0.998,
+            4,
+        )
+
+        if stop <= 0 or stop >= trigger:
+            return SessionStrategyCandidate(
+                strategy=SessionStrategyName.BULL_FLAG_BREAKOUT,
+                score=0.0,
+                valid=False,
+                warnings=["Invalid bull-flag price structure."],
+            )
+
+        return SessionStrategyCandidate(
+            strategy=SessionStrategyName.BULL_FLAG_BREAKOUT,
+            score=self._clamp(score),
+            valid=True,
+            trigger_price=trigger,
+            invalidation_price=stop,
+            reasons=reasons,
+            warnings=warnings,
+            metadata={
+                "impulse_move_pct": impulse_move_pct,
+                "retracement_ratio": retracement_ratio,
+                "contraction_ratio": contraction_ratio,
+                "volume_contraction_ratio": volume_contraction_ratio,
+                "flag_high": flag_high,
+                "flag_low": flag_low,
+            },
+        )
+
+    # ========================================================
+    # VWAP BOUNCE
+    # ========================================================
+
+    def _vwap_bounce(
+        self,
+        features: Any,
+        bars: Optional[pd.DataFrame],
+    ) -> SessionStrategyCandidate:
+
+        score, reasons, warnings = (
+            self._common_quality(features)
+        )
+
+        vwap = self._num(
+            getattr(
+                features,
+                "vwap",
+                None,
+            )
+        )
+
+        ema_9 = self._num(
+            getattr(
+                features,
+                "ema_9",
+                None,
+            )
+        )
+
+        ema_20 = self._num(
+            getattr(
+                features,
+                "ema_20",
+                None,
+            )
+        )
+
+        if (
+            vwap <= 0
+            or bars is None
+            or len(bars) < 10
+        ):
+            return SessionStrategyCandidate(
+                strategy=SessionStrategyName.VWAP_BOUNCE,
+                score=0.0,
+                valid=False,
+                warnings=["VWAP-bounce inputs are unavailable."],
+            )
+
+        data = bars.copy().tail(6)
+
+        for column in ("open", "high", "low", "close", "volume"):
+            data[column] = pd.to_numeric(
+                data[column],
+                errors="coerce",
+            )
+
+        data = data.dropna(
+            subset=["open", "high", "low", "close", "volume"]
+        )
+
+        if len(data) < 4:
+            return SessionStrategyCandidate(
+                strategy=SessionStrategyName.VWAP_BOUNCE,
+                score=0.0,
+                valid=False,
+                warnings=["VWAP-bounce bars are incomplete."],
+            )
+
+        recent = data.tail(4)
+        recent_low = float(recent["low"].min())
+        latest = recent.iloc[-1]
+
+        latest_open = float(latest["open"])
+        latest_high = float(latest["high"])
+        latest_close = float(latest["close"])
+
+        low_distance_pct = abs(
+            (recent_low - vwap)
+            / vwap
+            * 100.0
+        )
+
+        recovery_pct = (
+            (latest_close - vwap)
+            / vwap
+            * 100.0
+        )
+
+        touched_vwap = (
+            recent_low <= vwap * 1.004
+            and recent_low >= vwap * 0.985
+        )
+
+        recovered_vwap = (
+            latest_close >= vwap * 1.001
+        )
+
+        if not touched_vwap or not recovered_vwap:
+            return SessionStrategyCandidate(
+                strategy=SessionStrategyName.VWAP_BOUNCE,
+                score=self._clamp(score - 12.0),
+                valid=False,
+                warnings=warnings + [
+                    "No clean VWAP test-and-recovery pattern."
+                ],
+                metadata={
+                    "recent_low": recent_low,
+                    "vwap": vwap,
+                    "recovery_pct": recovery_pct,
+                },
+            )
+
+        if low_distance_pct <= 0.35:
+            score += 24.0
+            reasons.append("Price tested VWAP precisely.")
+        else:
+            score += 14.0
+
+        score += 18.0
+        reasons.append("Price recovered and closed back above VWAP.")
+
+        if latest_close > latest_open:
+            score += 10.0
+            reasons.append("Bounce candle closed bullish.")
+
+        if (
+            ema_9 > 0
+            and ema_20 > 0
+            and ema_9 > ema_20
+        ):
+            score += 12.0
+            reasons.append("EMA structure supports the VWAP bounce.")
+
+        if recovery_pct > 2.0:
+            score -= 10.0
+            warnings.append("VWAP bounce is becoming extended.")
+
+        trigger = round(
+            latest_high * 1.001,
+            4,
+        )
+
+        stop = round(
+            min(
+                recent_low * 0.998,
+                vwap * 0.995,
+            ),
+            4,
+        )
+
+        if stop <= 0 or stop >= trigger:
+            return SessionStrategyCandidate(
+                strategy=SessionStrategyName.VWAP_BOUNCE,
+                score=0.0,
+                valid=False,
+                warnings=["Invalid VWAP-bounce price structure."],
+            )
+
+        return SessionStrategyCandidate(
+            strategy=SessionStrategyName.VWAP_BOUNCE,
+            score=self._clamp(score),
+            valid=True,
+            trigger_price=trigger,
+            invalidation_price=stop,
+            reasons=reasons,
+            warnings=warnings,
+            metadata={
+                "vwap": vwap,
+                "recent_low": recent_low,
+                "low_distance_pct": low_distance_pct,
+                "recovery_pct": recovery_pct,
+            },
+        )
+
+    # ========================================================
     # COMPRESSION BREAKOUT
     # ========================================================
 
@@ -983,6 +1360,16 @@ class SessionStrategyEngine:
             self._gap_and_go(
                 features,
                 session,
+            ),
+
+            self._bull_flag_breakout(
+                features,
+                bars,
+            ),
+
+            self._vwap_bounce(
+                features,
+                bars,
             ),
 
             self._compression_breakout(

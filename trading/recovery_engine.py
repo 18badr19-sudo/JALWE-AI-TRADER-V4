@@ -519,6 +519,7 @@ class RecoveryEngine:
                 "recovered_from_entry_intent": True,
                 "entry_filled_at": entry_filled_at,
                 "management_trade_scan_at": entry_filled_at,
+                "management_trade_scan_count": 0,
                 "entry_intent_id": intent_id,
                 "entry_order_id": broker_order_id,
                 "client_order_id": intent.get(

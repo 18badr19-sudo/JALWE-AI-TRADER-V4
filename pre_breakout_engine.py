@@ -9,6 +9,7 @@ from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
+from market.research_bar_quality import validated_research_bars
 
 from sklearn.ensemble import RandomForestClassifier
 
@@ -802,9 +803,16 @@ class PreBreakoutEngine:
                 dataframe.sort_index()
             )
 
-        except Exception:
+        except Exception as exc:
 
-            pass
+            logger.exception(
+                "OHLCV chronological sort failed: %s",
+                exc,
+            )
+            raise PreBreakoutDataError(
+                "OHLCV index could not be sorted.",
+                status="UNSORTED_DATA",
+            ) from exc
 
         return dataframe
 
@@ -812,146 +820,29 @@ class PreBreakoutEngine:
     # FETCH HISTORICAL BARS
     # ========================================================
 
-    def _fetch_bars(
-        self,
-        symbol: str,
-        *,
-        timeframe: str,
-        limit: int,
-        lookback_days: int,
-    ) -> pd.DataFrame:
-
+    def _fetch_bars(self, symbol: str, *, timeframe: str, limit: int, lookback_days: int) -> pd.DataFrame:
         if self.alpaca is None:
-
-            raise PreBreakoutDataError(
-                "Alpaca unavailable.",
-                status="API_UNAVAILABLE",
-            )
-
-        # ----------------------------------------------------
-        # CALCULATE HISTORICAL WINDOW
-        # ----------------------------------------------------
-
-        end_dt = datetime.now(
-            timezone.utc
-        )
-
-        start_dt = (
-
-            end_dt
-            -
-            timedelta(
-                days=int(
-                    lookback_days
-                )
-            )
-        )
-
-        start = (
-            start_dt
-            .isoformat()
-            .replace(
-                "+00:00",
-                "Z",
-            )
-        )
-
-        end = (
-            end_dt
-            .isoformat()
-            .replace(
-                "+00:00",
-                "Z",
-            )
-        )
-
-        # ----------------------------------------------------
-        # REQUEST ENOUGH DATA THEN KEEP LATEST BARS LOCALLY
-        #
-        # Using 1000 prevents us from accidentally getting
-        # only a tiny number of historical bars.
-        # ----------------------------------------------------
-
+            raise PreBreakoutDataError('Alpaca unavailable.', status='API_UNAVAILABLE')
+        end_dt = datetime.now(timezone.utc)
+        start_dt = end_dt - timedelta(days=int(lookback_days))
+        start = start_dt.isoformat().replace('+00:00', 'Z')
+        end = end_dt.isoformat().replace('+00:00', 'Z')
         request_limit = 1000
-
         try:
-
             try:
-
-                bars = (
-                    self.alpaca
-                    .get_bars(
-
-                        symbol,
-
-                        timeframe,
-
-                        start=start,
-
-                        end=end,
-
-                        limit=request_limit,
-
-                        feed="iex",
-
-                        adjustment="raw",
-                    )
-                )
-
+                bars = self.alpaca.get_bars(symbol, timeframe, start=start, end=end, limit=request_limit, feed='iex', adjustment='raw')
             except TypeError:
-
-                bars = (
-                    self.alpaca
-                    .get_bars(
-
-                        symbol,
-
-                        timeframe,
-
-                        start=start,
-
-                        end=end,
-
-                        limit=request_limit,
-                    )
-                )
-
+                bars = self.alpaca.get_bars(symbol, timeframe, start=start, end=end, limit=request_limit)
         except Exception as exc:
-
-            raise PreBreakoutDataError(
-                str(exc),
-                status="API_ERROR",
-            ) from exc
-
-        dataframe = getattr(
-            bars,
-            "df",
-            bars,
-        )
-
-        dataframe = (
-            self._normalize_dataframe(
-                dataframe,
-                symbol,
-            )
-        )
-
-        # ----------------------------------------------------
-        # ONLY USE THE MOST RECENT REQUESTED NUMBER OF BARS
-        # ----------------------------------------------------
-
-        if len(
-            dataframe
-        ) > int(
-            limit
-        ):
-
-            dataframe = dataframe.tail(
-                int(
-                    limit
-                )
-            )
-
+            raise PreBreakoutDataError(str(exc), status='API_ERROR') from exc
+        dataframe = getattr(bars, 'df', bars)
+        dataframe = self._normalize_dataframe(dataframe, symbol)
+        try:
+            dataframe = validated_research_bars(dataframe, timeframe, end_dt)
+        except ValueError as exc:
+            raise PreBreakoutDataError(str(exc), status="INVALID_OR_STALE_DATA") from exc
+        if len(dataframe) > int(limit):
+            dataframe = dataframe.tail(int(limit))
         return dataframe
 
     # ========================================================

@@ -986,124 +986,40 @@ class PaperTradeOrchestrator:
     # BROKER-NATIVE PROTECTIVE STOP
     # ========================================================
 
-    def _arm_managed_trade_stop(
-        self,
-        managed_trade_id: str,
-    ) -> dict[str, Any]:
-        if not bool(
-            settings
-            .BROKER_PROTECTIVE_STOP_ENABLED
-        ):
-            return {
-                "enabled": False,
-                "active": False,
-                "reason": "DISABLED",
-            }
-
-        trade = database.load_managed_trade(
-            managed_trade_id
-        )
-
+    def _arm_managed_trade_stop(self, managed_trade_id: str) -> dict[str, Any]:
+        if not bool(settings.BROKER_PROTECTIVE_STOP_ENABLED):
+            return {'enabled': False, 'active': False, 'reason': 'DISABLED'}
+        trade = database.load_managed_trade(managed_trade_id)
         if trade is None:
-            raise RuntimeError(
-                "ManagedTrade could not be reloaded "
-                "for protective stop arming."
-            )
-
-        quantity = int(
-            trade.remaining_quantity
-        )
-
-        stop_price = float(
-            trade.current_stop
-        )
-
+            raise RuntimeError('ManagedTrade could not be reloaded for protective stop arming.')
+        quantity = int(trade.remaining_quantity)
+        stop_price = float(trade.current_stop)
         if quantity <= 0:
-            return {
-                "enabled": True,
-                "active": False,
-                "reason": "NO_REMAINING_POSITION",
-            }
-
-        order = (
-            self.execution_engine
-            .submit_protective_stop(
-                symbol=trade.symbol,
-                quantity=quantity,
-                stop_price=stop_price,
-            )
-        )
-
-        database.save_broker_order(
-            order
-        )
-
-        trade.metadata[
-            "protective_stop_order_id"
-        ] = order.order_id
-
-        trade.metadata[
-            "protective_stop_client_order_id"
-        ] = order.client_order_id
-
-        trade.metadata[
-            "protective_stop_price"
-        ] = stop_price
-
-        trade.metadata[
-            "protective_stop_quantity"
-        ] = quantity
-
-        trade.metadata[
-            "protective_stop_status"
-        ] = order.status.value
-
-        trade.metadata[
-            "protective_stop_active"
-        ] = True
-
-        trade.metadata[
-            "protective_stop_fill_applied"
-        ] = False
-
-        database.save_managed_trade(
-            managed_trade_id,
-            trade,
-        )
-
-        database.log_event(
-            event_type=(
-                "BROKER_PROTECTIVE_STOP_ARMED"
-            ),
-            severity="INFO",
-            message=(
-                f"{trade.symbol}: broker protective "
-                f"stop armed qty={quantity} "
-                f"stop={stop_price}"
-            ),
-            metadata={
-                "trade_id": managed_trade_id,
-                "symbol": trade.symbol,
-                "quantity": quantity,
-                "stop_price": stop_price,
-                "order_id": order.order_id,
-                "client_order_id": (
-                    order.client_order_id
-                ),
-            },
-        )
-
-        return {
-            "enabled": True,
-            "active": True,
-            "order_id": order.order_id,
-            "client_order_id": (
-                order.client_order_id
-            ),
-            "quantity": quantity,
-            "stop_price": stop_price,
-            "status": order.status.value,
-        }
+            return {'enabled': True, 'active': False, 'reason': 'NO_REMAINING_POSITION'}
+        if trade.metadata.get('protective_stop_order_id') or trade.metadata.get('protective_stop_submission_uncertain'):
+            raise RuntimeError('An existing or uncertain stop requires recovery before arming another stop.')
+        client_id = self.execution_engine._new_client_order_id('JALWE-STOP')
+        trade.metadata.update(protective_stop_client_order_id=client_id,
+                              protective_stop_quantity=quantity,
+                              protective_stop_price=stop_price,
+                              protective_stop_submission_uncertain=True,
+                              protective_stop_applied_qty=0,
+                              protective_stop_applied_notional=0.0,
+                              protective_stop_fill_applied=False)
+        database.save_managed_trade(managed_trade_id, trade)
+        order = self.execution_engine.submit_protective_stop(symbol=trade.symbol, quantity=quantity, stop_price=stop_price, client_order_id=client_id)
+        trade.metadata['protective_stop_submission_uncertain'] = False
+        database.save_broker_order(order)
+        trade.metadata['protective_stop_order_id'] = order.order_id
+        trade.metadata['protective_stop_client_order_id'] = order.client_order_id
+        trade.metadata['protective_stop_price'] = stop_price
+        trade.metadata['protective_stop_quantity'] = quantity
+        trade.metadata['protective_stop_status'] = order.status.value
+        trade.metadata['protective_stop_active'] = True
+        trade.metadata['protective_stop_fill_applied'] = False
+        database.save_managed_trade(managed_trade_id, trade)
+        database.log_event(event_type='BROKER_PROTECTIVE_STOP_ARMED', severity='INFO', message=f'{trade.symbol}: broker protective stop armed qty={quantity} stop={stop_price}', metadata={'trade_id': managed_trade_id, 'symbol': trade.symbol, 'quantity': quantity, 'stop_price': stop_price, 'order_id': order.order_id, 'client_order_id': order.client_order_id})
+        return {'enabled': True, 'active': True, 'order_id': order.order_id, 'client_order_id': order.client_order_id, 'quantity': quantity, 'stop_price': stop_price, 'status': order.status.value}
 
     # ========================================================
     # RUN SYMBOL
@@ -1813,59 +1729,9 @@ class PaperTradeOrchestrator:
         ).strip().upper()
 
         # ====================================================
-        # 14. ORDER STILL ACTIVE
+        # 14. RECOVER THE PERSISTED ENTRY (INCLUDING ACTIVE ORDERS)
         # ====================================================
 
-        if intent_state in {
-            "PREPARED",
-            "SUBMITTED",
-            "PARTIALLY_FILLED",
-            "ERROR",
-        }:
-            return PaperOrchestratorResult(
-                symbol=symbol,
-
-                state=(
-                    PaperOrchestratorState
-                    .ENTRY_PENDING
-                ),
-
-                decision=decision,
-
-                intent_id=intent_id,
-
-                client_order_id=(
-                    client_order_id
-                ),
-
-                broker_order_id=(
-                    intent_row.get(
-                        "broker_order_id"
-                    )
-                ),
-
-                message=(
-                    "Entry remains unresolved at "
-                    "Alpaca. New entries stay blocked "
-                    "until recovery."
-                ),
-
-                metadata={
-                    "intent_state": intent_state,
-
-                    "filled_quantity": (
-                        intent_row.get(
-                            "filled_quantity"
-                        )
-                    ),
-
-                    "broker_status": (
-                        intent_row.get(
-                            "broker_status"
-                        )
-                    ),
-                },
-            )
 
         # ====================================================
         # 15. TERMINAL ENTRY

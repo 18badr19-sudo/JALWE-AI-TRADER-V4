@@ -5,16 +5,12 @@ import os
 
 from datetime import datetime, timezone
 from pathlib import Path
+from core.storage import data_directory
 from typing import Any
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = Path(
-    os.getenv(
-        "JALWE_CONTROLLER_DATA_DIR",
-        str(BASE_DIR / "data"),
-    )
-)
+DATA_DIR = data_directory()
 DATA_DIR.mkdir(
     parents=True,
     exist_ok=True,

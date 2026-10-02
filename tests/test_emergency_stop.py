@@ -15,6 +15,7 @@ class EmergencyStopRaceTests(unittest.TestCase):
             symbol="TEST",
             stage=SimpleNamespace(value="ACTIVE"),
             current_stop=9.0,
+            metadata={},
         )
         database = Mock()
         database.load_active_managed_trades.return_value = {

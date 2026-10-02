@@ -6,6 +6,7 @@ import math
 from typing import Optional
 
 from broker.alpaca_client import get_alpaca_client
+from broker.entry_pricing import protected_entry_limit
 from core.config import settings
 from core.database import database
 
@@ -691,116 +692,22 @@ class RiskEngine:
             raise ValueError("Invalid total position cost basis.")
         return max(0.0, min(float(broker_cash), float(equity) - invested))
 
-    def _calculate_quantity(
-        self,
-        entry: float,
-        stop: float,
-        strategy_equity: float,
-        available_cash: float,
-        risk_pct: float,
-        allocation_pct: float,
-    ) -> tuple[
-        int,
-        float,
-        float,
-    ]:
-
-        risk_per_share = (
-            entry - stop
-        )
-
+    def _calculate_quantity(self, entry, stop, strategy_equity, available_cash, risk_pct, allocation_pct):
+        ceiling = protected_entry_limit(entry, settings.MAX_ENTRY_SLIPPAGE_PCT)
+        values = (stop, strategy_equity, available_cash, risk_pct, allocation_pct)
+        if not all(math.isfinite(float(value)) for value in values):
+            raise ValueError("Risk sizing inputs must be finite.")
+        if stop <= 0 or stop >= entry:
+            return 0, 0.0, 0.0
+        risk_per_share = ceiling - stop
         if risk_per_share <= 0:
-
-            return (
-                0,
-                0.0,
-                0.0,
-            )
-
-        # ----------------------------------------------------
-        # RISK BUDGET
-        # ----------------------------------------------------
-
-        risk_budget = (
-            strategy_equity
-            * (
-                risk_pct
-                / 100.0
-            )
-        )
-
-        # ----------------------------------------------------
-        # MAX POSITION ALLOCATION
-        # ----------------------------------------------------
-
-        max_position_value = (
-            strategy_equity
-            * (
-                allocation_pct
-                / 100.0
-            )
-        )
-
-        # ----------------------------------------------------
-        # QUANTITY BY RISK
-        # ----------------------------------------------------
-
-        quantity_by_risk = (
-            math.floor(
-                risk_budget
-                / risk_per_share
-            )
-        )
-
-        # ----------------------------------------------------
-        # QUANTITY BY ALLOCATION
-        # ----------------------------------------------------
-
-        quantity_by_allocation = (
-            math.floor(
-                max_position_value
-                / entry
-            )
-        )
-
-        # ----------------------------------------------------
-        # QUANTITY BY CASH
-        # ----------------------------------------------------
-
-        # No leverage.
-        quantity_by_cash = (
-            math.floor(
-                available_cash
-                / entry
-            )
-        )
-
-        quantity = min(
-            quantity_by_risk,
-            quantity_by_allocation,
-            quantity_by_cash,
-        )
-
-        quantity = max(
-            quantity,
-            0,
-        )
-
-        actual_risk = (
-            quantity
-            * risk_per_share
-        )
-
-        position_value = (
-            quantity
-            * entry
-        )
-
-        return (
-            quantity,
-            actual_risk,
-            position_value,
-        )
+            return 0, 0.0, 0.0
+        risk_budget = strategy_equity * risk_pct / 100.0
+        allocation = strategy_equity * allocation_pct / 100.0
+        quantity = max(0, min(math.floor(risk_budget / risk_per_share),
+                              math.floor(allocation / ceiling),
+                              math.floor(available_cash / ceiling)))
+        return quantity, quantity * risk_per_share, quantity * ceiling
 
     # ========================================================
     # MAIN RISK EVALUATION

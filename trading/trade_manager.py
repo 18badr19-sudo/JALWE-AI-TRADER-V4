@@ -2547,19 +2547,13 @@ class TradeManager:
     # ========================================================
 
     @staticmethod
-    def _clear_pending(
-        trade: ManagedTrade,
-    ) -> None:
-
+    def _clear_pending(trade: ManagedTrade) -> None:
         trade.pending_action = None
-
         trade.pending_order_id = None
-
         trade.pending_requested_quantity = 0
-
         trade.pending_filled_quantity = 0
-
         trade.pending_status = None
+        trade.metadata.pop('exit_submission', None)
 
 
 # ============================================================

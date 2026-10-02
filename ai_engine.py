@@ -1,3 +1,10 @@
+# CANONICAL ENGINE NOTE
+# This root module is the research-path engine.
+# Live decisioning uses intelligence/ai_engine.py (and intelligence/news_engine.py).
+# Do not treat the two copies as interchangeable. Research imports this file;
+# DecisionEngine imports the intelligence package.
+# A merge was not applied because the public APIs differ.
+
 from __future__ import annotations
 
 import logging

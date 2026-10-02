@@ -9,6 +9,7 @@ from broker.alpaca_client import get_alpaca_client
 from core.database import database
 from core.models import BrokerOrder, OrderStatus, TradeSide
 from trading.reconciliation_engine import get_reconciliation_engine
+from trading.exit_submission import recover_exit_submission
 from trading.trade_manager import TradeStage, get_trade_manager
 
 
@@ -33,7 +34,7 @@ class RecoveryEngine:
     - Never silently repair broker/database mismatches.
 
     Important:
-    - This engine never submits a new BUY or SELL order.
+    - This engine never submits a new BUY or SELL order; it can cancel unresolved entries.
     - Active entry orders remain unresolved and block new entries.
     - A partially filled order that is still active remains blocked
       until it becomes terminal or is otherwise resolved.
@@ -594,227 +595,63 @@ class RecoveryEngine:
     # RECOVER ONE ENTRY INTENT
     # ========================================================
 
-    def recover_entry_intent(
-        self,
-        intent: dict[str, Any],
-    ) -> dict[str, Any]:
-        intent_id = str(
-            intent.get("intent_id") or ""
-        ).strip()
-
-        symbol = self._normalize_symbol(
-            intent.get("symbol")
-        )
-
-        result: dict[str, Any] = {
-            "intent_id": intent_id,
-            "symbol": symbol,
-            "resolved": False,
-            "managed": False,
-            "state_before": intent.get("state"),
-            "state_after": intent.get("state"),
-            "broker_order_id": intent.get("broker_order_id"),
-            "filled_quantity": self._safe_int(
-                intent.get("filled_quantity")
-            ),
-            "warning": None,
-        }
-
+    def recover_entry_intent(self, intent: dict[str, Any]) -> dict[str, Any]:
+        intent_id = str(intent.get('intent_id') or '').strip()
+        symbol = self._normalize_symbol(intent.get('symbol'))
+        result: dict[str, Any] = {'intent_id': intent_id, 'symbol': symbol, 'resolved': False, 'managed': False, 'state_before': intent.get('state'), 'state_after': intent.get('state'), 'broker_order_id': intent.get('broker_order_id'), 'filled_quantity': self._safe_int(intent.get('filled_quantity')), 'warning': None}
         try:
-            raw_order = self._lookup_entry_order(
-                intent
-            )
-
-            broker_order = self._raw_entry_to_broker_order(
-                raw_order,
-                intent,
-            )
-
-            updated_intent = (
-                database.update_entry_intent_from_broker_order(
-                    intent_id,
-                    broker_order,
-                )
-            )
-
-            result["state_after"] = updated_intent[
-                "state"
-            ]
-            result["broker_order_id"] = updated_intent[
-                "broker_order_id"
-            ]
-            result["filled_quantity"] = self._safe_int(
-                updated_intent.get("filled_quantity")
-            )
-
+            raw_order = self._lookup_entry_order(intent)
+            broker_order = self._raw_entry_to_broker_order(raw_order, intent)
+            if broker_order.status in {OrderStatus.SUBMITTED, OrderStatus.ACCEPTED, OrderStatus.PARTIALLY_FILLED}:
+                try:
+                    self.broker.cancel_order(broker_order.order_id)
+                except Exception as exc:
+                    logger.warning('Entry cancel failed; rechecking broker state: %s', exc)
+                raw_order = self._lookup_entry_order(intent)
+                broker_order = self._raw_entry_to_broker_order(raw_order, intent)
+            updated_intent = database.update_entry_intent_from_broker_order(intent_id, broker_order)
+            result['state_after'] = updated_intent['state']
+            result['broker_order_id'] = updated_intent['broker_order_id']
+            result['filled_quantity'] = self._safe_int(updated_intent.get('filled_quantity'))
         except Exception as exc:
-            logger.exception(
-                "Pending entry recovery lookup failed | "
-                "intent_id=%s symbol=%s",
-                intent_id,
-                symbol,
-            )
-
-            database.mark_entry_intent_error(
-                intent_id,
-                (
-                    "Entry broker lookup/reconciliation failed: "
-                    + str(exc)
-                ),
-                terminal=False,
-            )
-
-            database.log_event(
-                event_type="RECOVERY_ENTRY_LOOKUP_ERROR",
-                severity="CRITICAL",
-                message=(
-                    "Unable to determine broker state for a "
-                    "persisted entry intent."
-                ),
-                metadata={
-                    "intent_id": intent_id,
-                    "symbol": symbol,
-                    "client_order_id": intent.get(
-                        "client_order_id"
-                    ),
-                    "broker_order_id": intent.get(
-                        "broker_order_id"
-                    ),
-                    "error": str(exc),
-                },
-            )
-
-            result["warning"] = (
-                "ENTRY_ORDER_LOOKUP_FAILED"
-            )
-            result["error"] = str(exc)
-            result["state_after"] = "ERROR"
+            logger.exception('Pending entry recovery lookup failed | intent_id=%s symbol=%s', intent_id, symbol)
+            database.mark_entry_intent_error(intent_id, 'Entry broker lookup/reconciliation failed: ' + str(exc), terminal=False)
+            database.log_event(event_type='RECOVERY_ENTRY_LOOKUP_ERROR', severity='CRITICAL', message='Unable to determine broker state for a persisted entry intent.', metadata={'intent_id': intent_id, 'symbol': symbol, 'client_order_id': intent.get('client_order_id'), 'broker_order_id': intent.get('broker_order_id'), 'error': str(exc)})
+            result['warning'] = 'ENTRY_ORDER_LOOKUP_FAILED'
+            result['error'] = str(exc)
+            result['state_after'] = 'ERROR'
             return result
-
-        state = str(
-            updated_intent.get("state") or ""
-        ).upper()
-
-        filled_quantity = self._safe_int(
-            updated_intent.get("filled_quantity")
-        )
-
-        # ----------------------------------------------------
-        # ZERO-FILL TERMINAL ENTRY: SAFE RESOLUTION
-        # ----------------------------------------------------
-
-        if state in {
-            "CANCELED",
-            "REJECTED",
-            "FAILED",
-        }:
+        state = str(updated_intent.get('state') or '').upper()
+        filled_quantity = self._safe_int(updated_intent.get('filled_quantity'))
+        if state in {'CANCELED', 'REJECTED', 'FAILED'}:
             if filled_quantity > 0:
-                result["warning"] = (
-                    "TERMINAL_ENTRY_STATE_WITH_UNEXPECTED_FILL"
-                )
+                result['warning'] = 'TERMINAL_ENTRY_STATE_WITH_UNEXPECTED_FILL'
                 return result
-
-            result["resolved"] = True
-            result["managed"] = False
-
-            database.log_event(
-                event_type="ENTRY_RECOVERY_NO_FILL_TERMINAL",
-                severity="INFO",
-                message=(
-                    "Entry intent terminated without any broker fill."
-                ),
-                metadata={
-                    "intent_id": intent_id,
-                    "symbol": symbol,
-                    "state": state,
-                },
-            )
-
+            result['resolved'] = True
+            result['managed'] = False
+            database.log_event(event_type='ENTRY_RECOVERY_NO_FILL_TERMINAL', severity='INFO', message='Entry intent terminated without any broker fill.', metadata={'intent_id': intent_id, 'symbol': symbol, 'state': state})
             return result
-
-        # ----------------------------------------------------
-        # FULL FILL OR TERMINAL PARTIAL FILL -> MANAGE SHARES
-        # ----------------------------------------------------
-
-        if state in {
-            "FILLED",
-            "PARTIALLY_CANCELED",
-            "PARTIALLY_REJECTED",
-        }:
+        if state in {'FILLED', 'PARTIALLY_CANCELED', 'PARTIALLY_REJECTED'}:
             try:
-                management = self._manage_confirmed_entry(
-                    updated_intent
-                )
+                management = self._manage_confirmed_entry(updated_intent)
             except Exception as exc:
-                logger.exception(
-                    "Recovered entry management failed | "
-                    "intent_id=%s symbol=%s",
-                    intent_id,
-                    symbol,
-                )
-
-                database.mark_entry_intent_error(
-                    intent_id,
-                    (
-                        "Entry fill exists but ManagedTrade "
-                        "recovery failed: "
-                        + str(exc)
-                    ),
-                    terminal=False,
-                )
-
-                database.log_event(
-                    event_type="RECOVERY_ENTRY_MANAGEMENT_ERROR",
-                    severity="CRITICAL",
-                    message=(
-                        "Confirmed entry shares could not be safely "
-                        "converted into ManagedTrade state."
-                    ),
-                    metadata={
-                        "intent_id": intent_id,
-                        "symbol": symbol,
-                        "state": state,
-                        "filled_quantity": filled_quantity,
-                        "error": str(exc),
-                    },
-                )
-
-                result["warning"] = (
-                    "ENTRY_MANAGEMENT_FAILED"
-                )
-                result["error"] = str(exc)
-                result["state_after"] = "ERROR"
+                logger.exception('Recovered entry management failed | intent_id=%s symbol=%s', intent_id, symbol)
+                database.mark_entry_intent_error(intent_id, 'Entry fill exists but ManagedTrade recovery failed: ' + str(exc), terminal=False)
+                database.log_event(event_type='RECOVERY_ENTRY_MANAGEMENT_ERROR', severity='CRITICAL', message='Confirmed entry shares could not be safely converted into ManagedTrade state.', metadata={'intent_id': intent_id, 'symbol': symbol, 'state': state, 'filled_quantity': filled_quantity, 'error': str(exc)})
+                result['warning'] = 'ENTRY_MANAGEMENT_FAILED'
+                result['error'] = str(exc)
+                result['state_after'] = 'ERROR'
                 return result
-
-            result["resolved"] = True
-            result["managed"] = True
-            result["managed_trade_id"] = management[
-                "managed_trade_id"
-            ]
-            result["management_created"] = management[
-                "created"
-            ]
-            result["state_after"] = "MANAGED"
+            result['resolved'] = True
+            result['managed'] = True
+            result['managed_trade_id'] = management['managed_trade_id']
+            result['management_created'] = management['created']
+            result['state_after'] = 'MANAGED'
             return result
-
-        # ----------------------------------------------------
-        # ACTIVE ENTRY ORDER - KEEP BLOCKED
-        # ----------------------------------------------------
-
-        if state in {
-            "PREPARED",
-            "SUBMITTED",
-            "PARTIALLY_FILLED",
-            "ERROR",
-        }:
-            result["warning"] = (
-                "ENTRY_STILL_UNRESOLVED"
-            )
+        if state in {'PREPARED', 'SUBMITTED', 'PARTIALLY_FILLED', 'ERROR'}:
+            result['warning'] = 'ENTRY_STILL_UNRESOLVED'
             return result
-
-        result["warning"] = (
-            "UNKNOWN_ENTRY_INTENT_STATE"
-        )
+        result['warning'] = 'UNKNOWN_ENTRY_INTENT_STATE'
         return result
 
     # ========================================================
@@ -823,365 +660,133 @@ class RecoveryEngine:
 
     def _reconcile_protective_stop(self, trade_id: str, trade: Any) -> dict[str, Any]:
         metadata = dict(trade.metadata or {})
-        order_id = str(metadata.get("protective_stop_order_id") or "").strip()
-        if not order_id:
-            return {"checked": False, "active": False, "filled": False}
-
-        raw = self.broker.get_order(order_id)
-        status = self._map_order_status(getattr(raw, "status", None))
-        filled = self._safe_int(getattr(raw, "filled_qty", 0))
-        average = self._safe_float(getattr(raw, "filled_avg_price", None))
-        active = status in {
-            OrderStatus.ACCEPTED, OrderStatus.SUBMITTED,
-            OrderStatus.PARTIALLY_FILLED,
-        }
-        # Migrate already-reconciled full stops without applying them again.
-        previous_qty = int(metadata.get("protective_stop_applied_qty",
-            filled if metadata.get("protective_stop_fill_applied") else 0))
+        order_id = str(metadata.get('protective_stop_order_id') or '').strip()
+        if not order_id and metadata.get('protective_stop_submission_uncertain'):
+            raw = self.broker.get_order_by_client_id(metadata['protective_stop_client_order_id'])
+            side = self._value(getattr(raw, 'side', '')).lower()
+            if self._normalize_symbol(getattr(raw, 'symbol', '')) != trade.symbol or side != 'sell' or self._safe_int(getattr(raw, 'qty', 0)) != int(metadata['protective_stop_quantity']):
+                raise RuntimeError('Recovered protective stop does not match its persisted intent.')
+            order_id = str(getattr(raw, 'id', '') or '')
+            if not order_id:
+                raise RuntimeError('Recovered protective stop has no order ID.')
+            metadata['protective_stop_order_id'] = order_id
+            metadata['protective_stop_submission_uncertain'] = False
+            trade.metadata = metadata
+            database.save_managed_trade(trade_id, trade)
+        elif order_id:
+            raw = self.broker.get_order(order_id)
+        else:
+            return {'checked': False, 'active': False, 'filled': False}
+        status = self._map_order_status(getattr(raw, 'status', None))
+        filled = self._safe_int(getattr(raw, 'filled_qty', 0))
+        average = self._safe_float(getattr(raw, 'filled_avg_price', None))
+        active = status in {OrderStatus.ACCEPTED, OrderStatus.SUBMITTED, OrderStatus.PARTIALLY_FILLED}
+        previous_qty = int(metadata.get('protective_stop_applied_qty', filled if metadata.get('protective_stop_fill_applied') else 0))
         if filled < previous_qty:
-            raise ValueError("Protective stop cumulative fills moved backwards.")
+            raise ValueError('Protective stop cumulative fills moved backwards.')
         new_qty = filled - previous_qty
         if new_qty:
             if average is None or not math.isfinite(average) or average <= 0:
-                raise ValueError("Protective stop fill price is unavailable.")
+                raise ValueError('Protective stop fill price is unavailable.')
             if new_qty > int(trade.remaining_quantity):
-                raise ValueError("Protective stop fill exceeds local remaining quantity.")
+                raise ValueError('Protective stop fill exceeds local remaining quantity.')
             cumulative_notional = filled * average
-            prior_notional = float(metadata.get("protective_stop_applied_notional", 0.0))
+            prior_notional = float(metadata.get('protective_stop_applied_notional', 0.0))
             if previous_qty and prior_notional <= 0:
-                raise ValueError("Previous protective stop proceeds unavailable.")
+                raise ValueError('Previous protective stop proceeds unavailable.')
             proceeds = cumulative_notional - prior_notional
             if not math.isfinite(proceeds) or proceeds <= 0:
-                raise ValueError("Invalid protective stop cumulative proceeds.")
+                raise ValueError('Invalid protective stop cumulative proceeds.')
             realized = proceeds - new_qty * trade.entry_price
             trade.remaining_quantity -= new_qty
             trade.realized_quantity += new_qty
-            metadata["realized_pnl"] = float(metadata.get("realized_pnl") or 0.0) + realized
-            metadata["protective_stop_applied_qty"] = filled
-            metadata["protective_stop_applied_notional"] = cumulative_notional
+            metadata['realized_pnl'] = float(metadata.get('realized_pnl') or 0.0) + realized
+            metadata['protective_stop_applied_qty'] = filled
+            metadata['protective_stop_applied_notional'] = cumulative_notional
             if trade.remaining_quantity == 0:
                 trade.trailing_active = False
                 trade.stage = TradeStage.CLOSED
-            metadata["protective_stop_status"] = status.value
-            metadata["protective_stop_active"] = active
-            metadata["protective_stop_fill_applied"] = status == OrderStatus.FILLED
+            metadata['protective_stop_status'] = status.value
+            metadata['protective_stop_active'] = active
+            metadata['protective_stop_fill_applied'] = status == OrderStatus.FILLED
             trade.metadata = metadata
-            database.record_strategy_pnl_event(
-                trade_state=trade,
-                event_key=f"{order_id}:{filled}", trade_id=trade_id,
-                order_id=order_id, symbol=trade.symbol,
-                action="BROKER_PROTECTIVE_STOP", quantity=new_qty,
-                fill_price=proceeds / new_qty, entry_price=trade.entry_price,
-                realized_pnl=realized,
-                event_time=(getattr(raw, "filled_at", None) or
-                            datetime.now(timezone.utc)).isoformat(),
-                metadata={"source": "RECOVERY_ENGINE", "protective_stop": True},
-            )
-
-
+            database.record_strategy_pnl_event(trade_state=trade, event_key=f'{order_id}:{filled}', trade_id=trade_id, order_id=order_id, symbol=trade.symbol, action='BROKER_PROTECTIVE_STOP', quantity=new_qty, fill_price=proceeds / new_qty, entry_price=trade.entry_price, realized_pnl=realized, event_time=(getattr(raw, 'filled_at', None) or datetime.now(timezone.utc)).isoformat(), metadata={'source': 'RECOVERY_ENGINE', 'protective_stop': True})
         if int(trade.remaining_quantity) == 0:
             trade.trailing_active = False
             trade.stage = TradeStage.CLOSED
-        metadata["protective_stop_status"] = status.value
-        metadata["protective_stop_active"] = active
-        metadata["protective_stop_fill_applied"] = status == OrderStatus.FILLED
+        metadata['protective_stop_status'] = status.value
+        metadata['protective_stop_active'] = active
+        metadata['protective_stop_fill_applied'] = status == OrderStatus.FILLED
         trade.metadata = metadata
         database.save_managed_trade(trade_id, trade)
-        return {
-            "checked": True, "active": active,
-            "filled": status == OrderStatus.FILLED,
-            "status": status.value, "order_id": order_id,
-            "filled_quantity": filled, "fill_price": average,
-        }
+        return {'checked': True, 'active': active, 'filled': status == OrderStatus.FILLED, 'status': status.value, 'order_id': order_id, 'filled_quantity': filled, 'fill_price': average}
 
     # ========================================================
     # RECOVER ONE MANAGED TRADE / PENDING EXIT
     # ========================================================
 
-    def recover_trade(
-        self,
-        trade_id: str,
-        trade: Any,
-    ) -> dict[str, Any]:
-        symbol = self._normalize_symbol(
-            trade.symbol
-        )
-
-        result: dict[str, Any] = {
-            "trade_id": trade_id,
-            "symbol": symbol,
-            "recovered": False,
-            "pending_reconciled": False,
-            "broker_match": False,
-            "local_quantity": int(
-                trade.remaining_quantity
-            ),
-            "broker_quantity": None,
-            "warning": None,
-        }
-
-        # ----------------------------------------------------
-        # BROKER-NATIVE PROTECTIVE STOP
-        # ----------------------------------------------------
-
+    def recover_trade(self, trade_id: str, trade: Any) -> dict[str, Any]:
+        symbol = self._normalize_symbol(trade.symbol)
+        result: dict[str, Any] = {'trade_id': trade_id, 'symbol': symbol, 'recovered': False, 'pending_reconciled': False, 'broker_match': False, 'local_quantity': int(trade.remaining_quantity), 'broker_quantity': None, 'warning': None}
         try:
-            protective_stop = (
-                self._reconcile_protective_stop(
-                    trade_id,
-                    trade,
-                )
-            )
-
-            result[
-                "protective_stop"
-            ] = protective_stop
-
+            recover_exit_submission(database, trade_id, trade, self.broker, self.trade_manager)
         except Exception as exc:
-            logger.exception(
-                "Protective stop recovery failed | "
-                "trade_id=%s symbol=%s",
-                trade_id,
-                symbol,
-            )
-
-            result[
-                "warning"
-            ] = (
-                "PROTECTIVE_STOP_RECOVERY_FAILED"
-            )
-            result["error"] = str(exc)
-
+            result['warning'] = 'EXIT_SUBMISSION_LOOKUP_FAILED'
+            result['error'] = str(exc)
             return result
-
-        # ----------------------------------------------------
-        # PENDING EXIT ORDER
-        # ----------------------------------------------------
-
+        try:
+            protective_stop = self._reconcile_protective_stop(trade_id, trade)
+            result['protective_stop'] = protective_stop
+        except Exception as exc:
+            logger.exception('Protective stop recovery failed | trade_id=%s symbol=%s', trade_id, symbol)
+            result['warning'] = 'PROTECTIVE_STOP_RECOVERY_FAILED'
+            result['error'] = str(exc)
+            return result
         if trade.has_pending_exit:
             try:
-                local_order = self._build_pending_exit_order(
-                    trade
-                )
-
-                broker_order = self.reconciliation.reconcile_order(
-                    local_order
-                )
-
-                reconciliation_result = (
-                    self.trade_manager.apply_exit_reconciliation(
-                        trade,
-                        broker_order,
-                    )
-                )
-
-                database.save_broker_order(
-                    broker_order
-                )
-
-                new_fill_quantity = int(
-                    reconciliation_result.get(
-                        "new_fill_quantity",
-                        0,
-                    )
-                    or 0
-                )
-
+                local_order = self._build_pending_exit_order(trade)
+                broker_order = self.reconciliation.reconcile_order(local_order)
+                reconciliation_result = self.trade_manager.apply_exit_reconciliation(trade, broker_order)
+                database.save_broker_order(broker_order)
+                new_fill_quantity = int(reconciliation_result.get('new_fill_quantity', 0) or 0)
                 if new_fill_quantity > 0:
-                    cumulative_filled = int(
-                        reconciliation_result.get(
-                            "cumulative_filled",
-                            0,
-                        )
-                        or 0
-                    )
-
-                    event_key = (
-                        f"{broker_order.order_id}:"
-                        f"{cumulative_filled}"
-                    )
-
-                    filled_at = getattr(
-                        broker_order,
-                        "filled_at",
-                        None,
-                    )
-
-                    event_time = (
-                        filled_at.isoformat()
-                        if filled_at is not None
-                        else datetime.now(
-                            timezone.utc
-                        ).isoformat()
-                    )
-
-                    action = (
-                        trade.metadata.get(
-                            "last_exit_action"
-                        )
-                        or "RECOVERED_EXIT"
-                    )
-
-                    database.record_strategy_pnl_event(
-                        trade_state=trade,
-                        event_key=event_key,
-                        trade_id=trade_id,
-                        order_id=broker_order.order_id,
-                        symbol=trade.symbol,
-                        action=str(action),
-                        quantity=new_fill_quantity,
-                        fill_price=(
-                            reconciliation_result.get(
-                                "fill_price"
-                            )
-                        ),
-                        entry_price=trade.entry_price,
-                        realized_pnl=float(
-                            reconciliation_result.get(
-                                "realized_pnl_increment",
-                                0.0,
-                            )
-                            or 0.0
-                        ),
-                        event_time=event_time,
-                        metadata={
-                            "source": "RECOVERY_ENGINE",
-                            "stage": trade.stage.value,
-                            "remaining_quantity": (
-                                trade.remaining_quantity
-                            ),
-                        },
-                    )
-
-                database.save_managed_trade(
-                    trade_id,
-                    trade,
-                )
-
-                result["pending_reconciled"] = True
-                result["pending_reconciliation"] = (
-                    reconciliation_result
-                )
-
+                    cumulative_filled = int(reconciliation_result.get('cumulative_filled', 0) or 0)
+                    event_key = f'{broker_order.order_id}:{cumulative_filled}'
+                    filled_at = getattr(broker_order, 'filled_at', None)
+                    event_time = filled_at.isoformat() if filled_at is not None else datetime.now(timezone.utc).isoformat()
+                    action = trade.metadata.get('last_exit_action') or 'RECOVERED_EXIT'
+                    database.record_strategy_pnl_event(trade_state=trade, event_key=event_key, trade_id=trade_id, order_id=broker_order.order_id, symbol=trade.symbol, action=str(action), quantity=new_fill_quantity, fill_price=reconciliation_result.get('fill_price'), entry_price=trade.entry_price, realized_pnl=float(reconciliation_result.get('realized_pnl_increment', 0.0) or 0.0), event_time=event_time, metadata={'source': 'RECOVERY_ENGINE', 'stage': trade.stage.value, 'remaining_quantity': trade.remaining_quantity})
+                database.save_managed_trade(trade_id, trade)
+                result['pending_reconciled'] = True
+                result['pending_reconciliation'] = reconciliation_result
             except Exception as exc:
-                logger.exception(
-                    "Pending exit recovery failed | "
-                    "trade_id=%s symbol=%s",
-                    trade_id,
-                    symbol,
-                )
-
-                result["warning"] = (
-                    "PENDING_EXIT_RECONCILIATION_FAILED"
-                )
-                result["error"] = str(exc)
-
-                database.log_event(
-                    event_type="RECOVERY_PENDING_ERROR",
-                    severity="ERROR",
-                    message=(
-                        "Unable to reconcile pending broker exit "
-                        "during startup."
-                    ),
-                    metadata={
-                        "trade_id": trade_id,
-                        "symbol": symbol,
-                        "pending_order_id": (
-                            trade.pending_order_id
-                        ),
-                        "pending_filled_quantity": (
-                            trade.pending_filled_quantity
-                        ),
-                        "error": str(exc),
-                    },
-                )
-
+                logger.exception('Pending exit recovery failed | trade_id=%s symbol=%s', trade_id, symbol)
+                result['warning'] = 'PENDING_EXIT_RECONCILIATION_FAILED'
+                result['error'] = str(exc)
+                database.log_event(event_type='RECOVERY_PENDING_ERROR', severity='ERROR', message='Unable to reconcile pending broker exit during startup.', metadata={'trade_id': trade_id, 'symbol': symbol, 'pending_order_id': trade.pending_order_id, 'pending_filled_quantity': trade.pending_filled_quantity, 'error': str(exc)})
                 return result
-
-        # ----------------------------------------------------
-        # VERIFY BROKER POSITION
-        # ----------------------------------------------------
-
         try:
-            position = self.reconciliation.verify_position(
-                symbol
-            )
+            position = self.reconciliation.verify_position(symbol)
         except Exception as exc:
-            logger.exception(
-                "Position recovery failed | "
-                "trade_id=%s symbol=%s",
-                trade_id,
-                symbol,
-            )
-
-            result["warning"] = (
-                "BROKER_POSITION_UNAVAILABLE"
-            )
-            result["error"] = str(exc)
+            logger.exception('Position recovery failed | trade_id=%s symbol=%s', trade_id, symbol)
+            result['warning'] = 'BROKER_POSITION_UNAVAILABLE'
+            result['error'] = str(exc)
             return result
-
-        broker_exists = bool(
-            position.get("exists", False)
-        )
-        broker_quantity = self._safe_int(
-            position.get("quantity")
-        )
-        local_quantity = int(
-            trade.remaining_quantity
-        )
-
-        result["broker_quantity"] = broker_quantity
-
-        if (
-            broker_exists
-            and broker_quantity == local_quantity
-            and local_quantity > 0
-        ):
-            result["broker_match"] = True
-            result["recovered"] = True
-
-            database.log_event(
-                event_type="RECOVERY_OK",
-                severity="INFO",
-                message=(
-                    "Managed trade successfully matched with "
-                    "broker position."
-                ),
-                metadata={
-                    "trade_id": trade_id,
-                    "symbol": symbol,
-                    "quantity": local_quantity,
-                },
-            )
+        broker_exists = bool(position.get('exists', False))
+        broker_quantity = self._safe_int(position.get('quantity'))
+        local_quantity = int(trade.remaining_quantity)
+        result['broker_quantity'] = broker_quantity
+        if broker_exists and broker_quantity == local_quantity and (local_quantity > 0):
+            result['broker_match'] = True
+            result['recovered'] = True
+            database.log_event(event_type='RECOVERY_OK', severity='INFO', message='Managed trade successfully matched with broker position.', metadata={'trade_id': trade_id, 'symbol': symbol, 'quantity': local_quantity})
             return result
-
-        if (
-            not broker_exists
-            and local_quantity == 0
-        ):
-            result["broker_match"] = True
-            result["recovered"] = True
+        if not broker_exists and local_quantity == 0:
+            result['broker_match'] = True
+            result['recovered'] = True
             return result
-
-        result["warning"] = (
-            "BROKER_DATABASE_QUANTITY_MISMATCH"
-        )
-
-        database.log_event(
-            event_type="RECOVERY_POSITION_MISMATCH",
-            severity="CRITICAL",
-            message=(
-                "Local managed trade quantity does not match "
-                "Alpaca broker position."
-            ),
-            metadata={
-                "trade_id": trade_id,
-                "symbol": symbol,
-                "local_quantity": local_quantity,
-                "broker_exists": broker_exists,
-                "broker_quantity": broker_quantity,
-            },
-        )
-
+        result['warning'] = 'BROKER_DATABASE_QUANTITY_MISMATCH'
+        database.log_event(event_type='RECOVERY_POSITION_MISMATCH', severity='CRITICAL', message='Local managed trade quantity does not match Alpaca broker position.', metadata={'trade_id': trade_id, 'symbol': symbol, 'local_quantity': local_quantity, 'broker_exists': broker_exists, 'broker_quantity': broker_quantity})
         return result
 
     # ========================================================

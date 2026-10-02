@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import signal
 import subprocess
@@ -12,6 +13,7 @@ import urllib.request
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from core.storage import data_directory
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
@@ -25,12 +27,9 @@ from core.database import database
 
 
 BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = Path(
-    os.getenv(
-        "JALWE_CONTROLLER_DATA_DIR",
-        str(BASE_DIR / "data"),
-    )
-)
+
+
+DATA_DIR = data_directory()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 STATE_FILE = DATA_DIR / "railway_controller_state.json"
@@ -845,41 +844,18 @@ def get_positions() -> list[dict[str, Any]]:
     ]
 
 
-def get_recent_filled_orders(
-    limit: int = 50,
-) -> list[dict[str, Any]]:
-    result = alpaca_get(
-        "/v2/orders",
-        {
-            "status": "closed",
-            "limit": max(1, min(int(limit), 500)),
-            "direction": "desc",
-            "nested": "false",
-        },
-    )
-
+def get_recent_filled_orders(limit: int=50) -> list[dict[str, Any]]:
+    result = alpaca_get('/v2/orders', {'status': 'all', 'limit': max(1, min(int(limit), 500)), 'direction': 'desc', 'nested': 'false'})
     if not isinstance(result, list):
-        raise RuntimeError("Unexpected Alpaca orders response.")
-
+        raise RuntimeError('Unexpected Alpaca orders response.')
     filled = []
-
     for item in result:
         if not isinstance(item, dict):
             continue
-
-        if str(item.get("status", "")).lower() != "filled":
+        if (safe_float(item.get('filled_qty')) or 0.0) <= 0:
             continue
-
         filled.append(item)
-
-    filled.sort(
-        key=lambda item: str(
-            item.get("filled_at")
-            or item.get("updated_at")
-            or ""
-        )
-    )
-
+    filled.sort(key=lambda item: str(item.get('filled_at') or item.get('updated_at') or ''))
     return filled
 
 
@@ -1462,130 +1438,58 @@ def order_alert_text(
 def poll_filled_order_alerts() -> None:
     if not ORDER_ALERTS_ENABLED:
         return
-
     now_epoch = time.time()
-    last_check = safe_float(
-        controller_state.get("last_order_check_epoch")
-    ) or 0.0
-
-    if (
-        now_epoch - last_check
-        < ORDER_ALERT_POLL_SECONDS
-    ):
+    last_check = safe_float(controller_state.get('last_order_check_epoch')) or 0.0
+    if now_epoch - last_check < ORDER_ALERT_POLL_SECONDS:
         return
-
-    controller_state["last_order_check_epoch"] = now_epoch
-
+    controller_state['last_order_check_epoch'] = now_epoch
     try:
         orders = get_recent_filled_orders(100)
-
-        # A successful read clears the transient failure streak.
-        controller_state[
-            "order_poll_consecutive_failures"
-        ] = 0
-
+        controller_state['order_poll_consecutive_failures'] = 0
     except Exception as exc:
-        failures = int(
-            controller_state.get(
-                "order_poll_consecutive_failures",
-                0,
-            )
-            or 0
-        ) + 1
-
-        controller_state[
-            "order_poll_consecutive_failures"
-        ] = failures
-
-        print(
-            "Filled-order poll failed "
-            f"(attempt streak={failures}): {exc}",
-            flush=True,
-        )
-
+        failures = int(controller_state.get('order_poll_consecutive_failures', 0) or 0) + 1
+        controller_state['order_poll_consecutive_failures'] = failures
+        print(f'Filled-order poll failed (attempt streak={failures}): {exc}', flush=True)
         now_error_epoch = time.time()
-        last_alert_epoch = safe_float(
-            controller_state.get(
-                "last_order_poll_error_alert_epoch"
-            )
-        ) or 0.0
-
-        alert_due = bool(
-            failures >= ORDER_POLL_FAILURES_BEFORE_ALERT
-            and (
-                now_error_epoch
-                - last_alert_epoch
-                >= ORDER_POLL_ERROR_ALERT_COOLDOWN_SECONDS
-            )
-        )
-
+        last_alert_epoch = safe_float(controller_state.get('last_order_poll_error_alert_epoch')) or 0.0
+        alert_due = bool(failures >= ORDER_POLL_FAILURES_BEFORE_ALERT and now_error_epoch - last_alert_epoch >= ORDER_POLL_ERROR_ALERT_COOLDOWN_SECONDS)
         if alert_due:
-            notify_error(
-                "مراقبة أوامر Alpaca",
-                (
-                    f"فشل الاتصال بعد {failures} محاولات مراقبة متتالية. "
-                    f"آخر خطأ: {exc}"
-                ),
-            )
-
-            controller_state[
-                "last_order_poll_error_alert_epoch"
-            ] = now_error_epoch
-
+            notify_error('مراقبة أوامر Alpaca', f'فشل الاتصال بعد {failures} محاولات مراقبة متتالية. آخر خطأ: {exc}')
+            controller_state['last_order_poll_error_alert_epoch'] = now_error_epoch
         save_state(controller_state)
         return
 
-    ids = [
-        str(order.get("id") or "").strip()
-        for order in orders
-        if str(order.get("id") or "").strip()
-    ]
-
-    known = set(
-        str(value)
-        for value in controller_state.get(
-            "notified_order_ids",
-            [],
-        )
-    )
-
-    if not controller_state.get(
-        "order_alerts_bootstrapped",
-        False,
-    ):
-        controller_state["notified_order_ids"] = ids[-500:]
-        controller_state["order_alerts_bootstrapped"] = True
-        save_state(controller_state)
-        print(
-            f"Order alerts initialized with {len(ids)} existing fills.",
-            flush=True,
-        )
-        return
-
-    new_orders = [
-        order
-        for order in orders
-        if str(order.get("id") or "").strip()
-        and str(order.get("id") or "").strip()
-        not in known
-    ]
-
-    for order in new_orders:
-        order_id = str(order.get("id") or "").strip()
-
+    known = set(str(value) for value in controller_state.get('notified_order_ids', []))
+    progress = controller_state.setdefault('notified_order_fills', {})
+    bootstrap = not controller_state.get('order_alerts_bootstrapped', False)
+    for order in orders:
+        order_id = str(order.get('id') or '').strip()
+        quantity = safe_float(order.get('filled_qty')) or 0.0
+        price = safe_float(order.get('filled_avg_price'))
+        if not order_id or quantity <= 0 or price is None or price <= 0:
+            continue
+        previous = progress.get(order_id)
+        if bootstrap or (previous is None and order_id in known):
+            progress[order_id] = {'quantity': quantity, 'notional': quantity * price}
+            continue
+        previous = previous or {'quantity': 0.0, 'notional': 0.0}
+        delta = quantity - float(previous['quantity'])
+        if delta <= 0:
+            continue
+        proceeds = quantity * price - float(previous['notional'])
+        if proceeds <= 0:
+            continue
+        incremental = dict(order, filled_qty=delta, filled_avg_price=proceeds / delta)
         try:
-            send_message(
-                order_alert_text(order)
-            )
+            send_message(order_alert_text(incremental))
             known.add(order_id)
-
+            progress[order_id] = {'quantity': quantity, 'notional': quantity * price}
         except Exception as exc:
-            print(
-                f"Trade alert failed for {order_id}: {exc}",
-                flush=True,
-            )
-
-    controller_state["notified_order_ids"] = list(known)[-500:]
+            print(f'Trade alert failed for {order_id}: {exc}', flush=True)
+    controller_state['order_alerts_bootstrapped'] = True
+    controller_state['notified_order_ids'] = list(known)[-500:]
+    # Preserve all current orders and the most recently recorded older orders.
+    controller_state['notified_order_fills'] = dict(list(progress.items())[-500:])
     save_state(controller_state)
 
 
@@ -2687,7 +2591,9 @@ def monitor_children() -> None:
                         f"{message}"
                     )
                 except Exception:
-                    pass
+                    logging.getLogger(__name__).exception(
+                        "Automatic restart Telegram alert failed"
+                    )
 
 
 def shutdown(*_: Any) -> None:

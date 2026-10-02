@@ -16,14 +16,19 @@ from alpaca.trading.enums import (
 from alpaca.trading.requests import (
     GetAssetsRequest,
     GetOrdersRequest,
+    LimitOrderRequest,
     MarketOrderRequest,
     StopOrderRequest,
 )
 
 from core.config import settings
+from broker.entry_pricing import protected_entry_limit
 
 
 logger = logging.getLogger(__name__)
+
+
+
 
 
 class AlpacaClient:
@@ -575,6 +580,63 @@ class AlpacaClient:
         )
 
         return order
+
+
+    def submit_protected_entry(
+        self,
+        symbol: str,
+        quantity: int,
+        reference_price: float,
+        client_order_id: Optional[str] = None,
+    ) -> Any:
+        """PAPER immediate fill-or-kill BUY limit capped by MAX_ENTRY_SLIPPAGE_PCT.
+
+        A market buy has no price ceiling. This limit is the reference
+        price plus the configured slippage cap, so a spike cannot fill
+        the entry at an unbounded price. Sells stay on submit_market_order.
+        """
+        symbol = self._normalize_symbol(symbol)
+        quantity = int(quantity)
+        reference_price = float(reference_price)
+        if quantity <= 0:
+            raise ValueError("Entry quantity must be positive.")
+        if reference_price <= 0:
+            raise ValueError("Entry reference price must be positive.")
+
+        slippage_pct = float(settings.MAX_ENTRY_SLIPPAGE_PCT)
+        if slippage_pct < 0 or slippage_pct > 5:
+            raise ValueError("MAX_ENTRY_SLIPPAGE_PCT must be between 0 and 5.")
+
+        limit_price = protected_entry_limit(reference_price, slippage_pct)
+
+        normalized_client_order_id = None
+        if client_order_id is not None:
+            normalized_client_order_id = self._normalize_client_order_id(
+                client_order_id
+            )
+
+        order_request = LimitOrderRequest(
+            symbol=symbol,
+            qty=quantity,
+            side=OrderSide.BUY,
+            time_in_force=TimeInForce.FOK,
+            limit_price=limit_price,
+            client_order_id=normalized_client_order_id,
+        )
+        order = self.client.submit_order(order_data=order_request)
+        logger.info(
+            "PAPER protected entry submitted | symbol=%s qty=%s "
+            "ref=%s limit=%s slippage_pct=%s order_id=%s client_order_id=%s",
+            symbol,
+            quantity,
+            reference_price,
+            limit_price,
+            slippage_pct,
+            getattr(order, "id", None),
+            getattr(order, "client_order_id", normalized_client_order_id),
+        )
+        return order
+
 
     # ========================================================
     # BROKER-NATIVE PROTECTIVE STOP

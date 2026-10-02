@@ -319,7 +319,7 @@ class TradeManager:
           ↓
         Partial exit
           ↓
-        Stop -> Entry
+        Stop -> T1
           ↓
         T2
           ↓
@@ -451,7 +451,7 @@ class TradeManager:
 
         trade.metadata[
             "trade_manager_version"
-        ] = "PROFIT_LOCK_V2"
+        ] = "PROFIT_LOCK_V3"
 
         trade.metadata[
             "t3_completed"
@@ -1027,6 +1027,155 @@ class TradeManager:
         )
 
     # ========================================================
+    # DYNAMIC RUNNER EXTENSION
+    # ========================================================
+
+    @staticmethod
+    def _update_dynamic_runner_extension(
+        trade: ManagedTrade,
+    ) -> None:
+        """
+        Extend profit targets beyond T3 without forcing another
+        partial exit.
+
+        T4/T5/... are derived from the average spacing between
+        the original T1/T2/T3 levels. Each newly reached dynamic
+        target ratchets the protected floor to the previous target.
+        The stop never moves downward.
+        """
+
+        if (
+            not trade.trailing_active
+            or not trade.t3_completed
+            or trade.highest_price is None
+        ):
+            return
+
+        gap_1 = float(
+            trade.target_2
+            - trade.target_1
+        )
+
+        gap_2 = float(
+            trade.target_3
+            - trade.target_2
+        )
+
+        positive_gaps = [
+            value
+            for value in (
+                gap_1,
+                gap_2,
+            )
+            if value > 0
+        ]
+
+        if not positive_gaps:
+            return
+
+        step = round(
+            sum(positive_gaps)
+            / len(positive_gaps),
+            4,
+        )
+
+        if step <= 0:
+            return
+
+        base = float(
+            trade.target_3
+        )
+
+        highest = float(
+            trade.highest_price
+        )
+
+        levels_reached = max(
+            int(
+                math.floor(
+                    (
+                        highest
+                        - base
+                    )
+                    / step
+                    + 1e-9
+                )
+            ),
+            0,
+        )
+
+        trade.metadata[
+            "dynamic_runner_enabled"
+        ] = True
+
+        trade.metadata[
+            "dynamic_target_step"
+        ] = step
+
+        trade.metadata[
+            "dynamic_target_next_index"
+        ] = int(
+            4 + levels_reached
+        )
+
+        trade.metadata[
+            "dynamic_target_next_price"
+        ] = round(
+            base
+            + (
+                levels_reached
+                + 1
+            )
+            * step,
+            4,
+        )
+
+        if levels_reached <= 0:
+            return
+
+        reached_price = round(
+            base
+            + levels_reached
+            * step,
+            4,
+        )
+
+        lock_price = round(
+            base
+            + (
+                levels_reached
+                - 1
+            )
+            * step,
+            4,
+        )
+
+        trade.metadata[
+            "dynamic_target_last_index"
+        ] = int(
+            3 + levels_reached
+        )
+
+        trade.metadata[
+            "dynamic_target_last_price"
+        ] = reached_price
+
+        trade.metadata[
+            "dynamic_profit_lock"
+        ] = lock_price
+
+        trade.current_stop = max(
+            trade.current_stop,
+            lock_price,
+        )
+
+        trade.metadata[
+            "profit_lock_floor"
+        ] = float(
+            trade.current_stop
+        )
+
+    # ========================================================
     # DECISION BUILDER
     # ========================================================
 
@@ -1102,7 +1251,13 @@ class TradeManager:
 
         trade.current_stop = max(
             trade.current_stop,
-            trade.entry_price,
+            trade.target_1,
+        )
+
+        trade.metadata[
+            "profit_lock_floor"
+        ] = float(
+            trade.target_1
         )
 
         self._sync_metadata(
@@ -1358,6 +1513,10 @@ class TradeManager:
                 trailing_stop,
             )
 
+            self._update_dynamic_runner_extension(
+                trade
+            )
+
         # ====================================================
         # 1. ACTIVE STOP
         # ====================================================
@@ -1439,7 +1598,7 @@ class TradeManager:
                         "Target 1 reached. "
                         "Waiting for broker fill "
                         "before moving stop "
-                        "to break-even."
+                        "to Target 1."
                     ),
 
                     planned_target_quantity=(
@@ -1475,7 +1634,7 @@ class TradeManager:
                     "Target 1 reached. "
                     "Position is too small for "
                     "another whole-share partial, "
-                    "so stop moved to break-even."
+                    "so stop moved to Target 1."
                 ),
             )
 
@@ -1690,6 +1849,18 @@ class TradeManager:
 
                 active_stop=(
                     trade.current_stop
+                ),
+
+                dynamic_target_next=(
+                    trade.metadata.get(
+                        "dynamic_target_next_price"
+                    )
+                ),
+
+                dynamic_target_last=(
+                    trade.metadata.get(
+                        "dynamic_target_last_price"
+                    )
                 ),
             )
 
@@ -2111,10 +2282,16 @@ class TradeManager:
                 )
 
                 # Profit Lock 1:
-                # stop -> entry.
+                # lock the remaining position at Target 1.
                 trade.current_stop = max(
                     trade.current_stop,
-                    trade.entry_price,
+                    trade.target_1,
+                )
+
+                trade.metadata[
+                    "profit_lock_floor"
+                ] = float(
+                    trade.target_1
                 )
 
             # ================================================

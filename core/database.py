@@ -542,6 +542,81 @@ class Database:
             )
 
             # =================================================
+            # OPPORTUNITY PERFORMANCE TRACKING
+            # =================================================
+
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS opportunity_performance (
+                    signal_key TEXT PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    strategy TEXT,
+                    source_state TEXT,
+                    started_at TEXT NOT NULL,
+
+                    entry_price REAL NOT NULL,
+                    stop_price REAL NOT NULL,
+                    target_1 REAL NOT NULL,
+                    target_2 REAL NOT NULL,
+                    target_3 REAL NOT NULL,
+
+                    ai_score REAL,
+                    opportunity_score REAL,
+                    session_score REAL,
+                    market_regime TEXT,
+
+                    mfe_price REAL,
+                    mae_price REAL,
+                    mfe_pct REAL,
+                    mae_pct REAL,
+
+                    price_5m REAL,
+                    price_15m REAL,
+                    price_30m REAL,
+                    price_60m REAL,
+
+                    hit_stop_at TEXT,
+                    hit_t1_at TEXT,
+                    hit_t2_at TEXT,
+                    hit_t3_at TEXT,
+
+                    first_level_hit TEXT,
+                    first_level_hit_at TEXT,
+
+                    status TEXT NOT NULL DEFAULT 'TRACKING',
+                    metadata_json TEXT,
+
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS
+                idx_opportunity_performance_symbol
+                ON opportunity_performance(symbol)
+                """
+            )
+
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS
+                idx_opportunity_performance_started
+                ON opportunity_performance(started_at)
+                """
+            )
+
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS
+                idx_opportunity_performance_status
+                ON opportunity_performance(status)
+                """
+            )
+
+            # =================================================
             # SYSTEM EVENTS
             # =================================================
 

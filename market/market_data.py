@@ -13,6 +13,7 @@ from alpaca.data.requests import (
     StockBarsRequest,
     StockLatestQuoteRequest,
     StockLatestTradeRequest,
+    StockTradesRequest,
 )
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
@@ -547,6 +548,168 @@ class MarketData:
             )
 
         return price
+
+    # ========================================================
+    # TRADE RANGE BETWEEN MANAGEMENT POLLS
+    # ========================================================
+
+    def get_trade_range(
+        self,
+        symbol: str,
+        start: datetime,
+        end: Optional[datetime] = None,
+        limit: int = 10000,
+    ) -> dict[str, object]:
+        """
+        Return the real executed-trade price range observed on the
+        configured Alpaca feed between two timestamps.
+
+        This is used by PAPER position management so a brief target
+        touch is not lost just because the next management poll sees
+        a lower last trade.
+        """
+
+        symbol = self._normalize_symbol(
+            symbol
+        )
+
+        if not isinstance(start, datetime):
+            raise TypeError(
+                "start must be a datetime."
+            )
+
+        if start.tzinfo is None:
+            start_utc = start.replace(
+                tzinfo=timezone.utc
+            )
+        else:
+            start_utc = start.astimezone(
+                timezone.utc
+            )
+
+        final_end = (
+            end
+            if end is not None
+            else datetime.now(
+                timezone.utc
+            )
+        )
+
+        if not isinstance(final_end, datetime):
+            raise TypeError(
+                "end must be a datetime."
+            )
+
+        if final_end.tzinfo is None:
+            end_utc = final_end.replace(
+                tzinfo=timezone.utc
+            )
+        else:
+            end_utc = final_end.astimezone(
+                timezone.utc
+            )
+
+        if limit <= 0 or limit > 10000:
+            raise ValueError(
+                "limit must be between 1 and 10000."
+            )
+
+        if end_utc <= start_utc:
+            return {
+                "high": None,
+                "low": None,
+                "last": None,
+                "count": 0,
+                "start": start_utc.isoformat(),
+                "end": end_utc.isoformat(),
+                "feed": self.get_feed_name(),
+            }
+
+        request = StockTradesRequest(
+            symbol_or_symbols=symbol,
+            start=start_utc,
+            end=end_utc,
+            limit=limit,
+            sort=Sort.ASC,
+            feed=self.feed,
+        )
+
+        try:
+            response = (
+                self.client
+                .get_stock_trades(
+                    request
+                )
+            )
+
+            try:
+                trades = response[
+                    symbol
+                ]
+            except (
+                KeyError,
+                TypeError,
+            ):
+                trades = []
+
+        except Exception as exc:
+            logger.exception(
+                "Failed to fetch trade range | "
+                "symbol=%s start=%s end=%s "
+                "feed=%s",
+                symbol,
+                start_utc.isoformat(),
+                end_utc.isoformat(),
+                self.get_feed_name(),
+            )
+
+            raise MarketDataError(
+                f"Trade range unavailable for {symbol}"
+            ) from exc
+
+        prices: list[float] = []
+
+        for trade in trades or []:
+            try:
+                price = float(
+                    getattr(
+                        trade,
+                        "price",
+                        0.0,
+                    )
+                    or 0.0
+                )
+            except (
+                TypeError,
+                ValueError,
+            ):
+                continue
+
+            if price > 0:
+                prices.append(
+                    price
+                )
+
+        if not prices:
+            return {
+                "high": None,
+                "low": None,
+                "last": None,
+                "count": 0,
+                "start": start_utc.isoformat(),
+                "end": end_utc.isoformat(),
+                "feed": self.get_feed_name(),
+            }
+
+        return {
+            "high": max(prices),
+            "low": min(prices),
+            "last": prices[-1],
+            "count": len(prices),
+            "start": start_utc.isoformat(),
+            "end": end_utc.isoformat(),
+            "feed": self.get_feed_name(),
+        }
 
     # ========================================================
     # DATA QUALITY

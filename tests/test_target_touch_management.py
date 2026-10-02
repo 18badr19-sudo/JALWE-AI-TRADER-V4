@@ -132,7 +132,7 @@ class PaperTargetTouchTests(
         )
         self.assertAlmostEqual(
             trade.current_stop,
-            10.0,
+            11.0,
         )
 
         t2 = manager.evaluate(
@@ -167,7 +167,7 @@ class PaperTargetTouchTests(
 
         t3 = manager.evaluate(
             trade,
-            current_price=11.5,
+            current_price=12.5,
         )
 
         self.assertEqual(
@@ -196,6 +196,150 @@ class PaperTargetTouchTests(
         )
         self.assertTrue(
             trade.trailing_active
+        )
+
+    def test_t1_fill_locks_remaining_cane_position_at_t1(
+        self,
+    ) -> None:
+        manager = TradeManager()
+
+        trade = manager.create_trade(
+            symbol="CANE",
+            entry_price=11.66,
+            quantity=8,
+            stop_price=11.58,
+            target_1=11.79,
+            target_2=11.92,
+            target_3=12.05,
+        )
+
+        t1 = manager.evaluate(
+            trade,
+            current_price=11.80,
+            observed_high=11.81,
+        )
+
+        self._fill_exit(
+            manager,
+            trade,
+            t1,
+            11.80,
+            "CANE-T1",
+        )
+
+        self.assertTrue(
+            trade.t1_completed
+        )
+        self.assertEqual(
+            trade.remaining_quantity,
+            5,
+        )
+        self.assertAlmostEqual(
+            trade.current_stop,
+            11.79,
+        )
+        self.assertAlmostEqual(
+            trade.metadata[
+                "profit_lock_floor"
+            ],
+            11.79,
+        )
+
+        stop_decision = manager.evaluate(
+            trade,
+            current_price=11.78,
+        )
+
+        self.assertEqual(
+            stop_decision.action,
+            TradeAction.EXIT_STOP,
+        )
+        self.assertEqual(
+            stop_decision.quantity,
+            5,
+        )
+
+    def test_runner_builds_dynamic_targets_beyond_t3(
+        self,
+    ) -> None:
+        manager = TradeManager(
+            trailing_distance_pct=20.0
+        )
+
+        trade = manager.create_trade(
+            symbol="TEST",
+            entry_price=10.0,
+            quantity=8,
+            stop_price=9.5,
+            target_1=11.0,
+            target_2=12.0,
+            target_3=13.0,
+        )
+
+        t1 = manager.evaluate(
+            trade,
+            current_price=11.1,
+        )
+        self._fill_exit(
+            manager,
+            trade,
+            t1,
+            11.1,
+            "DYN-T1",
+        )
+
+        t2 = manager.evaluate(
+            trade,
+            current_price=12.1,
+        )
+        self._fill_exit(
+            manager,
+            trade,
+            t2,
+            12.1,
+            "DYN-T2",
+        )
+
+        t3 = manager.evaluate(
+            trade,
+            current_price=13.1,
+        )
+        self._fill_exit(
+            manager,
+            trade,
+            t3,
+            13.1,
+            "DYN-T3",
+        )
+
+        runner = manager.evaluate(
+            trade,
+            current_price=15.1,
+            observed_high=15.2,
+        )
+
+        self.assertEqual(
+            runner.action,
+            TradeAction.HOLD,
+        )
+        self.assertTrue(
+            trade.trailing_active
+        )
+        self.assertAlmostEqual(
+            trade.metadata[
+                "dynamic_target_last_price"
+            ],
+            15.0,
+        )
+        self.assertAlmostEqual(
+            trade.metadata[
+                "dynamic_target_next_price"
+            ],
+            16.0,
+        )
+        self.assertAlmostEqual(
+            trade.current_stop,
+            14.0,
         )
 
     def test_trade_range_preserves_transient_high(

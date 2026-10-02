@@ -11,6 +11,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 from research_recheck import update_recheck, recheck_due
 
 
@@ -35,6 +36,10 @@ from intelligence.external_research_bridge import (
 )
 
 from market.market_data import get_market_data
+
+from opportunity_performance_tracker import (
+    get_opportunity_performance_tracker,
+)
 
 from trading.execution_engine import (
     get_execution_engine,
@@ -373,6 +378,7 @@ def load_state() -> dict:
         "last_watch_update": {},
 
         "lifecycle_events": {},
+        "last_opportunity_report_date": "",
     }
 
     if not STATE_FILE.exists():
@@ -490,6 +496,15 @@ def load_state() -> dict:
 
             "lifecycle_events":
                 lifecycle_events,
+
+            "last_opportunity_report_date":
+                str(
+                    data.get(
+                        "last_opportunity_report_date",
+                        "",
+                    )
+                    or ""
+                ),
         }
 
     except Exception as exc:
@@ -557,6 +572,15 @@ def save_state(
             state.get(
                 "lifecycle_events",
                 {},
+            ),
+
+        "last_opportunity_report_date":
+            str(
+                state.get(
+                    "last_opportunity_report_date",
+                    "",
+                )
+                or ""
             ),
     }
 
@@ -4225,6 +4249,35 @@ def process_research(
             }
 
         # ====================================================
+        # OPPORTUNITY PERFORMANCE TRACKING
+        # ====================================================
+
+        try:
+            tracked = (
+                get_opportunity_performance_tracker()
+                .start_from_payload(
+                    payload,
+                    research_version(
+                        research
+                    ),
+                )
+            )
+
+            if tracked:
+                print(
+                    utc_now_iso(),
+                    "| opportunity tracker started |",
+                    symbol,
+                )
+
+        except Exception as exc:
+            logger.warning(
+                "Opportunity tracker start failed for %s: %s",
+                symbol,
+                exc,
+            )
+
+        # ====================================================
         # SAVE TO JALWE DATABASE
         # ====================================================
 
@@ -4496,6 +4549,108 @@ def print_startup_health() -> None:
 
 
 # ============================================================
+# OPPORTUNITY PERFORMANCE DAILY REPORT
+# ============================================================
+
+def maybe_send_opportunity_daily_report(
+    state: dict,
+) -> None:
+
+    now_ny = datetime.now(
+        ZoneInfo(
+            "America/New_York"
+        )
+    )
+
+    # Weekdays only. 17:10 New York gives the last regular-session
+    # setup enough time to finish its 60-minute post-signal window.
+    if now_ny.weekday() >= 5:
+        return
+
+    if (
+        now_ny.hour < 17
+        or (
+            now_ny.hour == 17
+            and now_ny.minute < 10
+        )
+    ):
+        return
+
+    date_key = (
+        now_ny.date()
+        .isoformat()
+    )
+
+    if (
+        str(
+            state.get(
+                "last_opportunity_report_date",
+                "",
+            )
+            or ""
+        )
+        ==
+        date_key
+    ):
+        return
+
+    tracker = (
+        get_opportunity_performance_tracker()
+    )
+
+    # Make one final metrics refresh before building the report.
+    tracker.update_open(
+        minimum_interval_seconds=15,
+    )
+
+    summary = (
+        tracker.summary_for_ny_date(
+            now_ny.date()
+        )
+    )
+
+    message = (
+        tracker.build_daily_report(
+            summary
+        )
+    )
+
+    success, error = (
+        send_telegram(
+            message
+        )
+    )
+
+    if success:
+        state[
+            "last_opportunity_report_date"
+        ] = date_key
+
+        save_state(
+            state
+        )
+
+        print(
+            utc_now_iso(),
+            "| opportunity daily report sent |",
+            date_key,
+            "| tracked:",
+            summary.get(
+                "total",
+                0,
+            ),
+        )
+
+        return
+
+    if error != "TELEGRAM_NOT_CONFIGURED":
+        logger.warning(
+            "Opportunity daily report failed: %s",
+            error,
+        )
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
@@ -4605,6 +4760,17 @@ def main() -> None:
                 )
             )
 
+            tracked_updates = (
+                get_opportunity_performance_tracker()
+                .update_open(
+                    minimum_interval_seconds=60,
+                )
+            )
+
+            maybe_send_opportunity_daily_report(
+                state
+            )
+
             emergency_closes = (
                 process_emergency_paper_close()
             )
@@ -4632,6 +4798,13 @@ def main() -> None:
                     utc_now_iso(),
                     "| active paper trades managed:",
                     managed_trades,
+                )
+
+            if tracked_updates:
+                print(
+                    utc_now_iso(),
+                    "| opportunity trackers refreshed:",
+                    tracked_updates,
                 )
 
         except KeyboardInterrupt:

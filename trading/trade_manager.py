@@ -1174,6 +1174,10 @@ class TradeManager:
 
         *,
 
+        observed_high: Optional[
+            float
+        ] = None,
+
         atr: Optional[
             float
         ] = None,
@@ -1236,16 +1240,44 @@ class TradeManager:
         # HIGH-WATER MARK
         # ----------------------------------------------------
 
+        target_observed_high = float(
+            current_price
+        )
+
+        if observed_high is not None:
+
+            observed_high_value = float(
+                observed_high
+            )
+
+            if observed_high_value <= 0:
+                raise ValueError(
+                    "observed_high must be positive."
+                )
+
+            target_observed_high = max(
+                target_observed_high,
+                observed_high_value,
+            )
+
         if (
             trade.highest_price
             is None
-            or current_price
+            or target_observed_high
             > trade.highest_price
         ):
 
             trade.highest_price = float(
-                current_price
+                target_observed_high
             )
+
+        target_trigger_price = max(
+            float(current_price),
+            float(
+                trade.highest_price
+                or current_price
+            ),
+        )
 
         # ----------------------------------------------------
         # PENDING BROKER EXIT
@@ -1368,7 +1400,7 @@ class TradeManager:
 
         if (
             not trade.t1_completed
-            and current_price
+            and target_trigger_price
             >= trade.target_1
         ):
 
@@ -1454,7 +1486,7 @@ class TradeManager:
         if (
             trade.t1_completed
             and not trade.t2_completed
-            and current_price
+            and target_trigger_price
             >= trade.target_2
         ):
 
@@ -1537,7 +1569,7 @@ class TradeManager:
             trade.t1_completed
             and trade.t2_completed
             and not trade.t3_completed
-            and current_price
+            and target_trigger_price
             >= trade.target_3
         ):
 

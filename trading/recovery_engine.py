@@ -498,9 +498,27 @@ class RecoveryEngine:
             target_3=target_3,
         )
 
+        entry_order_row = (
+            database.get_broker_order_row(
+                broker_order_id
+            )
+            or {}
+        )
+
+        entry_filled_at = str(
+            entry_order_row.get(
+                "filled_at"
+            )
+            or datetime.now(
+                timezone.utc
+            ).isoformat()
+        )
+
         managed_trade.metadata.update(
             {
                 "recovered_from_entry_intent": True,
+                "entry_filled_at": entry_filled_at,
+                "management_trade_scan_at": entry_filled_at,
                 "entry_intent_id": intent_id,
                 "entry_order_id": broker_order_id,
                 "client_order_id": intent.get(

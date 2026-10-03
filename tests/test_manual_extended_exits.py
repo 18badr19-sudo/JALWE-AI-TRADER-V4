@@ -323,5 +323,25 @@ class WatcherIntegrationTests(unittest.TestCase):
         self.assertEqual(log.call_args.kwargs['metadata']['t1_filled'], 2)
 
 
+class DataAccessDiagnosticsTests(unittest.TestCase):
+    def run_probe(self, message):
+        class ProviderError(RuntimeError):
+            status_code = 403
+        db = Mock()
+        db.load_active_managed_trades.return_value = {'t': NS(symbol='CANE')}
+        with patch.object(watcher, 'database', db), patch.object(watcher, 'get_market_data') as market:
+            market.return_value.get_execution_quote.side_effect = ProviderError(message)
+            result = watcher.extended_exit_data_access()
+        self.assertNotIn(message, str(result))
+        return result
+
+    def test_subscription_denial_has_actionable_safe_category(self):
+        self.assertEqual(self.run_probe('subscription does not permit querying recent SIP data')['reason'],
+                         'SUBSCRIPTION_REQUIRED')
+
+    def test_other_forbidden_errors_are_not_mislabeled_subscription(self):
+        self.assertEqual(self.run_probe('provider details containing a private value')['reason'], 'FORBIDDEN')
+
+
 if __name__ == '__main__':
     unittest.main()

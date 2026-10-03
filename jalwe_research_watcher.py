@@ -4082,8 +4082,13 @@ def extended_exit_data_access():
         payload = {'status': 'AVAILABLE', 'symbol': symbol,
                    'quote_at': stamp.isoformat() if isinstance(stamp, datetime) else None}
     except Exception as exc:
+        # Only publish a fixed diagnostic category, never the provider's raw response.
+        reason = ('SUBSCRIPTION_REQUIRED' if 'subscription' in str(exc).lower()
+                  else 'FORBIDDEN' if getattr(exc, 'status_code', None) == 403
+                  else 'PROVIDER_ERROR')
         payload = {'status': 'UNAVAILABLE', 'symbol': symbol,
-                   'error_type': type(exc).__name__, 'status_code': getattr(exc, 'status_code', None)}
+                   'error_type': type(exc).__name__, 'status_code': getattr(exc, 'status_code', None),
+                   'reason': reason}
     print('EXTENDED_EXIT_DATA_ACCESS ' + json.dumps(payload), flush=True)
     database.log_event(event_type='EXTENDED_EXIT_DATA_ACCESS', severity='INFO',
         message='Extended-session data access: ' + payload['status'], metadata=payload)

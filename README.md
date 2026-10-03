@@ -34,3 +34,31 @@ Run `python -m unittest discover -s tests -v`. PostgreSQL bridge integration tes
 require an isolated `TEST_POSTGRES_DSN` (configured in GitHub Actions).
 
 Alpaca order semantics: https://docs.alpaca.markets/us/docs/orders-at-alpaca
+
+
+## Manual PAPER close and extended sessions
+
+The Telegram menu includes a sell button for each managed position. A five-minute
+confirmation binds the trade, share quantity and requesting user. Its durable
+request is idempotent across duplicate taps and controller restarts. JALWE's
+single watcher owns execution, cancellation, fill reconciliation and protection
+for the remaining shares; Telegram never submits a broker order directly.
+
+Eligible pre/post-market exits use extended-hours DAY SELL limits based on fresh
+consolidated quotes, rounded up to preserve the configured slippage floor. Profit
+targets keep their target price as a minimum. Missing/old quotes defer execution
+before canceling protection. Regular-session exits continue using market orders.
+Calendar checks include holidays and early closes; weekends and the overnight
+window remain closed for this feature. A limit is not a guarantee of a fill.
+
+Any remainder after the 30-second wait is canceled and reconciled again; restart
+recovery also cancels unresolved extended limits. While cancellation is uncertain,
+there is no competing stop or repeated sell. Manual requests continue for the
+confirmed remainder until the managed position closes. Changing quantity before
+confirmation requires a refreshed confirmation.
+
+Live SIP execution-quote access depends on the Alpaca account's data entitlement.
+The startup EXTENDED_EXIT_DATA_ACCESS diagnostic checks access read-only; failure
+does not silently substitute delayed/IEX data. No subscription is purchased by
+this change. PAPER_LIFECYCLE_CHECKPOINT records actual stage, fills, remaining
+shares, runner and protective-stop state for observation after market reopening.

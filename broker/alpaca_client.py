@@ -15,6 +15,7 @@ from alpaca.trading.enums import (
 )
 from alpaca.trading.requests import (
     GetAssetsRequest,
+    GetCalendarRequest,
     GetOrdersRequest,
     LimitOrderRequest,
     MarketOrderRequest,
@@ -315,6 +316,23 @@ class AlpacaClient:
         """
 
         return self.client.get_clock()
+
+    def get_calendar_day(self, day):
+        cached = getattr(self, '_exit_calendar_cache', None)
+        if cached is None or cached[0] != day:
+            rows = self.client.get_calendar(GetCalendarRequest(start=day, end=day))
+            self._exit_calendar_cache = (day, next((row for row in rows if row.date == day), None))
+        return self._exit_calendar_cache[1]
+
+    def submit_extended_exit(self, *, symbol, quantity, limit_price, client_order_id, before_submit=None):
+        request = LimitOrderRequest(symbol=self._normalize_symbol(symbol), qty=int(quantity),
+            side=OrderSide.SELL, time_in_force=TimeInForce.DAY, limit_price=float(limit_price),
+            extended_hours=True, client_order_id=self._normalize_client_order_id(client_order_id))
+        if before_submit is not None:
+            before_submit()
+        order = self.client.submit_order(order_data=request)
+        logger.info('PAPER extended exit submitted | symbol=%s qty=%s limit=%s order_id=%s', symbol, quantity, limit_price, order.id)
+        return order
 
     def market_is_open(
         self,

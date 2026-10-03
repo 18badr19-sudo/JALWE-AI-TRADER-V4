@@ -24,6 +24,7 @@ from core.runtime_controls import (
 )
 from core.config import settings
 from core.database import database
+from core.manual_sell_ui import menu as manual_sell_menu, callback as manual_sell_callback
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -368,6 +369,7 @@ BTN_STOP = "🔴 إيقاف الكل" if MANAGE_APEX_CHILD else "🔴 إيقاف
 BTN_RESTART = "♻️ إعادة تشغيل النظام" if MANAGE_APEX_CHILD else "♻️ إعادة تشغيل JALWE"
 BTN_STATUS = "📊 حالة النظام"
 
+BTN_MANUAL_SELL = "🔴 بيع سهم PAPER"
 BTN_PORTFOLIO = "💼 محفظتي"
 BTN_TODAY = "📅 ربح اليوم"
 BTN_WEEK = "📆 تقرير الأسبوع"
@@ -396,6 +398,7 @@ KEYBOARD = {
         [{"text": BTN_RESTART}, {"text": BTN_STATUS}],
         [{"text": BTN_PORTFOLIO}, {"text": BTN_TODAY}],
         [{"text": BTN_WEEK}, {"text": BTN_TRADES}],
+        [{"text": BTN_MANUAL_SELL}],
         [{"text": BTN_LEARNING}, {"text": BTN_LEARN_NOW}],
         [{"text": BTN_PAUSE_ENTRIES}, {"text": BTN_RESUME_ENTRIES}],
         [{"text": BTN_EMERGENCY_CLOSE}, {"text": BTN_CONFIRM_EMERGENCY_CLOSE}],
@@ -648,7 +651,11 @@ class TelegramPollHealth:
         return max(0.0, now - self.failed_since)
 
 
-def send_message(text: str) -> None:
+def send_message(text: Any) -> None:
+    reply_markup = KEYBOARD
+    if isinstance(text, dict):
+        reply_markup = text.get('reply_markup', KEYBOARD)
+        text = text.get('text', '')
     if not TELEGRAM_CHAT_ID:
         return
 
@@ -658,7 +665,7 @@ def send_message(text: str) -> None:
             "chat_id": TELEGRAM_CHAT_ID,
             "text": text[:4000],
             "reply_markup": json.dumps(
-                KEYBOARD,
+                reply_markup,
                 ensure_ascii=False,
             ),
             "disable_web_page_preview": "true",
@@ -2450,6 +2457,7 @@ def help_text() -> str:
         "/trades - آخر الأوامر المنفذة\n"
         "/learning - حالة التعلم الذاتي\n"
         "/learn_now - تشغيل دورة تعلم الآن\n"
+        "/sell - بيع صفقة PAPER محددة مع تأكيد\n"
         "/pause_entries - منع صفقات جديدة مع استمرار إدارة المفتوحة\n"
         "/resume_entries - السماح بصفقات جديدة\n"
         "/emergency_close - عرض تأكيد الإغلاق الطارئ\n"
@@ -2469,7 +2477,7 @@ def help_text() -> str:
     )
 
 
-def handle(text: str) -> str:
+def handle(text: str, requested_by=None) -> Any:
     cmd = str(text or "").strip()
     low = cmd.lower()
 
@@ -2484,6 +2492,9 @@ def handle(text: str) -> str:
 
     if cmd == BTN_STATUS or low == "/status":
         return status_text()
+
+    if cmd == BTN_MANUAL_SELL or low == '/sell':
+        return manual_sell_menu(database, str(requested_by or TELEGRAM_CHAT_ID))
 
     if cmd == BTN_PORTFOLIO or low == "/portfolio":
         return portfolio_text()
@@ -2556,6 +2567,28 @@ def handle(text: str) -> str:
         return help_text()
 
     return "الأمر غير معروف. استخدم /help"
+
+
+def process_telegram_update(update):
+    callback = update.get('callback_query') or {}
+    message = callback.get('message') or update.get('message') or {}
+    if str((message.get('chat') or {}).get('id', '')) != TELEGRAM_CHAT_ID:
+        return False
+    owner = str(((callback or message).get('from') or {}).get('id') or TELEGRAM_CHAT_ID)
+    if callback:
+        data = str(callback.get('data') or '')
+        if not data.startswith(('sell-preview:', 'sell-confirm:', 'sell-cancel:')):
+            return False
+        try:
+            reply = manual_sell_callback(database, data, owner)
+        except ValueError as exc:
+            reply = str(exc)
+        # Clear Telegram's spinner only after durable handling; retries remain idempotent.
+        tg_call('answerCallbackQuery', {'callback_query_id': callback['id']}, timeout=10)
+        send_message(reply)
+    elif message.get('text'):
+        send_message(handle(message['text'], requested_by=owner))
+    return True
 
 
 def monitor_children() -> None:
@@ -2756,29 +2789,7 @@ def main() -> None:
                     update_id + 1,
                 )
 
-                message = (
-                    update.get("message")
-                    or {}
-                )
-                chat_id = str(
-                    (
-                        message.get("chat")
-                        or {}
-                    ).get("id", "")
-                )
-
-                if chat_id != TELEGRAM_CHAT_ID:
-                    continue
-
-                message_text = message.get("text")
-
-                if not message_text:
-                    continue
-
-                reply = handle(
-                    message_text
-                )
-                send_message(reply)
+                process_telegram_update(update)
 
         except Exception as exc:
             error_text = str(exc)

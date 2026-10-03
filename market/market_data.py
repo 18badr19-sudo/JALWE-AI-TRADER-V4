@@ -392,6 +392,13 @@ class MarketData:
     # LATEST QUOTE
     # ========================================================
 
+    def get_execution_quote(self, symbol):
+        # Extended-session execution requires consolidated live quotes. IEX-only
+        # or delayed data cannot establish an executable after-hours bid.
+        request = StockLatestQuoteRequest(symbol_or_symbols=self._normalize_symbol(symbol), feed=DataFeed.SIP)
+        quote = self.client.get_stock_latest_quote(request)[self._normalize_symbol(symbol)]
+        return {'bid': quote.bid_price, 'ask': quote.ask_price, 'timestamp': quote.timestamp}
+
     def get_latest_quote(
         self,
         symbol: str,

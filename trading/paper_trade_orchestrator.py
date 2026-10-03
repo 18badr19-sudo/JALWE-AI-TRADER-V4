@@ -999,15 +999,27 @@ class PaperTradeOrchestrator:
         if trade.metadata.get('protective_stop_order_id') or trade.metadata.get('protective_stop_submission_uncertain'):
             raise RuntimeError('An existing or uncertain stop requires recovery before arming another stop.')
         client_id = self.execution_engine._new_client_order_id('JALWE-STOP')
-        trade.metadata.update(protective_stop_client_order_id=client_id,
-                              protective_stop_quantity=quantity,
-                              protective_stop_price=stop_price,
-                              protective_stop_submission_uncertain=True,
-                              protective_stop_applied_qty=0,
-                              protective_stop_applied_notional=0.0,
-                              protective_stop_fill_applied=False)
+        trade.metadata.update(
+            protective_stop_client_order_id=client_id,
+            protective_stop_quantity=quantity,
+            protective_stop_price=stop_price,
+            protective_stop_submission_uncertain=False,
+            protective_stop_submission_state='PREPARED',
+            protective_stop_applied_qty=0,
+            protective_stop_applied_notional=0.0,
+            protective_stop_fill_applied=False,
+        )
         database.save_managed_trade(managed_trade_id, trade)
-        order = self.execution_engine.submit_protective_stop(symbol=trade.symbol, quantity=quantity, stop_price=stop_price, client_order_id=client_id)
+
+        def before_submit():
+            trade.metadata['protective_stop_submission_uncertain'] = True
+            trade.metadata['protective_stop_submission_state'] = 'SUBMITTING'
+            database.save_managed_trade(managed_trade_id, trade)
+        order = self.execution_engine.submit_protective_stop(
+            symbol=trade.symbol, quantity=quantity, stop_price=stop_price,
+            client_order_id=client_id, before_submit=before_submit,
+        )
+        trade.metadata['protective_stop_submission_state'] = 'REGISTERED'
         trade.metadata['protective_stop_submission_uncertain'] = False
         database.save_broker_order(order)
         trade.metadata['protective_stop_order_id'] = order.order_id

@@ -1280,6 +1280,7 @@ class ExecutionEngine:
         quantity: int,
         stop_price: float,
         client_order_id: Optional[str] = None,
+        before_submit=None,
     ) -> BrokerOrder:
         """
         Place a broker-side GTC SELL stop for an existing
@@ -1351,6 +1352,10 @@ class ExecutionEngine:
             )
         )
 
+        submission_options = {}
+        if before_submit is not None:
+            submission_options["before_submit"] = before_submit
+
         raw = self.broker.submit_stop_order(
             symbol=symbol,
             quantity=quantity,
@@ -1358,6 +1363,7 @@ class ExecutionEngine:
             client_order_id=(
                 final_client_order_id
             ),
+            **submission_options,
         )
 
         return self._build_broker_order(

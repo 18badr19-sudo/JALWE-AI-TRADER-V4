@@ -74,7 +74,7 @@ class InstallationFixTests(unittest.TestCase):
         qty, amount, value = risk._calculate_quantity(10, 9.85, 100, 100, 1.5, 100)
         broker.submit_protected_entry('TEST', qty, 10)
         request = broker.client.submit_order.call_args.kwargs['order_data']
-        self.assertEqual(request.time_in_force, TimeInForce.FOK)
+        self.assertEqual(request.time_in_force, TimeInForce.DAY)
         self.assertLessEqual(qty * (request.limit_price - 9.85), 1.5)
         self.assertLessEqual(qty * request.limit_price, 100)
         self.assertAlmostEqual(amount, qty * (request.limit_price - 9.85))
@@ -234,6 +234,7 @@ class InstallationFixTests(unittest.TestCase):
             def fail(**kwargs):
                 saved = db.load_managed_trade('t')
                 self.assertEqual(saved.metadata['protective_stop_client_order_id'], kwargs['client_order_id'])
+                kwargs['before_submit']()
                 raise TimeoutError('Unknown broker result')
             execution.submit_protective_stop.side_effect = fail
             with patch.object(watcher, 'database', db):
@@ -255,7 +256,7 @@ class InstallationFixTests(unittest.TestCase):
             recovery.trade_manager = TradeManager()
             recovery.broker = Mock()
             recovery.broker.get_order_by_client_id.return_value = NS(
-                id='stop', symbol='TEST', side='sell', qty='8', status='new',
+                id='stop', client_order_id='JALWE-STOP-test', symbol='TEST', side='sell', qty='8', status='new',
                 filled_qty='0', filled_avg_price=None)
             recovery.reconciliation = Mock()
             recovery.reconciliation.verify_position.return_value = {'exists': True, 'quantity': 8}
@@ -277,6 +278,7 @@ class InstallationFixTests(unittest.TestCase):
             def fail(**kwargs):
                 saved = db.load_managed_trade('t')
                 self.assertEqual(saved.metadata['protective_stop_client_order_id'], kwargs['client_order_id'])
+                kwargs['before_submit']()
                 raise TimeoutError('Accepted, response lost')
             execution.broker.submit_stop_order.side_effect = fail
             orchestrator.execution_engine = execution

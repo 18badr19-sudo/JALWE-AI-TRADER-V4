@@ -43,6 +43,7 @@ from opportunity_performance_tracker import (
 )
 
 from trading.exit_submission import prepare_exit, submit_prepared_exit
+from trading.protective_fills import apply_protective_stop_snapshot, TERMINAL_STATUSES
 from uuid import uuid4
 from trading.execution_engine import (
     get_execution_engine,
@@ -3038,157 +3039,34 @@ def _raw_order_status(
     ).strip().lower()
 
 
-def _cancel_protective_stop(
-    trade_id: str,
-    trade: Any,
-    execution_engine: Any,
-) -> str:
-    metadata = (
-        trade.metadata
-        if isinstance(
-            trade.metadata,
-            dict,
-        )
-        else {}
-    )
-
-    order_id = str(
-        metadata.get(
-            "protective_stop_order_id",
-            "",
-        )
-        or ""
-    ).strip()
-
+def _cancel_protective_stop(trade_id, trade, execution_engine):
+    order_id = str(trade.metadata.get('protective_stop_order_id') or '').strip()
     if not order_id:
-        return "NONE"
-
+        if trade.metadata.get('protective_stop_submission_uncertain'):
+            raise RuntimeError('Uncertain protective stop requires recovery before an exit.')
+        return 'NONE'
+    before = int(trade.remaining_quantity)
     try:
-        raw = (
-            execution_engine
-            .broker
-            .get_order(
-                order_id
-            )
-        )
-
-        status = _raw_order_status(
-            raw
-        )
-
-        if status == "filled":
-            metadata[
-                "protective_stop_active"
-            ] = False
-            metadata[
-                "protective_stop_status"
-            ] = "filled"
-            trade.metadata = metadata
-            database.save_managed_trade(
-                trade_id,
-                trade,
-            )
-            return "FILLED"
-
-        if status in {
-            "canceled",
-            "cancelled",
-            "expired",
-            "done_for_day",
-            "rejected",
-            "replaced",
-        }:
-            metadata[
-                "protective_stop_active"
-            ] = False
-            metadata[
-                "protective_stop_status"
-            ] = status
-            trade.metadata = metadata
-            database.save_managed_trade(
-                trade_id,
-                trade,
-            )
-            return "CANCELED"
-
-        execution_engine.cancel_protective_stop(
-            order_id
-        )
-
-        deadline = (
-            time.time()
-            + 5.0
-        )
-
-        while time.time() < deadline:
-            time.sleep(
-                0.25
-            )
-
-            raw = (
-                execution_engine
-                .broker
-                .get_order(
-                    order_id
-                )
-            )
-
-            status = _raw_order_status(
-                raw
-            )
-
-            if status == "filled":
-                metadata[
-                    "protective_stop_active"
-                ] = False
-                metadata[
-                    "protective_stop_status"
-                ] = "filled"
-                trade.metadata = metadata
-                database.save_managed_trade(
-                    trade_id,
-                    trade,
-                )
-                return "FILLED"
-
-            if status in {
-                "canceled",
-                "cancelled",
-                "expired",
-                "done_for_day",
-                "rejected",
-                "replaced",
-            }:
-                metadata[
-                    "protective_stop_active"
-                ] = False
-                metadata[
-                    "protective_stop_status"
-                ] = status
-                trade.metadata = metadata
-                database.save_managed_trade(
-                    trade_id,
-                    trade,
-                )
-                return "CANCELED"
-
-        raise RuntimeError(
-            "Protective stop cancellation "
-            "did not reach a terminal state."
-        )
-
+        raw = execution_engine.broker.get_order(order_id)
+        snapshot = apply_protective_stop_snapshot(database, trade_id, trade, raw)
+        if snapshot['raw_status'] not in TERMINAL_STATUSES:
+            execution_engine.cancel_protective_stop(order_id)
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                time.sleep(0.25)
+                raw = execution_engine.broker.get_order(order_id)
+                snapshot = apply_protective_stop_snapshot(database, trade_id, trade, raw)
+                if snapshot['raw_status'] in TERMINAL_STATUSES:
+                    break
+            else:
+                raise RuntimeError('Protective stop cancellation did not reach a terminal state.')
+        if snapshot['filled'] or int(trade.remaining_quantity) == 0:
+            return 'FILLED'
+        if int(trade.remaining_quantity) < before:
+            return 'PARTIAL_FILL'
+        return 'CANCELED'
     except Exception:
-        logger.exception(
-            "Protective stop cancellation failed | "
-            "trade_id=%s symbol=%s order_id=%s",
-            trade_id,
-            getattr(
-                trade,
-                "symbol",
-                "",
-            ),
-            order_id,
-        )
+        logger.exception('Protective stop cancellation failed | trade_id=%s symbol=%s order_id=%s', trade_id, trade.symbol, order_id)
         raise
 
 
@@ -3213,8 +3091,11 @@ def _sync_protective_stop(trade_id: str, trade: Any, execution_engine: Any) -> d
     if order_id:
         try:
             raw = execution_engine.broker.get_order(order_id)
-            status = _raw_order_status(raw)
-            active = status in {'new', 'accepted', 'pending_new', 'accepted_for_bidding', 'held', 'partially_filled', 'pending_replace', 'pending_cancel'}
+            snapshot = apply_protective_stop_snapshot(database, trade_id, trade, raw)
+            status = snapshot['raw_status']
+            metadata = trade.metadata
+            quantity = int(trade.remaining_quantity)
+            active = status in {'new', 'accepted', 'pending_new', 'accepted_for_bidding', 'held', 'partially_filled', 'pending_replace', 'pending_cancel', 'done_for_day'}
             if active and stored_qty == quantity and (abs(stored_stop - desired_stop) <= 0.0001):
                 metadata['protective_stop_active'] = True
                 metadata['protective_stop_status'] = status
@@ -3232,18 +3113,30 @@ def _sync_protective_stop(trade_id: str, trade: Any, execution_engine: Any) -> d
         cancel_state = _cancel_protective_stop(trade_id, trade, execution_engine)
         if cancel_state == 'FILLED':
             return {'enabled': True, 'active': False, 'filled': True, 'order_id': order_id}
+        metadata = trade.metadata
+        quantity = int(trade.remaining_quantity)
     client_id = 'JALWE-STOP-' + uuid4().hex
     metadata['protective_stop_order_id'] = None
     metadata['protective_stop_client_order_id'] = client_id
     metadata['protective_stop_quantity'] = quantity
     metadata['protective_stop_price'] = desired_stop
-    metadata['protective_stop_submission_uncertain'] = True
+    metadata['protective_stop_submission_uncertain'] = False
+    metadata['protective_stop_submission_state'] = 'PREPARED'
     metadata['protective_stop_applied_qty'] = 0
     metadata['protective_stop_applied_notional'] = 0.0
     metadata['protective_stop_fill_applied'] = False
     trade.metadata = metadata
     database.save_managed_trade(trade_id, trade)
-    stop_order = execution_engine.submit_protective_stop(symbol=trade.symbol, quantity=quantity, stop_price=desired_stop, client_order_id=client_id)
+
+    def before_submit():
+        metadata['protective_stop_submission_uncertain'] = True
+        metadata['protective_stop_submission_state'] = 'SUBMITTING'
+        database.save_managed_trade(trade_id, trade)
+    stop_order = execution_engine.submit_protective_stop(
+        symbol=trade.symbol, quantity=quantity, stop_price=desired_stop,
+        client_order_id=client_id, before_submit=before_submit,
+    )
+    metadata['protective_stop_submission_state'] = 'REGISTERED'
     metadata['protective_stop_submission_uncertain'] = False
     database.save_broker_order(stop_order)
     metadata = trade.metadata if isinstance(trade.metadata, dict) else {}
@@ -3458,7 +3351,11 @@ def manage_active_paper_trades(state: dict) -> int:
                 continue
             prepare_exit(database, trade_id, trade, decision)
             protective_cancel = _cancel_protective_stop(trade_id, trade, execution_engine)
-            if protective_cancel == 'FILLED':
+            if protective_cancel in {'FILLED', 'PARTIAL_FILL'}:
+                trade.metadata.pop('exit_submission', None)
+                database.save_managed_trade(trade_id, trade)
+                if int(trade.remaining_quantity) > 0:
+                    _sync_protective_stop(trade_id, trade, execution_engine)
                 managed_count += 1
                 continue
             broker_order = submit_prepared_exit(database, trade_id, trade, decision, execution_engine, trade_manager)
@@ -3541,7 +3438,11 @@ def process_emergency_paper_close() -> int:
                 continue
             prepare_exit(database, trade_id, trade, decision)
             protective_cancel = _cancel_protective_stop(trade_id, trade, execution_engine)
-            if protective_cancel == 'FILLED':
+            if protective_cancel in {'FILLED', 'PARTIAL_FILL'}:
+                trade.metadata.pop('exit_submission', None)
+                database.save_managed_trade(trade_id, trade)
+                if int(trade.remaining_quantity) > 0:
+                    _sync_protective_stop(trade_id, trade, execution_engine)
                 continue
             broker_order = submit_prepared_exit(database, trade_id, trade, decision, execution_engine, trade_manager)
             reconciled = reconciliation_engine.wait_for_terminal_state(broker_order, timeout_seconds=30.0, poll_interval_seconds=1.0)

@@ -589,11 +589,13 @@ class AlpacaClient:
         reference_price: float,
         client_order_id: Optional[str] = None,
     ) -> Any:
-        """PAPER immediate fill-or-kill BUY limit capped by MAX_ENTRY_SLIPPAGE_PCT.
+        """PAPER BUY limit capped by MAX_ENTRY_SLIPPAGE_PCT.
 
         A market buy has no price ceiling. This limit is the reference
         price plus the configured slippage cap, so a spike cannot fill
-        the entry at an unbounded price. Sells stay on submit_market_order.
+        the entry at an unbounded price. The orchestrator cancels any
+        unfilled remainder after its timeout; recovery settles confirmed fills.
+        Sells stay on submit_market_order.
         """
         symbol = self._normalize_symbol(symbol)
         quantity = int(quantity)
@@ -619,7 +621,7 @@ class AlpacaClient:
             symbol=symbol,
             qty=quantity,
             side=OrderSide.BUY,
-            time_in_force=TimeInForce.FOK,
+            time_in_force=TimeInForce.DAY,
             limit_price=limit_price,
             client_order_id=normalized_client_order_id,
         )
@@ -648,6 +650,7 @@ class AlpacaClient:
         quantity: int,
         stop_price: float,
         client_order_id: Optional[str] = None,
+        before_submit=None,
     ) -> Any:
         """
         Submit a PAPER GTC SELL stop order.
@@ -706,6 +709,9 @@ class AlpacaClient:
                 normalized_client_order_id
             ),
         )
+
+        if before_submit is not None:
+            before_submit()
 
         order = self.client.submit_order(
             order_data=order_request

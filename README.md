@@ -3,14 +3,24 @@
 JALWE alone owns trading decisions and broker execution. APEX supplies research.
 Live trading remains disabled by the existing safety gates.
 
-BUY entries use a fill-or-kill limit. The configured ceiling is rounded down to
+BUY entries use a DAY limit. The configured ceiling is rounded down to
 the valid price increment. Risk, allocation and cash sizing use this same ceiling.
-Existing pending entries are canceled and rechecked before their confirmed shares
-are converted into a managed trade. Cancellation requests are not fill confirmation.
+After the reconciliation timeout (30 seconds by default), unfilled remainders
+are canceled and rechecked before their confirmed shares
+are converted into a managed trade. Startup recovery does the same for older
+pending entries. Cancellation requests are not fill confirmation. FOK/IOC
+eligibility is not assumed; Alpaca marks those time-in-force options as requiring
+sales confirmation in its order documentation.
 
 Exit and protective stop client IDs are saved before broker submission. Recovery
 looks up uncertain submissions by the saved ID and never creates a replacement
 SELL while that lookup is unresolved. A prolonged lookup failure requires investigation.
+
+Protective stop fills are also reconciled during cancellation. A partial fill
+updates quantity and PnL atomically before a replacement stop or another exit.
+An exit decision based on the old quantity is discarded and re-evaluated.
+The SUBMITTING state is committed after broker preflight passes, so a failure
+before the broker submission does not create an orphan submission state.
 
 On Railway, mount persistent storage at `/app/data`. Controller state, runtime
 controls, watcher state and the local APEX child share this location. Explicit

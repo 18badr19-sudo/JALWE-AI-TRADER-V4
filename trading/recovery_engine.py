@@ -10,6 +10,7 @@ from core.database import database
 from core.models import BrokerOrder, OrderStatus, TradeSide
 from trading.reconciliation_engine import get_reconciliation_engine
 from trading.exit_submission import recover_exit_submission
+from trading.protective_fills import apply_protective_stop_snapshot
 from trading.trade_manager import TradeStage, get_trade_manager
 
 
@@ -54,6 +55,9 @@ class RecoveryEngine:
     )
 
     ACTIVE_ORDER_STATUSES = {
+        "done_for_day",
+        "stopped",
+        "suspended",
         "new",
         "accepted",
         "pending_new",
@@ -663,6 +667,8 @@ class RecoveryEngine:
         order_id = str(metadata.get('protective_stop_order_id') or '').strip()
         if not order_id and metadata.get('protective_stop_submission_uncertain'):
             raw = self.broker.get_order_by_client_id(metadata['protective_stop_client_order_id'])
+            if str(getattr(raw, 'client_order_id', '')) != metadata['protective_stop_client_order_id']:
+                raise RuntimeError('Recovered stop client identity mismatch.')
             side = self._value(getattr(raw, 'side', '')).lower()
             if self._normalize_symbol(getattr(raw, 'symbol', '')) != trade.symbol or side != 'sell' or self._safe_int(getattr(raw, 'qty', 0)) != int(metadata['protective_stop_quantity']):
                 raise RuntimeError('Recovered protective stop does not match its persisted intent.')
@@ -677,49 +683,7 @@ class RecoveryEngine:
             raw = self.broker.get_order(order_id)
         else:
             return {'checked': False, 'active': False, 'filled': False}
-        status = self._map_order_status(getattr(raw, 'status', None))
-        filled = self._safe_int(getattr(raw, 'filled_qty', 0))
-        average = self._safe_float(getattr(raw, 'filled_avg_price', None))
-        active = status in {OrderStatus.ACCEPTED, OrderStatus.SUBMITTED, OrderStatus.PARTIALLY_FILLED}
-        previous_qty = int(metadata.get('protective_stop_applied_qty', filled if metadata.get('protective_stop_fill_applied') else 0))
-        if filled < previous_qty:
-            raise ValueError('Protective stop cumulative fills moved backwards.')
-        new_qty = filled - previous_qty
-        if new_qty:
-            if average is None or not math.isfinite(average) or average <= 0:
-                raise ValueError('Protective stop fill price is unavailable.')
-            if new_qty > int(trade.remaining_quantity):
-                raise ValueError('Protective stop fill exceeds local remaining quantity.')
-            cumulative_notional = filled * average
-            prior_notional = float(metadata.get('protective_stop_applied_notional', 0.0))
-            if previous_qty and prior_notional <= 0:
-                raise ValueError('Previous protective stop proceeds unavailable.')
-            proceeds = cumulative_notional - prior_notional
-            if not math.isfinite(proceeds) or proceeds <= 0:
-                raise ValueError('Invalid protective stop cumulative proceeds.')
-            realized = proceeds - new_qty * trade.entry_price
-            trade.remaining_quantity -= new_qty
-            trade.realized_quantity += new_qty
-            metadata['realized_pnl'] = float(metadata.get('realized_pnl') or 0.0) + realized
-            metadata['protective_stop_applied_qty'] = filled
-            metadata['protective_stop_applied_notional'] = cumulative_notional
-            if trade.remaining_quantity == 0:
-                trade.trailing_active = False
-                trade.stage = TradeStage.CLOSED
-            metadata['protective_stop_status'] = status.value
-            metadata['protective_stop_active'] = active
-            metadata['protective_stop_fill_applied'] = status == OrderStatus.FILLED
-            trade.metadata = metadata
-            database.record_strategy_pnl_event(trade_state=trade, event_key=f'{order_id}:{filled}', trade_id=trade_id, order_id=order_id, symbol=trade.symbol, action='BROKER_PROTECTIVE_STOP', quantity=new_qty, fill_price=proceeds / new_qty, entry_price=trade.entry_price, realized_pnl=realized, event_time=(getattr(raw, 'filled_at', None) or datetime.now(timezone.utc)).isoformat(), metadata={'source': 'RECOVERY_ENGINE', 'protective_stop': True})
-        if int(trade.remaining_quantity) == 0:
-            trade.trailing_active = False
-            trade.stage = TradeStage.CLOSED
-        metadata['protective_stop_status'] = status.value
-        metadata['protective_stop_active'] = active
-        metadata['protective_stop_fill_applied'] = status == OrderStatus.FILLED
-        trade.metadata = metadata
-        database.save_managed_trade(trade_id, trade)
-        return {'checked': True, 'active': active, 'filled': status == OrderStatus.FILLED, 'status': status.value, 'order_id': order_id, 'filled_quantity': filled, 'fill_price': average}
+        return apply_protective_stop_snapshot(database, trade_id, trade, raw)
 
     # ========================================================
     # RECOVER ONE MANAGED TRADE / PENDING EXIT

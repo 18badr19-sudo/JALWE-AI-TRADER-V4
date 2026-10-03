@@ -374,6 +374,7 @@ class RestartAndProtectiveStopSafetyTests(
             quantity=5,
             stop_price=11.79,
             client_order_id=ANY,
+            before_submit=ANY,
         )
 
         self.assertTrue(

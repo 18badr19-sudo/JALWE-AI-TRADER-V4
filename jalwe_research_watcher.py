@@ -42,6 +42,9 @@ from opportunity_performance_tracker import (
     get_opportunity_performance_tracker,
 )
 
+from core.manual_sells import ManualSellQueue
+from core.lifecycle_audit import checkpoint
+from trading.exit_sessions import exit_session, sell_limit, prepare_exit_context, settle_exit
 from trading.exit_submission import prepare_exit, submit_prepared_exit
 from trading.protective_fills import apply_protective_stop_snapshot, TERMINAL_STATUSES
 from uuid import uuid4
@@ -2486,6 +2489,7 @@ def _management_action_title(
 ) -> str:
     titles = {
         "TAKE_PROFIT_1": "🎯 تم تحقيق Target 1",
+        "EXIT_MANUAL": "🔴 بيع يدوي — PAPER",
         "TAKE_PROFIT_2": "🎯 تم تحقيق Target 2",
         "TAKE_PROFIT_3": "🎯 تم تحقيق Target 3",
         "EXIT_STOP": "🛑 تم الخروج على Stop",
@@ -3296,6 +3300,8 @@ def manage_active_paper_trades(state: dict) -> int:
         logger.warning('Active trade management blocked by recovery safety.')
         return 0
     notify_recovered_protective_stop_fills(state, recovery_result)
+    manual_queue = ManualSellQueue(database)
+    manual_queue.finish_closed()
     active = database.load_active_managed_trades()
     if not active:
         return 0
@@ -3309,6 +3315,8 @@ def manage_active_paper_trades(state: dict) -> int:
             now_utc = datetime.now(timezone.utc)
             scan_start, scan_gap_truncated = _management_trade_scan_start(trade, now_utc)
             observed_high = None
+            execution_quote = None
+            session = exit_session(execution_engine.broker, enabled=settings.EXTENDED_EXIT_ENABLED)
             trade_range = None
             try:
                 trade_range = market_data.get_trade_range(symbol=trade.symbol, start=scan_start, end=now_utc)
@@ -3331,13 +3339,27 @@ def manage_active_paper_trades(state: dict) -> int:
             except Exception as exc:
                 logger.warning('Trade-range target scan failed | symbol=%s error=%s', trade.symbol, exc)
                 current_price = float(market_data.get_last_price(trade.symbol))
-            decision = trade_manager.evaluate(trade, current_price, observed_high=observed_high)
+            if session == 'EXTENDED':
+                execution_quote = market_data.get_execution_quote(trade.symbol)
+                sell_limit(execution_quote, slippage_pct=settings.MAX_EXIT_SLIPPAGE_PCT)
+                current_price = float(execution_quote['bid'])
+                observed_high = None
+            manual = manual_queue.pending_for(trade_id)
+            if manual and not trade.has_pending_exit:
+                decision = TradeManagementDecision(symbol=trade.symbol, action=TradeAction.EXIT_MANUAL,
+                    quantity=int(trade.remaining_quantity), current_price=current_price,
+                    stage_before=trade.stage, stage_after=trade.stage, stop_before=trade.current_stop,
+                    stop_after=trade.current_stop, reason='TELEGRAM_MANUAL_SELL',
+                    metadata={'manual_request_id': manual['request_id']})
+            else:
+                decision = trade_manager.evaluate(trade, current_price, observed_high=observed_high)
             if decision.action not in EXIT_ACTIONS:
                 database.save_managed_trade(trade_id, trade)
                 stop_sync = _sync_protective_stop(trade_id, trade, execution_engine)
                 if stop_sync.get('filled', False):
                     managed_count += 1
                     continue
+                checkpoint(database, trade_id, trade)
                 notify_management_lifecycle(state, trade_id, trade, decision)
                 managed_count += 1
                 continue
@@ -3345,11 +3367,12 @@ def manage_active_paper_trades(state: dict) -> int:
                 database.save_managed_trade(trade_id, trade)
                 managed_count += 1
                 continue
-            if not execution_engine.broker.market_is_open():
+            context = prepare_exit_context(execution_engine, market_data, trade, decision)
+            if context['session'] == 'CLOSED':
                 database.save_managed_trade(trade_id, trade)
                 _sync_protective_stop(trade_id, trade, execution_engine)
                 continue
-            prepare_exit(database, trade_id, trade, decision)
+            prepare_exit(database, trade_id, trade, decision, context=context)
             protective_cancel = _cancel_protective_stop(trade_id, trade, execution_engine)
             if protective_cancel in {'FILLED', 'PARTIAL_FILL'}:
                 trade.metadata.pop('exit_submission', None)
@@ -3359,7 +3382,8 @@ def manage_active_paper_trades(state: dict) -> int:
                 managed_count += 1
                 continue
             broker_order = submit_prepared_exit(database, trade_id, trade, decision, execution_engine, trade_manager)
-            reconciled = reconciliation_engine.wait_for_terminal_state(broker_order, timeout_seconds=30.0, poll_interval_seconds=1.0)
+            reconciled = settle_exit(broker_order, execution_engine, reconciliation_engine,
+                                     extended_hours=context.get('extended_hours', False))
             reconciliation_result = trade_manager.apply_exit_reconciliation(trade, reconciled)
             new_fill_quantity = int(reconciliation_result.get('new_fill_quantity', 0) or 0)
             if new_fill_quantity > 0:
@@ -3371,6 +3395,8 @@ def manage_active_paper_trades(state: dict) -> int:
             database.save_managed_trade(trade_id, trade)
             if int(trade.remaining_quantity) > 0:
                 _sync_protective_stop(trade_id, trade, execution_engine)
+            checkpoint(database, trade_id, trade)
+            manual_queue.finish_closed()
             notify_management_lifecycle(state, trade_id, trade, decision, broker_order_id=reconciled.order_id, fill_price=reconciliation_result.get('fill_price'), realized_increment=float(reconciliation_result.get('realized_pnl_increment', 0.0) or 0.0))
             database.log_event(event_type='PAPER_TRADE_MANAGEMENT', severity='INFO', message=f'{trade.symbol}: {decision.action.value} qty={decision.quantity} price={current_price}', metadata={'trade_id': trade_id, 'symbol': trade.symbol, 'action': decision.action.value, 'quantity': decision.quantity, 'current_price': current_price, 'stage': trade.stage.value, 'remaining_quantity': trade.remaining_quantity, 'broker_order_id': reconciled.order_id, 'broker_status': reconciled.status.value})
             managed_count += 1
@@ -3432,11 +3458,12 @@ def process_emergency_paper_close() -> int:
                 continue
             current_price = float(market_data.get_last_price(trade.symbol))
             decision = TradeManagementDecision(symbol=trade.symbol, action=TradeAction.EXIT_TRAILING, quantity=quantity, current_price=current_price, stage_before=trade.stage, stage_after=trade.stage, stop_before=trade.current_stop, stop_after=trade.current_stop, reason='EMERGENCY_PAPER_CLOSE', metadata={'emergency': True})
-            if not execution_engine.broker.market_is_open():
+            context = prepare_exit_context(execution_engine, market_data, trade, decision)
+            if context['session'] == 'CLOSED':
                 database.save_managed_trade(trade_id, trade)
                 _sync_protective_stop(trade_id, trade, execution_engine)
                 continue
-            prepare_exit(database, trade_id, trade, decision)
+            prepare_exit(database, trade_id, trade, decision, context=context)
             protective_cancel = _cancel_protective_stop(trade_id, trade, execution_engine)
             if protective_cancel in {'FILLED', 'PARTIAL_FILL'}:
                 trade.metadata.pop('exit_submission', None)
@@ -3445,7 +3472,8 @@ def process_emergency_paper_close() -> int:
                     _sync_protective_stop(trade_id, trade, execution_engine)
                 continue
             broker_order = submit_prepared_exit(database, trade_id, trade, decision, execution_engine, trade_manager)
-            reconciled = reconciliation_engine.wait_for_terminal_state(broker_order, timeout_seconds=30.0, poll_interval_seconds=1.0)
+            reconciled = settle_exit(broker_order, execution_engine, reconciliation_engine,
+                                     extended_hours=context.get('extended_hours', False))
             reconciliation_result = trade_manager.apply_exit_reconciliation(trade, reconciled)
             new_fill_quantity = int(reconciliation_result.get('new_fill_quantity', 0) or 0)
             if new_fill_quantity > 0:
@@ -3455,6 +3483,9 @@ def process_emergency_paper_close() -> int:
                 event_time = filled_at.isoformat() if filled_at is not None else utc_now_iso()
                 database.record_strategy_pnl_event(trade_state=trade, event_key=event_key, trade_id=trade_id, order_id=reconciled.order_id, symbol=trade.symbol, action='EMERGENCY_CLOSE', quantity=new_fill_quantity, fill_price=reconciliation_result.get('fill_price'), entry_price=trade.entry_price, realized_pnl=float(reconciliation_result.get('realized_pnl_increment', 0.0) or 0.0), event_time=event_time, metadata={'emergency': True, 'stage': trade.stage.value, 'remaining_quantity': trade.remaining_quantity})
             database.save_managed_trade(trade_id, trade)
+            if int(trade.remaining_quantity) > 0:
+                _sync_protective_stop(trade_id, trade, execution_engine)
+            checkpoint(database, trade_id, trade)
             database.log_event(event_type='PAPER_EMERGENCY_CLOSE_ORDER', severity='WARNING', message=f'{trade.symbol}: emergency PAPER close qty={quantity}', metadata={'trade_id': trade_id, 'symbol': trade.symbol, 'quantity': quantity, 'broker_order_id': reconciled.order_id, 'broker_status': reconciled.status.value, 'remaining_quantity': trade.remaining_quantity})
             processed += 1
         except Exception as exc:
@@ -4041,6 +4072,24 @@ def maybe_send_opportunity_daily_report(
 # MAIN
 # ============================================================
 
+def extended_exit_data_access():
+    """Read-only provider check; never submits or cancels an order."""
+    active = database.load_active_managed_trades()
+    symbol = next((trade.symbol for trade in active.values()), 'SPY')
+    try:
+        quote = get_market_data().get_execution_quote(symbol)
+        stamp = quote.get('timestamp')
+        payload = {'status': 'AVAILABLE', 'symbol': symbol,
+                   'quote_at': stamp.isoformat() if isinstance(stamp, datetime) else None}
+    except Exception as exc:
+        payload = {'status': 'UNAVAILABLE', 'symbol': symbol,
+                   'error_type': type(exc).__name__, 'status_code': getattr(exc, 'status_code', None)}
+    print('EXTENDED_EXIT_DATA_ACCESS ' + json.dumps(payload), flush=True)
+    database.log_event(event_type='EXTENDED_EXIT_DATA_ACCESS', severity='INFO',
+        message='Extended-session data access: ' + payload['status'], metadata=payload)
+    return payload
+
+
 def main() -> None:
 
     print(
@@ -4111,6 +4160,8 @@ def main() -> None:
     )
 
     print_startup_health()
+    if settings.EXTENDED_EXIT_ENABLED:
+        extended_exit_data_access()
 
     print(
         "======================================"

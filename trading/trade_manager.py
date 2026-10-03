@@ -45,6 +45,7 @@ class TradeAction(str, Enum):
     HOLD = "HOLD"
 
     EXIT_STOP = "EXIT_STOP"
+    EXIT_MANUAL = "EXIT_MANUAL"
 
     TAKE_PROFIT_1 = "TAKE_PROFIT_1"
     TAKE_PROFIT_2 = "TAKE_PROFIT_2"
@@ -73,6 +74,7 @@ class TradeAction(str, Enum):
 EXIT_ACTIONS = {
 
     TradeAction.EXIT_STOP,
+    TradeAction.EXIT_MANUAL,
 
     TradeAction.TAKE_PROFIT_1,
     TradeAction.TAKE_PROFIT_2,
@@ -2364,6 +2366,7 @@ class TradeManager:
             elif action in {
 
                 TradeAction.EXIT_STOP,
+                TradeAction.EXIT_MANUAL,
 
                 TradeAction.EXIT_TRAILING,
 

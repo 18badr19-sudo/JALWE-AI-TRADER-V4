@@ -5,6 +5,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 from uuid import uuid4
+from trading.exit_sessions import exit_session
 
 from broker.alpaca_client import (
     get_alpaca_client,
@@ -1402,42 +1403,42 @@ class ExecutionEngine:
     # EXIT ORDER
     # ========================================================
 
-    def submit_exit(self, symbol: str, quantity: int, requested_price: Optional[float]=None, reason: Optional[str]=None, client_order_id: Optional[str]=None, before_submit=None) -> BrokerOrder:
-        """
-            Submit a partial or full PAPER SELL order.
-
-            This method does NOT change ManagedTrade state.
-
-            Correct flow:
-
-                ExecutionEngine.submit_exit()
-                          ↓
-                TradeManager.register_exit_order()
-                          ↓
-                ReconciliationEngine.reconcile_order()
-                          ↓
-                TradeManager.apply_exit_reconciliation()
-            """
+    def submit_exit(self, symbol: str, quantity: int, requested_price=None, reason=None,
+                    client_order_id=None, before_submit=None, *, extended_hours=False,
+                    limit_price=None, quote_at=None) -> BrokerOrder:
+        from core.config import settings
+        import math
         symbol = self._normalize_symbol(symbol)
         quantity = int(quantity)
         if quantity <= 0:
-            raise ValueError('Exit quantity must be greater than zero.')
-        if not self.broker.market_is_open():
-            raise RuntimeError('Market is currently closed. Exit order was not submitted.')
+            raise ValueError('Exit quantity must be positive.')
+        session = exit_session(self.broker, enabled=settings.EXTENDED_EXIT_ENABLED)
+        if session == 'CLOSED' or session == 'EXTENDED' and not extended_hours:
+            raise RuntimeError('No eligible session for this exit order.')
+        if extended_hours:
+            if not math.isfinite(float(limit_price or 0)) or float(limit_price or 0) <= 0:
+                raise ValueError('An extended exit requires a positive limit.')
+            stamp = datetime.fromisoformat(str(quote_at))
+            if stamp.tzinfo is None or not -5 <= (datetime.now(timezone.utc)-stamp).total_seconds() <= 30:
+                raise ValueError('Extended exit quote is stale.')
         position = self.broker.get_position(symbol)
-        if position is None:
-            raise RuntimeError(f'No broker position exists for {symbol}.')
-        broker_quantity = self._safe_int(getattr(position, 'qty', 0))
-        if broker_quantity <= 0:
-            raise RuntimeError(f'Broker position quantity for {symbol} is invalid.')
-        if quantity > broker_quantity:
-            raise RuntimeError('Requested exit quantity exceeds broker position quantity.')
-        client_order_id = self._new_client_order_id('JALWE-EXIT') if client_order_id is None else self._validate_client_order_id(client_order_id, required_prefix='JALWE-EXIT')
-        logger.info('Submitting PAPER EXIT | symbol=%s qty=%s broker_qty=%s reason=%s client_order_id=%s', symbol, quantity, broker_quantity, reason, client_order_id)
-        if before_submit is not None:
-            before_submit()
-        broker_response = self.broker.submit_market_order(symbol=symbol, quantity=quantity, side='SELL', client_order_id=client_order_id)
-        return self._build_broker_order(broker_response=broker_response, symbol=symbol, side=TradeSide.SELL, quantity=quantity, requested_price=requested_price, client_order_id=client_order_id, metadata={'order_role': 'EXIT', 'exit_reason': reason, 'broker_position_before_exit': broker_quantity})
+        broker_quantity = self._safe_int(getattr(position, 'qty', 0)) if position is not None else 0
+        if broker_quantity <= 0 or quantity > broker_quantity:
+            raise RuntimeError('Requested exit exceeds the confirmed broker position.')
+        client_order_id = (self._new_client_order_id('JALWE-EXIT') if client_order_id is None
+                          else self._validate_client_order_id(client_order_id, required_prefix='JALWE-EXIT'))
+        if extended_hours:
+            response = self.broker.submit_extended_exit(symbol=symbol, quantity=quantity,
+                limit_price=limit_price, client_order_id=client_order_id, before_submit=before_submit)
+        else:
+            if before_submit is not None:
+                before_submit()
+            response = self.broker.submit_market_order(symbol=symbol, quantity=quantity,
+                side='SELL', client_order_id=client_order_id)
+        return self._build_broker_order(broker_response=response, symbol=symbol, side=TradeSide.SELL,
+            quantity=quantity, requested_price=requested_price, client_order_id=client_order_id,
+            metadata={'order_role': 'EXIT', 'exit_reason': reason, 'extended_hours': bool(extended_hours),
+                      'limit_price': limit_price, 'broker_position_before_exit': broker_quantity})
 
 
 # ============================================================

@@ -10,6 +10,7 @@ from core.database import database
 from core.models import BrokerOrder, OrderStatus, TradeSide
 from trading.reconciliation_engine import get_reconciliation_engine
 from trading.exit_submission import recover_exit_submission
+from core.lifecycle_audit import checkpoint
 from trading.protective_fills import apply_protective_stop_snapshot
 from trading.trade_manager import TradeStage, get_trade_manager
 
@@ -710,6 +711,9 @@ class RecoveryEngine:
             try:
                 local_order = self._build_pending_exit_order(trade)
                 broker_order = self.reconciliation.reconcile_order(local_order)
+                if trade.metadata.get('exit_submission', {}).get('extended_hours') and broker_order.status not in {OrderStatus.FILLED, OrderStatus.CANCELED, OrderStatus.REJECTED}:
+                    self.broker.cancel_order(broker_order.order_id)
+                    broker_order = self.reconciliation.reconcile_order(broker_order)
                 reconciliation_result = self.trade_manager.apply_exit_reconciliation(trade, broker_order)
                 database.save_broker_order(broker_order)
                 new_fill_quantity = int(reconciliation_result.get('new_fill_quantity', 0) or 0)
@@ -743,9 +747,11 @@ class RecoveryEngine:
         if broker_exists and broker_quantity == local_quantity and (local_quantity > 0):
             result['broker_match'] = True
             result['recovered'] = True
+            checkpoint(database, trade_id, trade)
             database.log_event(event_type='RECOVERY_OK', severity='INFO', message='Managed trade successfully matched with broker position.', metadata={'trade_id': trade_id, 'symbol': symbol, 'quantity': local_quantity})
             return result
         if not broker_exists and local_quantity == 0:
+            checkpoint(database, trade_id, trade)
             result['broker_match'] = True
             result['recovered'] = True
             return result

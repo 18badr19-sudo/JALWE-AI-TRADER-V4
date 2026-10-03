@@ -6,7 +6,7 @@ from core.models import BrokerOrder, OrderStatus, TradeSide
 from trading.trade_manager import TradeAction, TradeManagementDecision
 
 
-def prepare_exit(database, trade_id, trade, decision):
+def prepare_exit(database, trade_id, trade, decision, context=None):
     if trade.has_pending_exit or trade.metadata.get('exit_submission'):
         raise RuntimeError('An exit is already pending or awaiting broker recovery.')
     intent = {
@@ -18,6 +18,7 @@ def prepare_exit(database, trade_id, trade, decision):
         'reason': str(decision.reason),
         'state': 'PREPARED',
     }
+    intent.update(context or {})
     trade.metadata['exit_submission'] = intent
     database.save_managed_trade(trade_id, trade)
     return intent
@@ -31,11 +32,15 @@ def submit_prepared_exit(database, trade_id, trade, decision, execution, manager
         intent['state'] = 'SUBMITTING'
         # Broker preflight has passed. COMMIT immediately before submission.
         database.save_managed_trade(trade_id, trade)
+    options = {}
+    if intent.get('extended_hours'):
+        options.update(extended_hours=True, limit_price=intent['limit_price'], quote_at=intent['quote_at'])
     order = execution.submit_exit(
         symbol=trade.symbol, quantity=int(intent['quantity']),
         requested_price=intent['requested_price'], reason=intent['reason'],
         client_order_id=intent['client_order_id'],
         before_submit=before_submit,
+        **options,
     )
     manager.register_exit_order(trade, decision, order)
     intent['state'] = 'REGISTERED'

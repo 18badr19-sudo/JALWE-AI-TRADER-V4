@@ -69,6 +69,47 @@ gates still run afterward with the original routed risk limit. A selection or
 database error retains the native score winner. No result changes learning
 weights or enables LIVE. Counts appear in learning status and the daily report.
 
+## Forward performance guard and preference version history
+
+Validated preferences now receive a durable `strategy_policy_versions` ID.
+Daily revalidation of the same strategy/context/protocol retains its original
+activation time and immutable activation evidence. Switching strategies or
+reintroducing a retired preference creates a new version. Activation,
+revalidation, monitoring, retirement and rollback events are retained separately
+in `strategy_policy_events`. Pre-upgrade preferences without a valid active
+version fall back to the score winner until the next daily revalidation.
+
+Only frozen episodes that actually selected the preference after its activation
+are linked to that version in `strategy_policy_observations`. They must pass the
+native pre-session gates, have eligible selected and baseline candidates, and
+change the native score winner. Rechecks cannot retroactively assign an older
+episode to a new policy. Monitoring reuses the original paired simulator and
+bars; it is **simulated research, not realized trade/portfolio performance**.
+
+Once per New York day, the guard compares matured prior-day observations from
+the last 30 calendar days, with one symbol/day per policy, at least 20 pairs on
+five days, 90% complete paired coverage, ten simulated activations on each side,
+and data within seven days. Historical training/validation outcomes do not count
+as forward evidence. Missing, ambiguous, stale or insufficient observations are
+`WAITING_FORWARD_DATA`, not evidence of degradation.
+
+Rollback requires either a conservative daily mean-edge upper bound below
+-0.10R (mean + 2.58 daily standard errors), or daily mean edge below -0.10R
+together with more than 3R of excess simulated drawdown against the baseline.
+These fixed monitoring thresholds are research guardrails, not calibrated
+guarantees. Rollback forces the native score selection for that day's evaluation
+and blocks the same strategy/context/protocol for seven days. A different
+strategy still needs a later complete daily validation. Cooldown expiry alone
+does not activate anything: a fresh successful evaluation and new version are
+required. Even a restored stale profile cannot select a retired/rolled-back ID.
+
+Versions, rollback, profiles and the daily evaluation marker commit atomically
+and survive restarts. A failure rolls back the entire publication. The guard
+affects new strategy selection; existing positions and pending breakout setups
+remain under their original manager/deadline. No code rewriting, dependency
+updates, risk-limit changes, additional market requests or LIVE activation are
+performed. Guard state is included in the existing learning/daily report.
+
 Breakout latching now starts at the initial WAITING result only after all
 pre-entry gates passed. Pending confirmation retains that strategy and the
 original seven-minute deadline; rechecks cannot extend or recreate its approval.

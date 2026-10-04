@@ -31,6 +31,8 @@ def audit_trades(symbol, start, end, targets, fetch_page, *, max_pages=30, secon
             'end': end.isoformat(), 'feed': 'iex', 'sort': 'asc', 'limit': 10000,
             'page_token': token}, max(1, min(5, deadline - time.monotonic())))
         raw = payload.get('trades')
+        if raw is None:
+            raw = {}
         if not isinstance(raw, dict):
             raise ValueError('استجابة سجل التداولات غير صالحة.')
         rows = raw.get(symbol, [])

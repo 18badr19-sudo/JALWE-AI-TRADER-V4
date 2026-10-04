@@ -1341,14 +1341,27 @@ def target_audit_text(symbol: str) -> str:
         return 'استخدم /target_audit CANE'
     if not alpaca_ready():
         return 'تعذر الفحص: اتصال Alpaca PAPER غير جاهز.'
+    phase = 'load_trade'
     try:
         matches = [trade for trade in database.load_active_managed_trades().values()
                    if trade.symbol == symbol]
         if len(matches) != 1:
             return 'الفحص يحتاج صفقة JALWE مفتوحة واحدة لهذا الرمز.'
         trade = matches[0]
-        filled_at = timestamp(trade.metadata.get('entry_filled_at'))
+        phase = 'entry_timestamp'
+        entry_order_id = trade.metadata.get('entry_order_id')
+        if not entry_order_id:
+            rows = database.get_active_managed_trade_rows()
+            entry_order_id = next((row.get('entry_order_id') for row in rows if row.get('symbol') == symbol), None)
+        if entry_order_id:
+            order = alpaca_get('/v2/orders/' + urllib.parse.quote(str(entry_order_id), safe=''), timeout=5)
+            if order.get('symbol') != symbol or str(order.get('side')).lower() != 'buy':
+                return 'تعذر الفحص: أمر الدخول لا يطابق الصفقة.'
+            filled_at = timestamp(order.get('filled_at'))
+        else:
+            filled_at = timestamp(trade.metadata.get('entry_filled_at'))
         day = filled_at.astimezone(NY_TZ).date().isoformat()
+        phase = 'calendar'
         calendar = alpaca_get('/v2/calendar', {'start': day, 'end': day}, timeout=5)
         if not calendar or calendar[0].get('date') != day:
             return 'تعذر تحديد جلسة يوم الشراء من تقويم Alpaca.'
@@ -1367,17 +1380,19 @@ def target_audit_text(symbol: str) -> str:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 return json.loads(response.read())
 
+        phase = 'historical_trades'
         evidence = audit_trades(symbol, start, end,
             (trade.target_1, trade.target_2, trade.target_3), fetch_page)
         print('TARGET_AUDIT_RESULT ' + json.dumps({'symbol': symbol, 'start': start.isoformat(),
             'end': end.isoformat(), 'targets': [trade.target_1, trade.target_2, trade.target_3],
             'evidence': evidence}), flush=True)
+        phase = 'report'
         return report(trade, start, end, evidence)
     except urllib.error.HTTPError as exc:
         return f'تعذر قراءة سجل IEX: HTTP {exc.code}. النتيجة غير محسومة.'
     except Exception as exc:
-        logging.warning('Target audit failed | symbol=%s type=%s', symbol, type(exc).__name__)
-        return 'تعذر إكمال فحص الأهداف؛ النتيجة غير محسومة. حاول مرة أخرى.'
+        logging.warning('Target audit failed | symbol=%s phase=%s type=%s', symbol, phase, type(exc).__name__)
+        return f'تعذر إكمال فحص الأهداف ({phase})؛ النتيجة غير محسومة.'
 
 
 def recent_trades_text() -> str:

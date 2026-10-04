@@ -31,6 +31,47 @@ The structured results are grouped by source decision and strategy for future
 evaluation. They do not train models, change learning weights, relax trading
 gates or submit orders. Existing learning still requires eligible closed PAPER
 trades. Later training needs chronological holdouts and execution-cost modeling.
+
+## Session strategy experiments and conditional PAPER preference
+
+Each session analysis freezes all six candidates and the original highest-score
+winner. Native invalid or below-threshold candidates remain ineligible. Eligible
+candidates share the decision's original 60-minute completed-bar observation.
+`strategy_trials` deduplicates repeated decisions of one report/bar and retains
+the original levels, eligibility and baseline for paired comparison.
+
+The versioned simulator uses a completed 1m close at/above the trigger, entry at
+the next 1m open, an assumed 0.10% spread/slippage cost on each side, a fixed 2R
+target, and a 60m time exit. Stop gaps use the worse open. Invalidated setups and
+entries outside the plan are not filled; ambiguous paths and incomplete data
+cannot receive usable return labels. This is a research proxy, not a replay of
+JALWE's execution, scale-outs, trailing stops, actual fills or portfolio PnL.
+
+Once per New York day, the background worker evaluates fully matured earlier
+days within a 90-day history. Context is market regime, feed and session bucket
+(opening hour, middle session, late session, extended hours). Each comparison
+uses at most one symbol/day/strategy/context observation, paired with the native
+score baseline from the same episode. Whole days separate training (first 2/3)
+from validation (last 1/3), including purging overlap at the data cutoff.
+
+Promotion requires at least 40 training pairs on 10 days, 20 validation pairs on
+5 days, 90% usable coverage in each split, and at least 20/10 simulated activations
+in training/validation for both candidates and baseline. The training winner
+must improve by at least 0.10R, retain a positive conservative daily edge on
+validation, have positive validation mean, satisfy drawdown/worst-loss checks,
+and include observations within the past seven days. Validation failure keeps
+the baseline; it does not search the holdout for a different winner. Preferences
+expire after 24 hours and require the same protocol and context.
+
+The preference can select only an already-valid, above-threshold native session
+candidate while PAPER is enabled and LIVE is disabled. Trigger, breakout and risk
+gates still run afterward with the original routed risk limit. A selection or
+database error retains the native score winner. No result changes learning
+weights or enables LIVE. Counts appear in learning status and the daily report.
+
+Breakout latching now starts at the initial WAITING result only after all
+pre-entry gates passed. Pending confirmation retains that strategy and the
+original seven-minute deadline; rechecks cannot extend or recreate its approval.
 BUY entries use a DAY limit. The configured ceiling is rounded down to
 the valid price increment. Risk, allocation and cash sizing use this same ceiling.
 After the reconciliation timeout (30 seconds by default), unfilled remainders

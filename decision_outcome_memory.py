@@ -16,6 +16,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+from strategy_experiments import StrategyExperiments
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,7 @@ class DecisionOutcomeMemory:
             from core.database import database
             db = database
         self.db = db
+        self.experiments = StrategyExperiments(db)
         self.market_data = market_data
         self._worker_lock = threading.Lock()
         self._next_update = 0.0
@@ -111,6 +113,8 @@ class DecisionOutcomeMemory:
                   window_start.isoformat(), window_end.isoformat(), reference, feed,
                   json.dumps(payload, default=str, ensure_ascii=False),
                   "PENDING" if reference is not None else "UNOBSERVABLE"))
+            if cursor.rowcount > 0:
+                self.experiments.record_candidates(conn, payload, key, research_version)
         return cursor.rowcount > 0
 
     @staticmethod
@@ -233,6 +237,7 @@ class DecisionOutcomeMemory:
                     observed_bars = ?, result_json = ?, last_checked_at = ?,
                     check_count = check_count + 1 WHERE decision_key = ? AND status = 'PENDING'
                 """, (status, len(bars), json.dumps(result), now.isoformat(), row["decision_key"]))
+                self.experiments.observe(conn, row["decision_key"], bars, status)
             updated += 1
         return updated
 
@@ -245,6 +250,7 @@ class DecisionOutcomeMemory:
         def run():
             try:
                 self.update_due()
+                self.experiments.refresh_if_due()
             except Exception:
                 logger.exception("Decision outcome refresh failed")
             finally:
@@ -281,7 +287,8 @@ class DecisionOutcomeMemory:
                   for state in ("REJECTED", "WATCHING", "READY_FOR_PAPER_EXECUTION")}
         statuses = {state: sum(g["count"] for g in groups if g["status"] == state)
                     for state in ("COMPLETE", "PENDING", "PARTIAL_DATA", "DATA_UNAVAILABLE", "UNOBSERVABLE")}
-        return {"decisions": counts, "statuses": statuses, "groups": groups, "outcomes": outcomes}
+        return {"decisions": counts, "statuses": statuses, "groups": groups, "outcomes": outcomes,
+                "strategy_experiments": self.experiments.status_text()}
 
     @staticmethod
     def report_text(summary: dict) -> str:
@@ -299,6 +306,7 @@ class DecisionOutcomeMemory:
             f"لم تتأكد فوق مستوى التفعيل: {counts['NOT_ACTIVATED']}",
             "القياس من شموع 1m وبحسب تغطية مزوّد البيانات؛ أهداف 2R افتراضية عند غياب الهدف الأصلي.",
             "نتائج بحثية؛ لا تُحسب أرباحًا فعلية ولا تغيّر شروط الدخول.",
+            summary.get("strategy_experiments", ""),
         ])
 
 

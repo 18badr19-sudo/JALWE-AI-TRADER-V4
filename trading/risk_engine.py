@@ -65,7 +65,7 @@ class RiskEngine:
         default_risk_pct: float = 1.0,
         maximum_risk_pct: float = 1.50,
         max_daily_loss_pct: float = 3.0,
-        max_open_positions: int = 1,
+        max_open_positions: int = 3,
         max_position_allocation_pct: float = 75.0,
         allocation_b_pct: float = 50.0,
         allocation_a_pct: float = 75.0,

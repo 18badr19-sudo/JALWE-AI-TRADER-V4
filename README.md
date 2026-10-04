@@ -3,6 +3,34 @@
 JALWE alone owns trading decisions and broker execution. APEX supplies research.
 Live trading remains disabled by the existing safety gates.
 
+## Decision outcome memory
+
+The watcher saves every JALWE decision on an APEX report, including rejected
+decisions, in SQLite `decision_outcome_memory`. The original reason, gates,
+scores, strategy, report version, feature snapshot and execution audit remain
+immutable. Identical rechecks of one report are deduplicated; changed evidence
+creates a new observation. Collection starts when this version is deployed.
+
+A single background worker checks up to four due observations per minute. It
+requests the original 60-minute window of completed 1-minute bars, so restart
+cannot substitute today's prices for an older decision. Missing, invalid or
+stale reference prices are `UNOBSERVABLE`. Missing minutes and provider errors
+are recorded separately from complete paths, with a ten-minute data retry grace.
+Closed-market windows can therefore have no usable outcome. Measurements use
+the configured feed (IEX is limited coverage); they are not market-wide cash flow.
+
+When native trigger/stop levels exist, research activation requires the first
+completed 1-minute close at or above the trigger. Level touches before that close
+are excluded. The original T1 is used, or an explicitly theoretical 2R level if
+T1 was absent. Same-bar stop/target touches are ambiguous; incomplete paths
+cannot receive a first-hit label. This is an observation convention, not a
+simulation of JALWE's entry, fills, costs, scale-outs or realized profit.
+
+Counts are included in the existing daily opportunity report and learning status.
+The structured results are grouped by source decision and strategy for future
+evaluation. They do not train models, change learning weights, relax trading
+gates or submit orders. Existing learning still requires eligible closed PAPER
+trades. Later training needs chronological holdouts and execution-cost modeling.
 BUY entries use a DAY limit. The configured ceiling is rounded down to
 the valid price increment. Risk, allocation and cash sizing use this same ceiling.
 After the reconciliation timeout (30 seconds by default), unfilled remainders

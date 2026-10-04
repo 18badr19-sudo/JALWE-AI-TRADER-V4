@@ -1630,6 +1630,14 @@ def learning_status_text() -> str:
             ]
         )
 
+    try:
+        from decision_outcome_memory import get_decision_outcome_memory
+        memory = get_decision_outcome_memory()
+        today = datetime.now(ZoneInfo("America/New_York")).date()
+        lines.extend(["", memory.report_text(memory.summary_for_ny_date(today))])
+    except Exception:
+        lines.extend(["", "تعذر قراءة ذاكرة نتائج القرارات."])
+
     return "\n".join(lines)
 
 

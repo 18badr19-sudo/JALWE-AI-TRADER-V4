@@ -204,6 +204,16 @@ class DecisionEngine:
         output.update(dict(extra or {}))
         return output
 
+    @staticmethod
+    def _decision_feature_evidence(features: Any) -> dict:
+        try:
+            return features.to_dict()
+        except Exception:
+            # Optional research evidence must not break a quality rejection or
+            # change execution behavior, including missing feature timestamps.
+            logger.warning("Decision feature evidence unavailable")
+            return {}
+
     # ========================================================
     # SMART MARKET-DATA BACKFILL
     # ========================================================
@@ -999,6 +1009,7 @@ class DecisionEngine:
             )
 
         gates["market_data"] = True
+        base_metadata["decision_data_feed"] = bars.attrs.get("data_feed")
 
         # ====================================================
         # 2. FEATURE ENGINE
@@ -1039,6 +1050,10 @@ class DecisionEngine:
             )
 
         feature_diagnostics.update(self._apply_feature_freshness(features, timeframe))
+
+        # Freeze the evidence available at this decision, including failed quality
+        # checks. Outcome research must never substitute a later feature snapshot.
+        base_metadata["decision_features"] = self._decision_feature_evidence(features)
 
         if not features.data_quality_ok or features.data_is_stale:
             valid_rows = int(
@@ -1140,6 +1155,7 @@ class DecisionEngine:
         })
         self._apply_news(features, warnings)
         self._apply_options(features, warnings)
+        base_metadata["decision_features"] = self._decision_feature_evidence(features)
 
         # Persist the complete feature state used by the decision.
         # LearningEngine later pairs closed PAPER trades with the

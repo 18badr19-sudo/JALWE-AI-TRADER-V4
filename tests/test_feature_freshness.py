@@ -54,6 +54,24 @@ class FeatureFreshnessTests(unittest.TestCase):
         self.assertIn('freshness', result.reason)
         engine._apply_news.assert_not_called()
 
+    def test_missing_timestamp_does_not_break_rejection_when_evidence_is_captured(self):
+        engine = DecisionEngine.__new__(DecisionEngine)
+        engine._load_external_research = Mock(return_value={})
+        bars = pd.DataFrame({'close': [10]})
+        engine.market_data = Mock()
+        engine.market_data.get_bars.return_value = bars
+        engine.feature_engine = Mock()
+        diagnostics = {'valid_rows': 60, 'required_rows': 51, 'missing_columns': []}
+        engine.feature_engine.diagnose_input.return_value = diagnostics
+        engine._smart_backfill_bars = Mock(return_value=(bars, diagnostics, None))
+        features = self.features(1)
+        features.timestamp = None
+        engine.feature_engine.build.return_value = features
+        result = engine.analyze('TEST')
+        self.assertEqual(result.state, DecisionState.REJECTED)
+        self.assertIn('freshness', result.reason)
+        self.assertEqual(result.metadata['decision_features'], {})
+
 
 if __name__ == '__main__':
     unittest.main()

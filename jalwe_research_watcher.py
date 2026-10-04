@@ -41,6 +41,7 @@ from market.market_data import get_market_data
 from opportunity_performance_tracker import (
     get_opportunity_performance_tracker,
 )
+from decision_outcome_memory import get_decision_outcome_memory
 
 from core.manual_sells import ManualSellQueue
 from core.lifecycle_audit import checkpoint
@@ -3709,6 +3710,11 @@ def process_research(
         # SAVE TO JALWE DATABASE
         # ====================================================
 
+        try:
+            get_decision_outcome_memory().record(payload, research_version(research))
+        except Exception:
+            logger.exception("Decision outcome recording failed for %s", symbol)
+
         database_saved = (
             save_decision_to_database(
                 payload
@@ -4042,6 +4048,11 @@ def maybe_send_opportunity_daily_report(
             summary
         )
     )
+    try:
+        memory = get_decision_outcome_memory()
+        message += "\n\n" + memory.report_text(memory.summary_for_ny_date(now_ny.date()))
+    except Exception:
+        logger.exception("Decision outcome daily summary failed")
 
     success, error = (
         send_telegram(
@@ -4175,6 +4186,8 @@ def main() -> None:
     )
 
     print_startup_health()
+    get_decision_outcome_memory()
+    print("DECISION_OUTCOME_MEMORY: ENABLED | horizon=60m | all decisions | research only", flush=True)
     if settings.EXTENDED_EXIT_ENABLED:
         extended_exit_data_access()
 
@@ -4219,6 +4232,8 @@ def main() -> None:
                     minimum_interval_seconds=60,
                 )
             )
+
+            get_decision_outcome_memory().schedule_update()
 
             maybe_send_opportunity_daily_report(
                 state

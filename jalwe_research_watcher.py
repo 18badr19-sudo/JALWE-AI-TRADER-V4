@@ -783,9 +783,19 @@ def should_process(
                 False,
             )
         ):
+            if recheck_due(
+                state,
+                symbol,
+                version,
+                time.time(),
+            ):
+                return (
+                    True,
+                    "WATCHING_RECHECK_DUE",
+                )
             return (
-                True,
-                "FAST_TRIGGER_RECHECK",
+                False,
+                "WATCHING_RECHECK_NOT_DUE",
             )
 
         if recheck_due(state, symbol, version, time.time()):

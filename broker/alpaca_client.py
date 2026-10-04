@@ -606,6 +606,7 @@ class AlpacaClient:
         quantity: int,
         reference_price: float,
         client_order_id: Optional[str] = None,
+        before_submit=None,
     ) -> Any:
         """PAPER BUY limit capped by MAX_ENTRY_SLIPPAGE_PCT.
 
@@ -643,6 +644,8 @@ class AlpacaClient:
             limit_price=limit_price,
             client_order_id=normalized_client_order_id,
         )
+        if before_submit is not None:
+            before_submit()
         order = self.client.submit_order(order_data=order_request)
         logger.info(
             "PAPER protected entry submitted | symbol=%s qty=%s "

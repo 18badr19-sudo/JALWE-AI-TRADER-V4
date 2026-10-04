@@ -794,6 +794,7 @@ class PaperTradeOrchestrator:
 
             metadata={
                 "orchestrator": "PAPER_V3_1",
+                "entry_submission_state": "PREPARED",
 
                 "market_regime": (
                     market_regime
@@ -1501,6 +1502,9 @@ class PaperTradeOrchestrator:
         # 11. SUBMIT PAPER BUY
         # ====================================================
 
+        def before_entry_submit() -> None:
+            database.mark_entry_submission_started(intent_id)
+
         try:
             submitted_order = (
                 self.execution_engine
@@ -1509,6 +1513,7 @@ class PaperTradeOrchestrator:
                     client_order_id=(
                         client_order_id
                     ),
+                    before_submit=before_entry_submit,
                 )
             )
 
@@ -1521,12 +1526,31 @@ class PaperTradeOrchestrator:
                 symbol,
             )
 
-            # IMPORTANT:
-            # Keep EntryIntent unresolved.
-            #
-            # RecoveryEngine can search Alpaca using
-            # the already-persisted client_order_id.
+            # Read the durable phase again: a callback persistence error
+            # must never be mistaken for proof that the POST did not start.
+            try:
+                never_submitted = database.resolve_unsubmitted_entry(intent_id)
+            except Exception:
+                logger.exception("Unable to verify the persisted entry phase.")
+                never_submitted = False
 
+            if never_submitted:
+                return PaperOrchestratorResult(
+                    symbol=symbol,
+                    state=PaperOrchestratorState.ENTRY_TERMINAL_NO_FILL,
+                    decision=decision,
+                    intent_id=intent_id,
+                    client_order_id=client_order_id,
+                    message="Entry preflight failed. No broker order was submitted.",
+                    warnings=[str(exc)],
+                    metadata={
+                        "broker_order_submitted": False,
+                        "entry_preflight_failed": True,
+                    },
+                )
+
+            # A POST may have started. Keep its client identity for recovery;
+            # never submit a replacement BUY on an uncertain response.
             try:
                 database.mark_entry_intent_error(
                     intent_id,

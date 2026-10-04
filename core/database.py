@@ -2148,6 +2148,71 @@ class Database:
                 ),
             )
 
+    @staticmethod
+    def _unsubmitted_entry_metadata(row: Any) -> Optional[dict[str, Any]]:
+        # Only the new explicit marker proves that the broker SDK was never
+        # entered. Legacy PREPARED rows and uncertain SUBMITTING rows require
+        # broker recovery, even when lookup currently returns not-found.
+        if row is None:
+            return None
+        if row["state"] not in {"PREPARED", "ERROR"}:
+            return None
+        if row["broker_order_id"] or row["filled_quantity"] != 0:
+            return None
+        try:
+            metadata = json.loads(row["metadata_json"] or "{}")
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(metadata, dict):
+            return None
+        if metadata.get("entry_submission_state") != "PREPARED":
+            return None
+        return metadata
+
+    def mark_entry_submission_started(self, intent_id: str) -> None:
+        """Commit SUBMITTING immediately before the broker SDK POST."""
+        with self.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM entry_intents WHERE intent_id = ?",
+                (intent_id,),
+            ).fetchone()
+            metadata = self._unsubmitted_entry_metadata(row)
+            if metadata is None or row["state"] != "PREPARED":
+                raise RuntimeError("Entry intent is not safe to submit.")
+            metadata["entry_submission_state"] = "SUBMITTING"
+            conn.execute(
+                """
+                UPDATE entry_intents
+                SET metadata_json = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE intent_id = ?
+                """,
+                (json.dumps(metadata, default=str), intent_id),
+            )
+
+    def resolve_unsubmitted_entry(self, intent_id: str) -> bool:
+        """Release only an intent whose fresh durable state proves no POST."""
+        with self.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM entry_intents WHERE intent_id = ?",
+                (intent_id,),
+            ).fetchone()
+            if self._unsubmitted_entry_metadata(row) is None:
+                return False
+            conn.execute(
+                """
+                UPDATE entry_intents
+                SET state = 'FAILED',
+                    error_message = 'Entry broker submission was never started.',
+                    updated_at = CURRENT_TIMESTAMP,
+                    completed_at = CURRENT_TIMESTAMP
+                WHERE intent_id = ?
+                """,
+                (intent_id,),
+            )
+        return True
+
     def mark_entry_intent_error(
         self,
         intent_id: str,

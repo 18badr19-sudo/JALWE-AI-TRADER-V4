@@ -388,6 +388,36 @@ class MarketData:
         df.attrs["data_feed"] = self.get_feed_name()
         return df.tail(limit)
 
+    def get_observation_bars(
+        self, symbol: str, start: datetime, end: datetime,
+    ) -> pd.DataFrame:
+        """Read a fixed research window, including after restart. No latest-bar fallback."""
+        symbol = self._normalize_symbol(symbol)
+        if start.tzinfo is None or end.tzinfo is None:
+            raise ValueError("Observation timestamps must include a timezone.")
+        start = start.astimezone(timezone.utc)
+        end = end.astimezone(timezone.utc)
+        if not timedelta(0) < end - start <= timedelta(minutes=60):
+            raise ValueError("Observation window must be at most 60 minutes.")
+        request = StockBarsRequest(
+            symbol_or_symbols=symbol, timeframe=self._timeframe("1m"),
+            start=start, end=end, sort=Sort.ASC, limit=1000, feed=self.feed,
+        )
+        try:
+            frame = self.client.get_stock_bars(request).df
+        except Exception as exc:
+            raise MarketDataError(f"Observation data unavailable for {symbol}") from exc
+        if frame is None or frame.empty:
+            return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+        if isinstance(frame.index, pd.MultiIndex):
+            frame = frame.xs(symbol, level=0)
+        frame = frame.copy()
+        frame.index = pd.to_datetime(frame.index, utc=True, errors="coerce")
+        frame = frame.loc[(frame.index >= start) & (frame.index < end)]
+        frame = completed_intraday_bars(frame.sort_index(), "1m", end)
+        frame.attrs["data_feed"] = self.get_feed_name()
+        return frame
+
     # ========================================================
     # LATEST QUOTE
     # ========================================================

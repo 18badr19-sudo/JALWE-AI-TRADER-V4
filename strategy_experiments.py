@@ -13,6 +13,7 @@ import statistics
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
+from strategy_policy_guard import StrategyPolicyGuard
 
 NY = ZoneInfo("America/New_York")
 PROTOCOL = "session-2r-next-open-cost10bps-v1"
@@ -128,6 +129,7 @@ class StrategyExperiments:
             conn.execute("""CREATE TABLE IF NOT EXISTS strategy_evaluation_runs (
                 ny_date TEXT PRIMARY KEY, generated_at TEXT NOT NULL
             )""")
+        self.guard = StrategyPolicyGuard(db, PROTOCOL)
 
     def record_candidates(self, conn, payload, decision_key, research_version):
         jalwe = payload["jalwe"]
@@ -161,6 +163,7 @@ class StrategyExperiments:
                   stamp.astimezone(NY).date().isoformat(), ctx, name, baseline,
                   int(eligible), json.dumps(candidate, default=str), PROTOCOL,
                   "PENDING" if eligible else "INELIGIBLE"))
+        self.guard.record_selection(conn, metadata, episode, decision_key, stamp, ctx, native_ok)
 
     def observe(self, conn, decision_key, bars, status):
         rows = conn.execute("""SELECT * FROM strategy_trials
@@ -277,6 +280,10 @@ class StrategyExperiments:
             profiles.append((ctx, preferred, now.isoformat(), (now + timedelta(hours=24)).isoformat(),
                              cutoff.isoformat(), PROTOCOL, json.dumps(evaluation)))
         with self.db.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute("SELECT 1 FROM strategy_evaluation_runs WHERE ny_date = ?", (day,)).fetchone():
+                return False
+            profiles = self.guard.publish(conn, profiles, rows, now, cutoff)
             conn.execute("DELETE FROM strategy_preferences")
             conn.executemany("INSERT INTO strategy_preferences VALUES (?, ?, ?, ?, ?, ?, ?)", profiles)
             conn.execute("INSERT OR IGNORE INTO strategy_evaluation_runs VALUES (?, ?)", (day, now.isoformat()))
@@ -296,6 +303,10 @@ class StrategyExperiments:
         evaluation = json.loads(row["evaluation_json"])
         if evaluation.get("state") != "VALIDATED_PAPER_PREFERENCE":
             return analysis, {"mode": "BASELINE", "reason": "PREFERENCE_NOT_VALIDATED"}
+        with self.db.connection() as conn:
+            blocked = self.guard.validate_selection(conn, row, evaluation, now)
+        if blocked:
+            return analysis, {"mode": "BASELINE", "reason": blocked}
         for candidate in analysis.candidates:
             score, trigger, stop = map(number, (candidate.score, candidate.trigger_price, candidate.invalidation_price))
             name = getattr(candidate.strategy, "value", candidate.strategy)
@@ -306,7 +317,7 @@ class StrategyExperiments:
                     trigger_price=trigger, invalidation_price=stop,
                     reasons=list(candidate.reasons), warnings=list(candidate.warnings))
                 return selected, {"mode": "VALIDATED_PAPER_PREFERENCE", "context": ctx,
-                    "preferred_strategy": name, "evaluation": evaluation}
+                    "preferred_strategy": name, "policy_id": evaluation["policy_id"], "evaluation": evaluation}
         return analysis, {"mode": "BASELINE", "reason": "PREFERRED_CANDIDATE_NOT_NATIVE_ELIGIBLE"}
 
     def status_text(self):
@@ -322,7 +333,8 @@ class StrategyExperiments:
                 f"تفضيلات PAPER المجتازة للتقييم: {active}\n"
                 "تكلفة مفترضة 0.10% لكل جانب؛ التقييم لا يمثل أرباحًا فعلية.\n" +
                 ("\n".join(f"• {r['preferred_strategy']} | {r['context']}" for r in preferred)
-                 if preferred else "الاختيار الأصلي مستمر حتى اجتياز المقارنة."))
+                 if preferred else "الاختيار الأصلي مستمر حتى اجتياز المقارنة.") +
+                "\n" + self.guard.status_text())
 
 
 _experiments = None

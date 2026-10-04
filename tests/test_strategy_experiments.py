@@ -66,10 +66,14 @@ class StrategyExperimentTests(unittest.TestCase):
                "generated_at": (self.now - timedelta(hours=1)).isoformat(),
                "expires_at": (self.now + timedelta(hours=23)).isoformat(),
                "data_through": (self.now - timedelta(days=1)).isoformat(),
-               "protocol": PROTOCOL, "evaluation_json": '{"state":"VALIDATED_PAPER_PREFERENCE"}'}
+               "protocol": PROTOCOL, "evaluation_json": '{"state":"VALIDATED_PAPER_PREFERENCE","policy_id":"test-policy"}'}
         row.update(changes)
         with self.db.connection() as conn:
             conn.execute("INSERT OR REPLACE INTO strategy_preferences VALUES (?, ?, ?, ?, ?, ?, ?)", tuple(row.values()))
+            conn.execute("""INSERT OR IGNORE INTO strategy_policy_versions VALUES
+                (?, ?, ?, ?, ?, 'ACTIVE', NULL, NULL, ?)""",
+                ("test-policy", self.ctx, "VWAP_BOUNCE", PROTOCOL,
+                 (self.now - timedelta(hours=1)).isoformat(), row["evaluation_json"]))
 
     def history(self, *, validation_bad=False, second_challenger=False, repeated=False, missing=False, traded=True):
         days = pd.bdate_range("2026-09-07", "2026-10-02")
@@ -405,6 +409,258 @@ class StrategyExperimentTests(unittest.TestCase):
                          ("2026-10-03", "2026-10-04T03:30:00+00:00"))
         self.engine.refresh_if_due(self.now)
         self.assertIsNone(self.saved_profile())
+
+    def forward_history(self, *, candidate=-.3, days=5, stocks=4, missing=False,
+                        traded=True, repeated=False):
+        self.profile()
+        for d in range(days):
+            for stock in range(stocks):
+                for repeat in range(2 if repeated else 1):
+                    stamp = self.now + timedelta(days=d + 1, minutes=repeat)
+                    # Revalidation renews the daily profile, not its version.
+                    with self.db.connection() as conn:
+                        conn.execute("UPDATE strategy_preferences SET generated_at = ?, expires_at = ?",
+                                     ((stamp - timedelta(minutes=1)).isoformat(), (stamp + timedelta(hours=24)).isoformat()))
+                    _, audit = self.choice(now=stamp)
+                    payload = self.payload()
+                    payload.update(symbol=f"FORWARD{stock}", timestamp=stamp.isoformat())
+                    metadata = payload["jalwe"]["metadata"]
+                    metadata["decision_features"]["timestamp"] = (stamp - timedelta(minutes=5)).isoformat()
+                    metadata["strategy_selection"] = audit
+                    payload["jalwe"]["strategy"] = "VWAP_BOUNCE"
+                    self.memory.record(payload, f"report-{d}-{stock}-{repeat}")
+                    value = candidate[d] if isinstance(candidate, list) else candidate
+                    status = "PARTIAL_DATA" if missing and stock == 0 else "COMPLETE"
+                    with self.db.connection() as conn:
+                        for name, net_r in (("VWAP_BOUNCE", value), ("OPENING_RANGE_BREAKOUT", .2)):
+                            conn.execute("""UPDATE strategy_trials SET status = ?, result_json = ?
+                                WHERE strategy = ? AND symbol = ? AND decided_at = ?""",
+                                (status, json.dumps({"net_r": net_r, "traded": traded}), name,
+                                 payload["symbol"], stamp.isoformat()))
+
+    def monitor(self, now, policy_id="test-policy"):
+        cutoff = datetime.combine(now.astimezone(NY).date(), datetime.min.time(), NY).astimezone(timezone.utc)
+        with self.db.connection() as conn:
+            rows = [dict(r) for r in conn.execute("SELECT * FROM strategy_trials")]
+            lookup = {(r["episode_key"], r["strategy"]): r for r in rows}
+            version = dict(conn.execute("SELECT * FROM strategy_policy_versions WHERE policy_id = ?", (policy_id,)).fetchone())
+            return self.engine.guard._monitor(conn, version, lookup, now, cutoff)
+
+    def publish_proposal(self, now, strategy="VWAP_BOUNCE"):
+        cutoff = datetime.combine(now.astimezone(NY).date(), datetime.min.time(), NY).astimezone(timezone.utc)
+        proposal = (self.ctx, strategy, now.isoformat(), (now + timedelta(hours=24)).isoformat(),
+                    cutoff.isoformat(), PROTOCOL, '{"state":"VALIDATED_PAPER_PREFERENCE"}')
+        with self.db.connection() as conn:
+            rows = [dict(r) for r in conn.execute("SELECT * FROM strategy_trials")]
+            final = self.engine.guard.publish(conn, [proposal], rows, now, cutoff)
+            conn.execute("DELETE FROM strategy_preferences")
+            conn.executemany("INSERT INTO strategy_preferences VALUES (?, ?, ?, ?, ?, ?, ?)", final)
+        return json.loads(final[0][-1])
+
+    def test_daily_revalidation_preserves_version_activation_and_events(self):
+        self.history()
+        self.engine.refresh_if_due(self.now)
+        first = json.loads(self.saved_profile()["evaluation_json"])["policy_id"]
+        with self.db.connection() as conn:
+            frozen = dict(conn.execute("SELECT * FROM strategy_policy_versions WHERE policy_id = ?", (first,)).fetchone())
+        self.engine.refresh_if_due(self.now + timedelta(days=1))
+        current = json.loads(self.saved_profile()["evaluation_json"])
+        self.assertEqual(current["policy_id"], first)
+        self.assertEqual(current["forward_monitor"]["pairs"], 0)
+        self.assertEqual(current["forward_monitor"]["state"], "WAITING_FORWARD_DATA")
+        with self.db.connection() as conn:
+            version = dict(conn.execute("SELECT * FROM strategy_policy_versions WHERE policy_id = ?", (first,)).fetchone())
+            events = [r[0] for r in conn.execute("SELECT event_type FROM strategy_policy_events WHERE policy_id = ?", (first,))]
+        self.assertEqual(version, frozen)
+        self.assertEqual(sorted(events), ["ACTIVATED", "MONITORED", "REVALIDATED"])
+        self.assertFalse(self.engine.refresh_if_due(self.now + timedelta(days=1)))
+
+    def test_historical_results_are_not_forward_evidence(self):
+        self.history()
+        self.profile()
+        result = self.monitor(self.now + timedelta(days=1))
+        self.assertEqual(result["pairs"], 0)
+        self.assertEqual(result["state"], "WAITING_FORWARD_DATA")
+
+    def test_selected_episode_links_are_frozen_and_never_reassigned_on_recheck(self):
+        self.profile()
+        stamp = self.now
+        payload = self.payload()
+        payload["timestamp"] = stamp.isoformat()
+        payload["jalwe"]["metadata"]["decision_features"]["timestamp"] = stamp.isoformat()
+        self.memory.record(payload, "original")
+        payload["jalwe"]["metadata"]["strategy_selection"] = self.choice()[1]
+        payload["jalwe"]["reason"] = "preference appeared on later recheck"
+        self.memory.record(payload, "original")
+        with self.db.connection() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM strategy_policy_observations").fetchone()[0], 0)
+        payload["jalwe"]["metadata"]["decision_features"]["timestamp"] = (stamp + timedelta(minutes=1)).isoformat()
+        self.memory.record(payload, "new-episode")
+        payload["jalwe"]["reason"] = "duplicate preference recheck"
+        self.memory.record(payload, "new-episode")
+        with self.db.connection() as conn:
+            row = conn.execute("SELECT * FROM strategy_policy_observations").fetchone()
+            self.assertEqual(row["policy_id"], "test-policy")
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM strategy_policy_observations").fetchone()[0], 1)
+
+    def test_proven_forward_degradation_rolls_back_in_daily_refresh(self):
+        self.history()
+        self.forward_history()
+        now = self.now + timedelta(days=6)
+        self.assertTrue(self.engine.refresh_if_due(now))
+        with self.db.connection() as conn:
+            version = dict(conn.execute("SELECT * FROM strategy_policy_versions WHERE policy_id = 'test-policy'").fetchone())
+            event = json.loads(conn.execute("SELECT evidence_json FROM strategy_policy_events WHERE event_type = 'ROLLED_BACK'").fetchone()[0])
+        self.assertEqual(version["status"], "ROLLED_BACK")
+        self.assertEqual(datetime.fromisoformat(version["cooldown_until"]), now + timedelta(days=7))
+        self.assertEqual(event["pairs"], 20)
+        self.assertEqual(event["days"], 5)
+        self.assertEqual(event["scope"], "SIMULATED_NOT_REALIZED_PNL")
+        self.assertIsNone(self.saved_profile()["preferred_strategy"])
+        self.assertEqual(self.choice(now=now)[1]["mode"], "BASELINE")
+
+    def test_rollback_blocks_same_refresh_replacement_and_survives_restart(self):
+        self.forward_history()
+        now = self.now + timedelta(days=6)
+        result = self.publish_proposal(now, strategy="BULL_FLAG_BREAKOUT")
+        self.assertEqual(result["state"], "ROLLED_BACK")
+        self.assertIsNone(self.saved_profile()["preferred_strategy"])
+        restarted = StrategyExperiments(self.db)
+        # Even a stale restored profile cannot revive a rolled-back policy.
+        with self.db.connection() as conn:
+            conn.execute("""UPDATE strategy_preferences SET preferred_strategy = 'VWAP_BOUNCE',
+                evaluation_json = ?, generated_at = ?, expires_at = ?""",
+                ('{"state":"VALIDATED_PAPER_PREFERENCE","policy_id":"test-policy"}',
+                 now.isoformat(), (now + timedelta(hours=24)).isoformat()))
+        chosen, audit = restarted.choose(self.analysis(), regime="BULL_TREND", feed="iex", now=now,
+                                         paper=True, allow_live=False, minimum_score=75)
+        self.assertEqual(chosen.strategy, SessionStrategyName.OPENING_RANGE_BREAKOUT)
+        self.assertEqual(audit["reason"], "ROLLBACK_COOLDOWN")
+        self.engine = restarted
+        self.assertEqual(self.publish_proposal(now + timedelta(days=1))["state"], "ROLLBACK_COOLDOWN")
+        with self.db.connection() as conn:
+            self.assertFalse(restarted.guard.cooling_down(conn, "SIDEWAYS|iex|OPEN", "VWAP_BOUNCE", now))
+            self.assertFalse(restarted.guard.cooling_down(conn, self.ctx, "BULL_FLAG_BREAKOUT", now))
+
+    def test_no_rollback_from_small_missing_or_untraded_forward_samples(self):
+        for options in ({"days": 1, "stocks": 20}, {"missing": True, "stocks": 5}, {"traded": False},
+                        {"candidate": float("nan")}):
+            with self.db.connection() as conn:
+                conn.execute("DELETE FROM strategy_policy_observations")
+                conn.execute("DELETE FROM strategy_trials")
+            self.forward_history(**options)
+            self.assertEqual(self.monitor(self.now + timedelta(days=6))["state"], "WAITING_FORWARD_DATA")
+
+    def test_repeated_stock_day_does_not_inflate_forward_monitor(self):
+        self.forward_history(repeated=True)
+        result = self.monitor(self.now + timedelta(days=6))
+        self.assertEqual(result["pairs"], 20)
+        self.assertEqual(result["state"], "DEGRADED")
+
+    def test_stable_forward_results_keep_preference_and_version(self):
+        self.history()
+        self.forward_history(candidate=.5)
+        now = self.now + timedelta(days=6)
+        self.engine.refresh_if_due(now)
+        evaluation = json.loads(self.saved_profile()["evaluation_json"])
+        self.assertEqual(evaluation["policy_id"], "test-policy")
+        self.assertEqual(evaluation["forward_monitor"]["state"], "NO_PROVEN_DEGRADATION")
+        self.assertEqual(self.choice(now=now)[1]["mode"], "VALIDATED_PAPER_PREFERENCE")
+
+    def test_excess_drawdown_can_roll_back_despite_uncertain_mean(self):
+        self.forward_history(candidate=[-.8, -.8, -.8, 1.1, 1.1])
+        result = self.monitor(self.now + timedelta(days=6))
+        self.assertGreater(result["daily_edge_upper_r"], 0)
+        self.assertGreater(result["excess_drawdown_r"], 3)
+        self.assertEqual(result["state"], "DEGRADED")
+
+    def test_rollback_and_daily_marker_are_atomic_on_database_failure(self):
+        self.history()
+        self.forward_history()
+        now = self.now + timedelta(days=6)
+        original = self.engine.guard._event
+        def fail_rollback(conn, policy_id, kind, timestamp, evidence):
+            if kind == "ROLLED_BACK":
+                raise RuntimeError("test failure before transaction commit")
+            return original(conn, policy_id, kind, timestamp, evidence)
+        with patch.object(self.engine.guard, "_event", side_effect=fail_rollback):
+            with self.assertRaises(RuntimeError):
+                self.engine.refresh_if_due(now)
+        with self.db.connection() as conn:
+            self.assertEqual(conn.execute("SELECT status FROM strategy_policy_versions WHERE policy_id = 'test-policy'").fetchone()[0], "ACTIVE")
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM strategy_policy_events").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM strategy_evaluation_runs").fetchone()[0], 0)
+        self.assertEqual(self.saved_profile()["preferred_strategy"], "VWAP_BOUNCE")
+        self.assertTrue(self.engine.refresh_if_due(now))
+
+    def test_cooldown_expiry_needs_a_new_validated_version(self):
+        self.forward_history()
+        now = self.now + timedelta(days=6)
+        self.publish_proposal(now)
+        after = now + timedelta(days=7)
+        evaluation = self.publish_proposal(after)
+        new_id = evaluation["policy_id"]
+        self.assertNotEqual(new_id, "test-policy")
+        self.assertEqual(self.monitor(after + timedelta(days=1), new_id)["pairs"], 0)
+        with self.db.connection() as conn:
+            old = conn.execute("SELECT status FROM strategy_policy_versions WHERE policy_id = 'test-policy'").fetchone()[0]
+        self.assertEqual(old, "ROLLED_BACK")
+
+    def test_legacy_profile_is_disabled_until_revalidation_without_rewriting_trials(self):
+        self.history()
+        self.profile(evaluation_json='{"state":"VALIDATED_PAPER_PREFERENCE"}')
+        with self.db.connection() as conn:
+            before = [tuple(r) for r in conn.execute("SELECT * FROM strategy_trials ORDER BY trial_key")]
+            conn.execute("DELETE FROM strategy_policy_versions")
+        restarted = StrategyExperiments(self.db)
+        self.engine = restarted
+        self.assertEqual(self.choice()[1]["reason"], "POLICY_VERSION_NOT_ACTIVE")
+        restarted.refresh_if_due(self.now)
+        self.assertEqual(self.choice()[1]["mode"], "VALIDATED_PAPER_PREFERENCE")
+        with self.db.connection() as conn:
+            after = [tuple(r) for r in conn.execute("SELECT * FROM strategy_trials ORDER BY trial_key")]
+        self.assertEqual(before, after)
+
+    def test_observations_before_activation_or_after_cutoff_are_excluded(self):
+        self.forward_history()
+        with self.db.connection() as conn:
+            conn.execute("UPDATE strategy_policy_observations SET decided_at = ?", ((self.now - timedelta(days=1)).isoformat(),))
+        self.assertEqual(self.monitor(self.now + timedelta(days=6))["pairs"], 0)
+        with self.db.connection() as conn:
+            conn.execute("UPDATE strategy_policy_observations SET decided_at = ?", ((self.now + timedelta(days=10)).isoformat(),))
+        self.assertEqual(self.monitor(self.now + timedelta(days=6))["pairs"], 0)
+
+    def test_retired_wrong_protocol_or_future_policy_version_cannot_be_selected(self):
+        self.profile()
+        for field, value in (("status", "RETIRED"), ("protocol", "old"),
+                             ("activated_at", (self.now + timedelta(days=1)).isoformat())):
+            with self.db.connection() as conn:
+                conn.execute(f"UPDATE strategy_policy_versions SET {field} = ? WHERE policy_id = 'test-policy'", (value,))
+            self.assertEqual(self.choice()[1]["reason"], "POLICY_VERSION_NOT_ACTIVE")
+            with self.db.connection() as conn:
+                conn.execute("""UPDATE strategy_policy_versions SET status = 'ACTIVE', protocol = ?, activated_at = ?
+                    WHERE policy_id = 'test-policy'""", (PROTOCOL, (self.now - timedelta(hours=1)).isoformat()))
+
+    def test_failed_or_wrong_protocol_proposal_cannot_activate_a_version(self):
+        for protocol, state in ((PROTOCOL, "VALIDATION_FAILED"), ("old", "VALIDATED_PAPER_PREFERENCE")):
+            proposal = (self.ctx, "VWAP_BOUNCE", self.now.isoformat(),
+                        (self.now + timedelta(hours=24)).isoformat(),
+                        (self.now - timedelta(hours=1)).isoformat(), protocol,
+                        json.dumps({"state": state}))
+            with self.db.connection() as conn:
+                final = self.engine.guard.publish(conn, [proposal], [], self.now, self.now)
+                self.assertIsNone(final[0][1])
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM strategy_policy_versions").fetchone()[0], 0)
+
+    def test_failed_native_gate_does_not_create_policy_monitor_evidence(self):
+        self.profile()
+        payload = self.payload()
+        payload["timestamp"] = self.now.isoformat()
+        payload["jalwe"]["gates"]["ai"] = False
+        payload["jalwe"]["metadata"]["strategy_selection"] = self.choice()[1]
+        self.memory.record(payload, "failed-native-gate")
+        with self.db.connection() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM strategy_policy_observations").fetchone()[0], 0)
 
 
 if __name__ == "__main__":

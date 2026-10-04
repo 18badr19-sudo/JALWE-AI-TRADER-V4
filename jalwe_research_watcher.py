@@ -4189,6 +4189,7 @@ def main() -> None:
     get_decision_outcome_memory()
     print("DECISION_OUTCOME_MEMORY: ENABLED | horizon=60m | all decisions | research only", flush=True)
     print("STRATEGY_EXPERIMENTS: ENABLED | six native candidates | paired chronological validation | PAPER preference only", flush=True)
+    print("STRATEGY_POLICY_GUARD: ENABLED | forward simulated monitoring | durable versions | 7d rollback cooldown", flush=True)
     if settings.EXTENDED_EXIT_ENABLED:
         extended_exit_data_access()
 

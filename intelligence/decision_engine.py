@@ -214,6 +214,26 @@ class DecisionEngine:
             logger.warning("Decision feature evidence unavailable")
             return {}
 
+    @staticmethod
+    def _session_experiment_evidence(analysis: Any, minimum_score: float) -> list[dict]:
+        evidence = []
+        for candidate in analysis.candidates:
+            score = float(candidate.score)
+            trigger, stop = candidate.trigger_price, candidate.invalidation_price
+            levels_ok = bool(trigger is not None and stop is not None
+                             and math.isfinite(float(trigger)) and math.isfinite(float(stop))
+                             and float(trigger) > float(stop) > 0)
+            evidence.append({
+                "strategy": getattr(candidate.strategy, "value", candidate.strategy),
+                "score": score if math.isfinite(score) else None,
+                "valid": bool(candidate.valid), "trigger_price": trigger,
+                "invalidation_price": stop, "reasons": list(candidate.reasons),
+                "warnings": list(candidate.warnings),
+                "eligible_at_decision": bool(candidate.valid and levels_ok
+                    and math.isfinite(score) and score >= minimum_score),
+            })
+        return evidence
+
     # ========================================================
     # SMART MARKET-DATA BACKFILL
     # ========================================================
@@ -618,7 +638,7 @@ class DecisionEngine:
         now_ts = datetime.now(timezone.utc).timestamp()
         expires_at = float(latch.get("expires_at", 0.0) or 0.0)
 
-        if expires_at <= now_ts:
+        if not latch.get("pre_entry_gates_passed") or not math.isfinite(expires_at) or expires_at <= now_ts:
             self._breakout_latches.pop(symbol, None)
             return None
 
@@ -626,6 +646,10 @@ class DecisionEngine:
             trigger_price = float(latch["trigger_price"])
             stop_price = float(latch["stop_price"])
         except (KeyError, TypeError, ValueError):
+            self._breakout_latches.pop(symbol, None)
+            return None
+
+        if not (math.isfinite(trigger_price) and math.isfinite(stop_price) and trigger_price > stop_price > 0):
             self._breakout_latches.pop(symbol, None)
             return None
 
@@ -753,27 +777,6 @@ class DecisionEngine:
             )
 
             if breakout_state == "WAITING":
-                self._breakout_latches[symbol] = {
-                    "created_at": datetime.now(timezone.utc).timestamp(),
-                    "expires_at": (
-                        datetime.now(timezone.utc).timestamp()
-                        + 420.0
-                    ),
-                    "trigger_price": trigger.trigger_price,
-                    "stop_price": (
-                        breakout.stop_price
-                        if breakout.stop_price is not None
-                        else trigger.stop_price
-                    ),
-                    "market_regime": market_name,
-                    "strategy": session_strategy_name,
-                    "setup_grade": routed.grade.value,
-                    "opportunity_score": routed.routed_score,
-                    "session_strategy_score": session_strategy.score,
-                    "ai_score": getattr(ai, "score", None),
-                    "risk_pct": routed.final_risk_pct,
-                }
-
                 return self._watch(
                     symbol=symbol,
                     reason=breakout.reason,
@@ -1345,6 +1348,22 @@ class DecisionEngine:
                 ai_score=getattr(ai, "score", None),
             )
 
+        # Keep the score-based winner as a paired research baseline. The
+        # preference can only choose another native eligible PAPER candidate.
+        try:
+            minimum = self.session_strategy_engine.minimum_score
+            base_metadata["session_strategy_candidates"] = self._session_experiment_evidence(session_strategy, minimum)
+            base_metadata["session_strategy_baseline"] = getattr(session_strategy.strategy, "value", session_strategy.strategy)
+            from strategy_experiments import get_strategy_experiments
+            session_strategy, selection = get_strategy_experiments().choose(
+                session_strategy, regime=market_name, feed=base_metadata.get("decision_data_feed"),
+                now=datetime.now(timezone.utc), paper=settings.PAPER_TRADING,
+                allow_live=settings.ALLOW_LIVE_TRADING, minimum_score=minimum,
+            )
+            base_metadata["strategy_selection"] = selection
+        except Exception:
+            logger.exception("Strategy preference unavailable; retaining native score selection")
+
         gates["session_strategy"] = bool(session_strategy.approved)
 
         session_strategy_name = None
@@ -1513,6 +1532,21 @@ class DecisionEngine:
             # completed candles. Keep the setup under bounded recheck until
             # a completed candle can confirm or invalidate the breakout.
             if breakout_state == "WAITING":
+                if all(gates.get(g) for g in (
+                    "market_data", "features", "ai", "opportunity", "market_regime",
+                    "strategy_router", "session_strategy", "trigger",
+                )):
+                    self._breakout_latches[symbol] = {
+                        "pre_entry_gates_passed": True,
+                        "created_at": datetime.now(timezone.utc).timestamp(),
+                        "expires_at": datetime.now(timezone.utc).timestamp() + 420.0,
+                        "trigger_price": trigger.trigger_price,
+                        "stop_price": breakout.stop_price if breakout.stop_price is not None else trigger.stop_price,
+                        "market_regime": market_name, "strategy": session_strategy_name,
+                        "setup_grade": routed.grade.value, "opportunity_score": routed.routed_score,
+                        "session_strategy_score": session_strategy.score,
+                        "ai_score": getattr(ai, "score", None), "risk_pct": routed.final_risk_pct,
+                    }
                 return self._watch(
                     symbol=symbol,
                     reason=breakout.reason,

@@ -800,7 +800,10 @@ class RecoveryEngine:
                 database.log_event(event_type='RECOVERY_PENDING_ERROR', severity='ERROR', message='Unable to reconcile pending broker exit during startup.', metadata={'trade_id': trade_id, 'symbol': symbol, 'pending_order_id': trade.pending_order_id, 'pending_filled_quantity': trade.pending_filled_quantity, 'error': str(exc)})
                 return result
         try:
-            position = self.reconciliation.verify_position(symbol)
+            position = self._broker_read_with_retry(
+                lambda: self.reconciliation.verify_position(symbol),
+                label="managed_trade_position",
+            )
         except Exception as exc:
             logger.exception('Position recovery failed | trade_id=%s symbol=%s', trade_id, symbol)
             result['warning'] = 'BROKER_POSITION_UNAVAILABLE'

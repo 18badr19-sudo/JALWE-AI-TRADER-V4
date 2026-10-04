@@ -23,10 +23,17 @@ def update_recheck(state, symbol, version, decision_state, reason, now):
     entries = state.setdefault("rechecks", {})
     entry = entries.get(symbol)
     if decision_state == "WATCHING":
-        # Do not extend the same report's window on every 15-second poll.
+        # Do not extend the same report's window on every watcher poll.
+        # Once a scheduled recheck actually runs, advance the next due
+        # time so WATCHING remains on the intended 60-second cadence.
         if not valid_entry(entry, version):
             entry = {"version": version, "expires": now + WINDOW_SECONDS,
                      "next": now + INTERVAL_SECONDS}
+        elif now >= entry["next"] and now < entry["expires"]:
+            entry["next"] = min(
+                now + INTERVAL_SECONDS,
+                entry["expires"],
+            )
         entries[symbol] = entry
     elif (decision_state == "REJECTED" and reason in RETRY_REASONS
           and valid_entry(entry, version) and now < entry["expires"]):

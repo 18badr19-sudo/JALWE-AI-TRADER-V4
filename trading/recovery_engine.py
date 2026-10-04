@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -102,6 +103,63 @@ class RecoveryEngine:
     @staticmethod
     def _normalize_symbol(symbol: Any) -> str:
         return str(symbol or "").strip().upper()
+
+    BROKER_READ_ATTEMPTS = 3
+    BROKER_READ_RETRY_SECONDS = 0.35
+
+    @staticmethod
+    def _is_transient_broker_read_error(exc: Exception) -> bool:
+        message = str(exc or "").strip().lower()
+        return any(
+            token in message
+            for token in (
+                "internal server error",
+                "500 server error",
+                "http error 500",
+                "bad gateway",
+                "502",
+                "service unavailable",
+                "503",
+                "gateway timeout",
+                "504",
+                "timed out",
+                "timeout",
+                "temporarily unavailable",
+                "too many requests",
+                "429",
+            )
+        )
+
+    def _broker_read_with_retry(
+        self,
+        operation: Any,
+        *,
+        label: str,
+    ) -> Any:
+        last_error: Optional[Exception] = None
+        for attempt in range(1, self.BROKER_READ_ATTEMPTS + 1):
+            try:
+                return operation()
+            except Exception as exc:
+                last_error = exc
+                if (
+                    attempt >= self.BROKER_READ_ATTEMPTS
+                    or not self._is_transient_broker_read_error(exc)
+                ):
+                    raise
+                logger.warning(
+                    "Transient broker read failed; retrying | label=%s attempt=%s/%s error=%s",
+                    label,
+                    attempt,
+                    self.BROKER_READ_ATTEMPTS,
+                    exc,
+                )
+                time.sleep(
+                    self.BROKER_READ_RETRY_SECONDS * attempt
+                )
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Broker read retry exhausted without an error.")
 
     # ========================================================
     # ORDER STATUS MAPPING
@@ -667,7 +725,12 @@ class RecoveryEngine:
         metadata = dict(trade.metadata or {})
         order_id = str(metadata.get('protective_stop_order_id') or '').strip()
         if not order_id and metadata.get('protective_stop_submission_uncertain'):
-            raw = self.broker.get_order_by_client_id(metadata['protective_stop_client_order_id'])
+            raw = self._broker_read_with_retry(
+                lambda: self.broker.get_order_by_client_id(
+                    metadata['protective_stop_client_order_id']
+                ),
+                label="protective_stop_by_client_id",
+            )
             if str(getattr(raw, 'client_order_id', '')) != metadata['protective_stop_client_order_id']:
                 raise RuntimeError('Recovered stop client identity mismatch.')
             side = self._value(getattr(raw, 'side', '')).lower()
@@ -681,7 +744,10 @@ class RecoveryEngine:
             trade.metadata = metadata
             database.save_managed_trade(trade_id, trade)
         elif order_id:
-            raw = self.broker.get_order(order_id)
+            raw = self._broker_read_with_retry(
+                lambda: self.broker.get_order(order_id),
+                label="protective_stop_by_order_id",
+            )
         else:
             return {'checked': False, 'active': False, 'filled': False}
         return apply_protective_stop_snapshot(database, trade_id, trade, raw)
@@ -766,7 +832,10 @@ class RecoveryEngine:
     def _broker_positions(
         self,
     ) -> dict[str, dict[str, Any]]:
-        raw_positions = self.broker.get_all_positions()
+        raw_positions = self._broker_read_with_retry(
+            self.broker.get_all_positions,
+            label="broker_positions",
+        )
 
         positions: dict[str, dict[str, Any]] = {}
 
@@ -844,7 +913,10 @@ class RecoveryEngine:
     # ========================================================
 
     def _get_broker_orders(self) -> list[Any]:
-        orders = self.broker.get_orders()
+        orders = self._broker_read_with_retry(
+            self.broker.get_orders,
+            label="broker_orders",
+        )
         if orders is None:
             return []
         return list(orders)

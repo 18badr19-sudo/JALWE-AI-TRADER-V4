@@ -417,7 +417,7 @@ class Settings:
     MAX_OPEN_POSITIONS: int = (
         _get_int(
             "MAX_OPEN_POSITIONS",
-            1,
+            3,
         )
     )
 

@@ -902,6 +902,7 @@ class ExecutionEngine:
         self,
         decision: Any,
         client_order_id: Optional[str] = None,
+        before_submit=None,
     ) -> BrokerOrder:
         """
         Crash-safe central entry pathway.
@@ -1091,20 +1092,15 @@ class ExecutionEngine:
             final_client_order_id,
         )
 
-        broker_response = (
-            self.broker
-            .submit_protected_entry(
-
-                symbol=symbol,
-
-                quantity=quantity,
-
-                reference_price=float(decision.entry_price),
-
-                client_order_id=(
-                    final_client_order_id
-                ),
-            )
+        submit_options = {}
+        if before_submit is not None:
+            submit_options["before_submit"] = before_submit
+        broker_response = self.broker.submit_protected_entry(
+            symbol=symbol,
+            quantity=quantity,
+            reference_price=float(decision.entry_price),
+            client_order_id=final_client_order_id,
+            **submit_options,
         )
 
         # ====================================================

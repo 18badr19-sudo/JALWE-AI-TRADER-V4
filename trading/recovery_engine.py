@@ -663,6 +663,9 @@ class RecoveryEngine:
         symbol = self._normalize_symbol(intent.get('symbol'))
         result: dict[str, Any] = {'intent_id': intent_id, 'symbol': symbol, 'resolved': False, 'managed': False, 'state_before': intent.get('state'), 'state_after': intent.get('state'), 'broker_order_id': intent.get('broker_order_id'), 'filled_quantity': self._safe_int(intent.get('filled_quantity')), 'warning': None}
         try:
+            if database.resolve_unsubmitted_entry(intent_id):
+                result.update(resolved=True, state_after='FAILED')
+                return result
             raw_order = self._lookup_entry_order(intent)
             broker_order = self._raw_entry_to_broker_order(raw_order, intent)
             if broker_order.status in {OrderStatus.SUBMITTED, OrderStatus.ACCEPTED, OrderStatus.PARTIALLY_FILLED}:

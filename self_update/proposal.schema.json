@@ -1,0 +1,22 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "base_sha", "rationale", "edits"],
+  "properties": {
+    "schema_version": {"type": "integer", "enum": [1]},
+    "base_sha": {"type": "string"},
+    "rationale": {"type": "string"},
+    "edits": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["method", "body"],
+        "properties": {
+          "method": {"type": "string", "enum": ["_num", "_clamp"]},
+          "body": {"type": "string"}
+        }
+      }
+    }
+  }
+}

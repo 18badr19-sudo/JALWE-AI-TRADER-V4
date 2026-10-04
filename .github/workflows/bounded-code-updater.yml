@@ -1,0 +1,211 @@
+name: Bounded PAPER Code Updater
+
+'on':
+  schedule:
+    - cron: '0 6 * * 1' # Monday 09:00 Riyadh; API called only for a failing contract.
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['self_update/**', '.github/workflows/bounded-code-updater.yml', 'tests/test_code_updater.py']
+  pull_request:
+    branches: [main]
+    paths: ['self_update/**', '.github/workflows/bounded-code-updater.yml', 'tests/test_code_updater.py']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jalwe-bounded-code-updater
+  cancel-in-progress: false
+
+jobs:
+  rehearsal:
+    # Deterministic offline fixture exercises validation/attestation without
+    # model credentials or any repository write permission. Never publishes.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: test-only
+          POSTGRES_DB: bridge_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Rehearse the numeric repair with a deterministic test fixture
+        id: fixture
+        run: |
+          python - <<'PY'
+          import json, sys, subprocess
+          from self_update.cli import validate, output, summary
+          from self_update.contracts import run_contract
+          from self_update.policy import TARGET
+          sys.path.insert(0, 'tests')
+          from test_code_updater import proposal
+          base = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          source = subprocess.check_output(['git', 'show', f'{base}:{TARGET}'], text=True)
+          if run_contract(source)['failures']:
+              validate('.agent-work', json.dumps(proposal(base_sha=base)))
+          else:
+              output('changed', 'false')
+              summary('Offline rehearsal: numeric helpers already pass; no repair needed.')
+          PY
+      - name: Run canonical PAPER suite against rehearsed candidate
+        if: steps.fixture.outputs.changed == 'true'
+        env:
+          ALPACA_API_KEY: test-key
+          ALPACA_SECRET_KEY: test-secret
+          ALPACA_BASE_URL: https://paper-api.alpaca.markets
+          PAPER_TRADING: 'true'
+          ALLOW_LIVE_TRADING: 'false'
+          TEST_POSTGRES_DSN: postgresql://postgres:test-only@localhost:5432/bridge_test
+        run: python -m unittest discover -s tests -v > .agent-work/tests.log 2>&1
+      - name: Rehearse full attestation (no publication)
+        if: steps.fixture.outputs.changed == 'true'
+        env:
+          PAPER_TRADING: 'true'
+          ALLOW_LIVE_TRADING: 'false'
+        run: python -m self_update.cli attest
+
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    outputs:
+      ready: ${{ steps.prepare.outputs.ready }}
+      base_sha: ${{ steps.prepare.outputs.base_sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Check contract and activation without exposing a key
+        id: prepare
+        env:
+          CODE_AGENT_ELIGIBLE: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+          CODE_AGENT_KEY_PRESENT: ${{ secrets.OPENAI_API_KEY != '' }}
+          CODE_AGENT_PAUSED: ${{ vars.JALWE_CODE_AGENT_PAUSED == 'true' }}
+        run: python -m self_update.cli prepare
+
+  generate:
+    needs: preflight
+    if: needs.preflight.outputs.ready == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      proposal: ${{ steps.codex.outputs.final-message }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.preflight.outputs.base_sha }}
+          persist-credentials: false
+      - name: Prepare trusted failure context
+        env:
+          CODE_AGENT_ELIGIBLE: 'true'
+          CODE_AGENT_KEY_PRESENT: 'true'
+        run: python -m self_update.cli prepare
+      - name: Generate proposal only (last step, no write token)
+        id: codex
+        uses: openai/codex-action@86365089eb2b84e0a8fb0717b304f8bdcb13b20e # pinned v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          model: ${{ vars.JALWE_CODE_AGENT_MODEL }}
+          prompt-file: self_update/prompts/numeric-repair.md
+          output-schema-file: self_update/proposal.schema.json
+          codex-args: '["--ephemeral"]'
+          sandbox: read-only
+          safety-strategy: drop-sudo
+
+  validate:
+    needs: [preflight, generate]
+    if: needs.generate.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      ready: ${{ steps.attest.outputs.ready }}
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: test-only
+          POSTGRES_DB: bridge_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.preflight.outputs.base_sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install trusted base dependencies
+        run: pip install -r requirements.txt
+      - name: Parse, enforce scope and run independent arithmetic contract
+        id: policy
+        env:
+          CODE_AGENT_PROPOSAL: ${{ needs.generate.outputs.proposal }}
+        run: python -m self_update.cli validate
+      - name: Run unchanged PAPER tests against candidate
+        if: steps.policy.outputs.changed == 'true'
+        env:
+          ALPACA_API_KEY: test-key
+          ALPACA_SECRET_KEY: test-secret
+          ALPACA_BASE_URL: https://paper-api.alpaca.markets
+          PAPER_TRADING: 'true'
+          ALLOW_LIVE_TRADING: 'false'
+          TEST_POSTGRES_DSN: postgresql://postgres:test-only@localhost:5432/bridge_test
+        run: python -m unittest discover -s tests -v > .agent-work/tests.log 2>&1
+      - name: Attest exact candidate and successful independent suite
+        id: attest
+        if: steps.policy.outputs.changed == 'true'
+        env:
+          PAPER_TRADING: 'true'
+          ALLOW_LIVE_TRADING: 'false'
+        run: python -m self_update.cli attest
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: steps.attest.outputs.ready == 'true'
+        with:
+          name: validated-code-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .agent-work/proposal.json
+            .agent-work/report.json
+            .agent-work/tests.log
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    needs: [preflight, validate]
+    if: needs.validate.outputs.ready == 'true' && vars.JALWE_CODE_AGENT_PAUSED != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: write
+      pull-requests: write
+      statuses: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.preflight.outputs.base_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: validated-code-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .agent-work
+      - name: Verify artifact and publish exact tested child with expected-base lease
+        env:
+          CODE_UPDATE_GITHUB_TOKEN: ${{ github.token }}
+        run: python -m self_update.cli publish

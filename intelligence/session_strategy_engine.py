@@ -115,6 +115,7 @@ class SessionStrategyEngine:
         except (
             TypeError,
             ValueError,
+            OverflowError,
         ):
             return default
 
@@ -123,16 +124,13 @@ class SessionStrategyEngine:
         value: float,
     ) -> float:
 
-        if not math.isfinite(value):
-            return 0.0
+        try:
+            if not math.isfinite(value):
+                return 0.0
 
-        return max(
-            0.0,
-            min(
-                100.0,
-                float(value),
-            ),
-        )
+            return max(0.0, min(100.0, float(value)))
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
 
     @staticmethod
     def _stop_below_level(

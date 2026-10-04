@@ -172,3 +172,63 @@ The startup EXTENDED_EXIT_DATA_ACCESS diagnostic checks access read-only; failur
 does not silently substitute delayed/IEX data. No subscription is purchased by
 this change. PAPER_LIFECYCLE_CHECKPOINT records actual stage, fills, remaining
 shares, runner and protective-stop state for observation after market reopening.
+
+## Bounded autonomous code repair (GitHub Actions)
+
+`Bounded PAPER Code Updater` checks the numeric contract weekly on Monday at
+06:00 UTC (09:00 Riyadh), or through **Run workflow** on `main`. This first
+version can repair only the bodies of `SessionStrategyEngine._num` and `_clamp`
+in `intelligence/session_strategy_engine.py`. It does not optimize strategies
+or change trading rules. Signatures, score formulas, thresholds, risk controls,
+broker execution, configuration, tests and the updater itself are outside the
+agent's edit scope. Existing strategy research and rollback remain independent.
+
+The preflight logs a key-presence boolean and an independent numeric contract;
+it never prints a key. A model call occurs only when an eligible run has a
+failing contract, is not paused and has an API key. Push/PR runs are preview
+only. An offline rehearsal exercises a deterministic repair and full PAPER
+attestation without invoking a model or publishing a change.
+
+The generator uses a pinned OpenAI Codex Action in a read-only sandbox with
+sudo removed and no repository-write token. Its output is strict JSON. A fresh
+validation job renders only allowed method bodies, applies a restrictive AST
+policy, checks 16,480 numerical assertions with a fresh random seed, and runs
+the unchanged complete PAPER test suite including PostgreSQL integrations.
+Skipped or failed tests prevent publication. Dependencies and all validation
+code come from the trusted base, and numeric checks run without credentials.
+Test logs, proposal and hashes are retained as an artifact for 30 days.
+
+A separate write job rechecks the artifact, run identity, numeric contract and
+exact tested bytes, creates a single-file commit and opens a pull request. It
+publishes only a direct child of the tested `main` commit with an explicit
+expected-base Git lease. Any advance or reset of `main` rejects the write; no
+history rewrite or branch-rule bypass is allowed. Repository protections can
+leave the tested PR open for required checks/review. Publication using the
+built-in GitHub token does not start another Actions run: the complete candidate
+suite has already passed in the independent validation job. Railway's existing
+GitHub deployment integration observes the updated `main` branch. Deployment
+success is not monitored by this updater, and automatic code rollback is not
+implemented; the previous Git commit and repair PR remain available.
+
+Activation setup:
+
+1. Add an OpenAI API key as repository Actions secret `OPENAI_API_KEY`. Never
+   commit it, put it in a prompt, or send it in chat. Model execution uses that
+   API account; setting up the workflow alone makes no API calls.
+2. Enable **Allow GitHub Actions to create and approve pull requests** in the
+   repository's Actions settings if permitted by the organization. The updater
+   creates PRs but does not approve them. It uses the built-in GitHub token;
+   no personal access token is required.
+3. Optionally set repository variable `JALWE_CODE_AGENT_MODEL` to an available
+   Codex model. If unset, the pinned action uses its default model.
+4. Run the workflow on `main` and inspect its summary. Set repository variable
+   `JALWE_CODE_AGENT_PAUSED=true` to stop generation and publication. The weekly
+   check remains idle once the numeric helpers satisfy the contract.
+
+An absent key reports `BLOCKED_MISSING_OPENAI_KEY`; a passing contract reports
+`NO_REPAIR_NEEDED`. No AI-authored repair is claimed until the generator,
+independent validator and publisher actually succeed. Infrastructure and offline
+rehearsal can be tested without activating the model.
+
+References: https://developers.openai.com/codex/github-action/ and
+https://docs.github.com/en/actions/security-for-github-actions/security-guides/automatic-token-authentication

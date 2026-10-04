@@ -22,6 +22,9 @@ venv/
 *.log
 logs/
 
+# Bounded code-agent context and validation artifacts
+.agent-work/
+
 # Models
 *.joblib
 *.pkl

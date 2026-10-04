@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -1333,6 +1334,52 @@ def weekly_report_text() -> str:
     )
 
 
+def target_audit_text(symbol: str) -> str:
+    from core.target_audit import audit_trades, report, timestamp
+    symbol = symbol.strip().upper()
+    if not re.fullmatch(r'[A-Z][A-Z0-9.-]{0,14}', symbol):
+        return 'استخدم /target_audit CANE'
+    if not alpaca_ready():
+        return 'تعذر الفحص: اتصال Alpaca PAPER غير جاهز.'
+    try:
+        matches = [trade for trade in database.load_active_managed_trades().values()
+                   if trade.symbol == symbol]
+        if len(matches) != 1:
+            return 'الفحص يحتاج صفقة JALWE مفتوحة واحدة لهذا الرمز.'
+        trade = matches[0]
+        filled_at = timestamp(trade.metadata.get('entry_filled_at'))
+        day = filled_at.astimezone(NY_TZ).date().isoformat()
+        calendar = alpaca_get('/v2/calendar', {'start': day, 'end': day}, timeout=5)
+        if not calendar or calendar[0].get('date') != day:
+            return 'تعذر تحديد جلسة يوم الشراء من تقويم Alpaca.'
+        closing = datetime.fromisoformat(day + 'T' + calendar[0]['close']).replace(tzinfo=NY_TZ)
+        opening = datetime.fromisoformat(day + 'T' + calendar[0]['open']).replace(tzinfo=NY_TZ)
+        start = max(filled_at, opening.astimezone(timezone.utc))
+        end = min(closing.astimezone(timezone.utc), datetime.now(timezone.utc))
+        if end <= start:
+            return 'لا توجد فترة جلسة عادية بعد وقت الشراء في ذلك اليوم.'
+
+        def fetch_page(params, timeout):
+            query = urllib.parse.urlencode({key: value for key, value in params.items() if value is not None})
+            request = urllib.request.Request('https://data.alpaca.markets/v2/stocks/trades?' + query,
+                headers={'APCA-API-KEY-ID': ALPACA_API_KEY, 'APCA-API-SECRET-KEY': ALPACA_SECRET_KEY,
+                         'Accept': 'application/json'}, method='GET')
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return json.loads(response.read())
+
+        evidence = audit_trades(symbol, start, end,
+            (trade.target_1, trade.target_2, trade.target_3), fetch_page)
+        print('TARGET_AUDIT_RESULT ' + json.dumps({'symbol': symbol, 'start': start.isoformat(),
+            'end': end.isoformat(), 'targets': [trade.target_1, trade.target_2, trade.target_3],
+            'evidence': evidence}), flush=True)
+        return report(trade, start, end, evidence)
+    except urllib.error.HTTPError as exc:
+        return f'تعذر قراءة سجل IEX: HTTP {exc.code}. النتيجة غير محسومة.'
+    except Exception as exc:
+        logging.warning('Target audit failed | symbol=%s type=%s', symbol, type(exc).__name__)
+        return 'تعذر إكمال فحص الأهداف؛ النتيجة غير محسومة. حاول مرة أخرى.'
+
+
 def recent_trades_text() -> str:
     try:
         orders = get_recent_filled_orders(15)
@@ -2463,6 +2510,7 @@ def help_text() -> str:
         "/today - ربح/خسارة اليوم\n"
         "/week - تقرير الأسبوع\n"
         "/trades - آخر الأوامر المنفذة\n"
+        "/target_audit CANE - فحص وصول الأهداف في يوم الشراء بدون تداول\n"
         "/learning - حالة التعلم الذاتي\n"
         "/learn_now - تشغيل دورة تعلم الآن\n"
         "/sell - بيع صفقة PAPER محددة مع تأكيد\n"
@@ -2488,6 +2536,9 @@ def help_text() -> str:
 def handle(text: str, requested_by=None) -> Any:
     cmd = str(text or "").strip()
     low = cmd.lower()
+
+    if low.split(' ', 1)[0] == '/target_audit':
+        return target_audit_text(cmd.split(' ', 1)[1] if ' ' in cmd else '')
 
     if cmd in {BTN_START, "🟢 تشغيل الكل"} or low == "/run":
         return start_all()

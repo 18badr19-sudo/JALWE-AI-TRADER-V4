@@ -22,6 +22,21 @@ class RecheckTests(unittest.TestCase):
         update_recheck(state, "NAUT", "v1", "WATCHING", "", 650)
         self.assertFalse(recheck_due(state, "NAUT", "v1", 700))
 
+    def test_watching_recheck_advances_on_sixty_second_cadence(self):
+        state = {}
+        update_recheck(state, "NAUT", "v1", "WATCHING", "", 100)
+        self.assertFalse(recheck_due(state, "NAUT", "v1", 159))
+        self.assertTrue(recheck_due(state, "NAUT", "v1", 160))
+
+        # Simulate the scheduled WATCHING analysis actually running.
+        update_recheck(state, "NAUT", "v1", "WATCHING", "", 160)
+        self.assertFalse(recheck_due(state, "NAUT", "v1", 219))
+        self.assertTrue(recheck_due(state, "NAUT", "v1", 220))
+
+        # The original ten-minute window is never extended.
+        update_recheck(state, "NAUT", "v1", "WATCHING", "", 220)
+        self.assertFalse(recheck_due(state, "NAUT", "v1", 700))
+
     def test_hard_reject_and_execution_clear_retry(self):
         for status, reason in [("REJECTED", "Price reached the setup invalidation level before entry."),
                                ("REJECTED", "Risk rejected."), ("READY_FOR_PAPER_EXECUTION", "")]:

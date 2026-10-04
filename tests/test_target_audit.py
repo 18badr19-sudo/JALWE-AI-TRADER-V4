@@ -53,6 +53,11 @@ class TargetAuditTests(unittest.TestCase):
             remaining_quantity=8, target_1=11.82, target_2=11.9, target_3=11.98)
         self.assertIn('غير محسوم', report(trade, self.start, self.end, result))
 
+    def test_null_trades_is_empty_evidence_not_parser_failure(self):
+        result = self.audit(Mock(return_value={'trades': None, 'next_page_token': None}))
+        self.assertEqual(result['count'], 0)
+        self.assertIsNone(result['high'])
+
     def test_controller_reads_fill_day_and_never_changes_trade(self):
         import railway_controller as controller
         trade = SimpleNamespace(symbol='CANE', entry_price=11.66, current_stop=11.58,
@@ -60,6 +65,7 @@ class TargetAuditTests(unittest.TestCase):
             metadata={'entry_filled_at': '2026-10-02T13:55:34Z'})
         db = Mock()
         db.load_active_managed_trades.return_value = {'trade': trade}
+        db.get_active_managed_trade_rows.return_value = []
         evidence = {'count': 1, 'high': '11.82', 'high_at': '2026-10-02T19:59:00Z',
             'touches': ['2026-10-02T19:59:00Z', None, None], 'complete': True, 'invalid': 0}
         with patch.object(controller, 'database', db), patch.object(controller, 'alpaca_ready', return_value=True), \
@@ -70,8 +76,26 @@ class TargetAuditTests(unittest.TestCase):
         self.assertEqual(audit.call_args.args[1], self.start.replace(second=34))
         self.assertEqual(audit.call_args.args[2], self.end)
         self.assertEqual(calendar.call_args.args[0], '/v2/calendar')
-        self.assertEqual([call[0] for call in db.mock_calls], ['load_active_managed_trades'])
+        self.assertEqual([call[0] for call in db.mock_calls], ['load_active_managed_trades', 'get_active_managed_trade_rows'])
         self.assertEqual(trade.current_stop, 11.58)
+
+    def test_legacy_trade_uses_broker_fill_instead_of_missing_metadata(self):
+        import railway_controller as controller
+        trade = SimpleNamespace(symbol='CANE', entry_price=11.66, current_stop=11.58,
+            remaining_quantity=8, target_1=11.82, target_2=11.9, target_3=11.98, metadata={})
+        db = Mock()
+        db.load_active_managed_trades.return_value = {'trade': trade}
+        db.get_active_managed_trade_rows.return_value = [{'symbol': 'CANE', 'entry_order_id': 'entry-id'}]
+        evidence = {'count': 0, 'high': None, 'touches': [None]*3, 'complete': True}
+        with patch.object(controller, 'database', db), patch.object(controller, 'alpaca_ready', return_value=True), \
+             patch.object(controller, 'alpaca_get', side_effect=[
+                 {'symbol': 'CANE', 'side': 'buy', 'filled_at': '2026-10-02T13:55:34Z'},
+                 [{'date':'2026-10-02', 'open':'09:30', 'close':'16:00'}]]) as get, \
+             patch('core.target_audit.audit_trades', return_value=evidence) as audit:
+            result = controller.handle('/target_audit CANE')
+        self.assertIn('غير محسوم', result)
+        self.assertEqual(get.call_args_list[0].args[0], '/v2/orders/entry-id')
+        self.assertEqual(audit.call_args.args[1], self.start.replace(second=34))
 
     def test_invalid_symbol_does_not_read_database(self):
         import railway_controller as controller

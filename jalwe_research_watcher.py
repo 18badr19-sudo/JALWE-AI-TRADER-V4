@@ -107,6 +107,9 @@ STATE_FILE = (
 # CONFIG
 # ============================================================
 
+# Research remains active; Telegram defaults to execution/management alerts.
+QUIET_RESEARCH_ALERTS = os.getenv('JALWE_QUIET_RESEARCH_ALERTS', 'true').strip().lower() in {'true', '1', 'yes', 'on'}
+
 POLL_SECONDS = max(
     10,
     int(
@@ -1973,6 +1976,9 @@ def notify_if_changed(
     state: dict,
 ) -> str:
 
+    if QUIET_RESEARCH_ALERTS:
+        return 'RESEARCH_ALERTS_QUIET'
+
     symbol = str(
         payload.get(
             "symbol",
@@ -2344,7 +2350,7 @@ def notify_execution_lifecycle(
     if not symbol:
         return
 
-    if bool(
+    if not QUIET_RESEARCH_ALERTS and bool(
         jalwe.get(
             "ready_for_execution",
             False,
@@ -4186,6 +4192,7 @@ def main() -> None:
     )
 
     print_startup_health()
+    print('RESEARCH_ALERTS: ' + ('QUIET' if QUIET_RESEARCH_ALERTS else 'VERBOSE'), flush=True)
     get_decision_outcome_memory()
     print("DECISION_OUTCOME_MEMORY: ENABLED | horizon=60m | all decisions | research only", flush=True)
     print("STRATEGY_EXPERIMENTS: ENABLED | six native candidates | paired chronological validation | PAPER preference only", flush=True)

@@ -1669,6 +1669,23 @@ def build_telegram_message(
 # TELEGRAM SEND
 # ============================================================
 
+def telegram_report_parts(message: str, limit: int = 3800) -> list[str]:
+    """Telegram measures text limits in UTF-16 units; preserve all report content."""
+    parts = []
+    current = ""
+    units = 0
+    for char in message:
+        size = 2 if ord(char) > 0xFFFF else 1
+        if units + size > limit:
+            parts.append(current)
+            current, units = "", 0
+        current += char
+        units += size
+    if current:
+        parts.append(current)
+    return parts or [""]
+
+
 def send_telegram(
     message: str,
 ) -> tuple[
@@ -4060,11 +4077,11 @@ def maybe_send_opportunity_daily_report(
     except Exception:
         logger.exception("Decision outcome daily summary failed")
 
-    success, error = (
-        send_telegram(
-            message
-        )
-    )
+    success, error = True, None
+    for part in telegram_report_parts(message):
+        success, error = send_telegram(part)
+        if not success:
+            break
 
     if success:
         state[

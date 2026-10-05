@@ -215,6 +215,26 @@ class DecisionEngine:
             return {}
 
     @staticmethod
+    def _opportunity_evidence(analysis: Any, minimum_score: Any) -> dict:
+        """Freeze the scoring threshold; future config must not explain past decisions."""
+        try:
+            threshold = float(minimum_score)
+            score = float(analysis.score)
+            if not math.isfinite(threshold) or not math.isfinite(score):
+                return {}
+            candidates = getattr(analysis, "candidates", [])
+            best = candidates[0] if isinstance(candidates, (list, tuple)) and candidates else None
+            return {"score": score, "minimum_score": threshold,
+                    "approved": bool(analysis.approved),
+                    "grade": getattr(analysis.grade, "value", str(analysis.grade)),
+                    "best_strategy": (getattr(best.strategy, "value", str(best.strategy))
+                                      if best is not None else None),
+                    "reasons": list(getattr(analysis, "reasons", []) or []),
+                    "warnings": list(getattr(analysis, "warnings", []) or [])}
+        except (TypeError, ValueError, AttributeError):
+            return {}
+
+    @staticmethod
     def _session_experiment_evidence(analysis: Any, minimum_score: float) -> list[dict]:
         evidence = []
         for candidate in analysis.candidates:
@@ -1214,6 +1234,8 @@ class DecisionEngine:
             )
 
         gates["opportunity"] = bool(opportunity.approved)
+        base_metadata["opportunity_evidence"] = self._opportunity_evidence(
+            opportunity, getattr(self.opportunity_engine, "minimum_score", None))
 
         # ====================================================
         # 6. MARKET REGIME

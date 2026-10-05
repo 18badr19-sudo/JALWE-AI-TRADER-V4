@@ -2088,6 +2088,18 @@ def shared_apex_diagnostics_lines() -> list[str]:
     return lines
 
 
+def rejection_audit_text(date_value=None) -> str:
+    try:
+        from decision_outcome_memory import get_decision_outcome_memory
+        day = date_value or datetime.now(NY_TZ).date().isoformat()
+        memory = get_decision_outcome_memory()
+        return memory.rejection_report_text(memory.rejection_audit(day))
+    except (ValueError, TypeError):
+        return "استخدم /rejections أو /rejections YYYY-MM-DD (تاريخ نيويورك)."
+    except Exception:
+        return "تعذر قراءة سجل أسباب الرفض؛ حاول مرة أخرى."
+
+
 def no_trade_diagnostics_text() -> str:
     lines = [
         "🔎 تشخيص عدم وجود صفقة",
@@ -2560,6 +2572,7 @@ def help_text() -> str:
         "/bridge - فحص الربط\n"
         "/storage - فحص التخزين الدائم /app/data\n"
         "/why_no_trade - تشخيص سبب عدم وجود صفقة\n"
+        "/rejections - أسباب الرفض والانتظار اليوم (تاريخ NY اختياري)\n"
         "/help - عرض الأوامر\n\n"
         "🔔 سيرسل البوت تلقائيًا تنبيهًا عند كل "
         "BUY/SELL منفذ على Alpaca PAPER.\n"
@@ -2652,6 +2665,12 @@ def handle(text: str, requested_by=None) -> Any:
 
     if cmd == BTN_STORAGE or low == "/storage":
         return storage_status_text()
+
+    if low == "/rejections" or low.startswith("/rejections "):
+        parts = cmd.split()
+        if len(parts) > 2:
+            return "استخدم /rejections أو /rejections YYYY-MM-DD."
+        return rejection_audit_text(parts[1] if len(parts) == 2 else None)
 
     if (
         cmd == BTN_NO_TRADE

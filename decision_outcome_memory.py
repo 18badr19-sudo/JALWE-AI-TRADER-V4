@@ -262,6 +262,111 @@ class DecisionOutcomeMemory:
             raise
         return True
 
+    def rejection_audit(self, date_value) -> dict:
+        """Explain recorded decisions, never infer evaluation from default-false gates."""
+        day = datetime.fromisoformat(str(date_value)).date()
+        start = datetime(day.year, day.month, day.day, tzinfo=ZoneInfo("America/New_York"))
+        end = start + timedelta(days=1)
+        with self.db.connection() as conn:
+            rows = [dict(row) for row in conn.execute("""
+                SELECT symbol, research_version, source_state, reason, status,
+                       payload_json, result_json
+                FROM decision_outcome_memory WHERE decided_at >= ? AND decided_at < ?
+                ORDER BY decided_at ASC
+            """, (start.astimezone(timezone.utc).isoformat(),
+                  end.astimezone(timezone.utc).isoformat())).fetchall()]
+        states = {}
+        reviews = []
+        score_evidence = []
+        for state in ("REJECTED", "WATCHING", "READY_FOR_PAPER_EXECUTION"):
+            selected = [row for row in rows if row["source_state"] == state]
+            reasons = {}
+            for row in selected:
+                reason = row["reason"] or "No recorded reason"
+                group = reasons.setdefault(reason, {"reason": reason, "count": 0,
+                                                     "symbols": set(), "episodes": set()})
+                group["count"] += 1
+                group["symbols"].add(row["symbol"])
+                group["episodes"].add((row["symbol"], row["research_version"]))
+            groups = []
+            for group in reasons.values():
+                groups.append({**group, "symbols": sorted(group["symbols"]),
+                               "episodes": len(group["episodes"])})
+            states[state] = {"count": len(selected),
+                             "symbols": len({row["symbol"] for row in selected}),
+                             "episodes": len({(row["symbol"], row["research_version"]) for row in selected}),
+                             "reasons": sorted(groups, key=lambda g: (-g["count"], g["reason"]))}
+        rejected = [row for row in rows if row["source_state"] == "REJECTED"]
+        for row in rejected:
+            if row["reason"] != "OpportunityEngine rejected the setup.":
+                continue
+            try:
+                payload = json.loads(row["payload_json"])
+                evidence = ((payload.get("jalwe") or {}).get("metadata") or {}).get("opportunity_evidence") or {}
+                score, threshold = float(evidence["score"]), float(evidence["minimum_score"])
+                if math.isfinite(score) and math.isfinite(threshold) and evidence.get("approved") is False:
+                    score_evidence.append({"symbol": row["symbol"], "score": score,
+                                           "minimum_score": threshold})
+            except (TypeError, ValueError, KeyError):
+                continue
+        verified = [row for row in rejected if row["status"] == "COMPLETE"]
+        for row in verified:
+            try:
+                result = json.loads(row["result_json"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            if (result.get("levels") or {}).get("outcome") == "TARGET_FIRST":
+                reviews.append({"symbol": row["symbol"], "reason": row["reason"]})
+        return {"date": day.isoformat(), "states": states,
+                "rejected_complete": len(verified),
+                "rejected_incomplete": len(rejected) - len(verified),
+                "review_candidates": reviews, "opportunity_score_evidence": score_evidence}
+
+    @staticmethod
+    def rejection_report_text(audit: dict, *, compact: bool = False) -> str:
+        labels = {"REJECTED": "مرفوضة", "WATCHING": "انتظار", "READY_FOR_PAPER_EXECUTION": "جاهزة"}
+        translations = {
+            "OpportunityEngine rejected the setup.": "جودة الفرصة لم تجتز OpportunityEngine",
+            "Market regime / strategy router rejected the setup.": "حالة السوق أو اختيار الاستراتيجية",
+            "No session strategy reached the required quality threshold.": "جودة استراتيجية الجلسة أقل من المطلوب",
+            "Valid setup is close to its breakout trigger.": "ينتظر الوصول إلى مستوى الاختراق",
+            "Valid setup found but price is not yet near the trigger.": "السعر بعيد عن مستوى الاختراق",
+            "Price is too extended above the trigger. Do not chase.": "السعر ممتد؛ منع مطاردة الدخول",
+            "Breakout happened too many bars ago. Entry window expired.": "انتهت نافذة الدخول بعد الاختراق",
+            "Price reached the setup invalidation level before entry.": "وصل السعر إلى إلغاء الفرصة قبل الدخول",
+            "All native JALWE decision gates passed.": "اجتازت جميع بوابات القرار",
+        }
+        lines = [f"🔎 أسباب قلة الدخول — {audit['date']} NY"]
+        for state, label in labels.items():
+            data = audit["states"][state]
+            lines.append(f"{label}: {data['count']} قرار | {data['episodes']} تقرير سهم | {data['symbols']} سهم مختلف")
+            if state == "READY_FOR_PAPER_EXECUTION":
+                continue
+            for group in data["reasons"][:2 if compact else 4]:
+                reason = translations.get(group["reason"], group["reason"])
+                examples = ", ".join(group["symbols"][:3])
+                lines.append(f"• {reason[:150]}: {group['count']} | تقارير {group['episodes']} | {examples}")
+        scores = audit.get("opportunity_score_evidence", [])
+        if scores:
+            below = sum(row["score"] < row["minimum_score"] for row in scores)
+            lines.append(f"رفض جودة بدرجة وحد مسجلين: {len(scores)} | أقل من الحد: {below}")
+            if not compact:
+                for row in scores[:3]:
+                    lines.append(f"• {row['symbol']}: درجة {row['score']:.2f} / المطلوب {row['minimum_score']:.2f}")
+        lines.extend([
+            f"مرفوضة ببيانات 60m مكتملة: {audit['rejected_complete']} | غير مكتملة: {audit['rejected_incomplete']}",
+            f"مرشحة للمراجعة (هدف قبل الوقف لاحقًا): {len(audit['review_candidates'])}",
+        ])
+        if not compact:
+            for row in audit["review_candidates"][:3]:
+                lines.append(f"• مراجعة {row['symbol']}: {row['reason'][:120]}")
+        lines.extend([
+            "الأعداد قرارات بحثية؛ تغير القرار لنفس السهم قد يتكرر، والجاهزية لا تثبت تنفيذ شراء.",
+            "سبب الرفض مأخوذ من القرار؛ البوابات غير المفحوصة لا تُحسب أسبابًا إضافية.",
+            "الوصول لاحقًا إلى هدف لا يثبت خطأ الرفض؛ البيانات الناقصة لا تحسم النتيجة.",
+        ])
+        return "\n".join(lines)[:3900]
+
     def summary_for_ny_date(self, date_value) -> dict:
         day = datetime.fromisoformat(str(date_value)).date()
         start = datetime(day.year, day.month, day.day, tzinfo=ZoneInfo("America/New_York"))
@@ -288,7 +393,8 @@ class DecisionOutcomeMemory:
         statuses = {state: sum(g["count"] for g in groups if g["status"] == state)
                     for state in ("COMPLETE", "PENDING", "PARTIAL_DATA", "DATA_UNAVAILABLE", "UNOBSERVABLE")}
         return {"decisions": counts, "statuses": statuses, "groups": groups, "outcomes": outcomes,
-                "strategy_experiments": self.experiments.status_text()}
+                "strategy_experiments": self.experiments.status_text(),
+                "rejection_audit": self.rejection_audit(day)}
 
     @staticmethod
     def report_text(summary: dict) -> str:
@@ -307,6 +413,8 @@ class DecisionOutcomeMemory:
             "القياس من شموع 1m وبحسب تغطية مزوّد البيانات؛ أهداف 2R افتراضية عند غياب الهدف الأصلي.",
             "نتائج بحثية؛ لا تُحسب أرباحًا فعلية ولا تغيّر شروط الدخول.",
             summary.get("strategy_experiments", ""),
+            (DecisionOutcomeMemory.rejection_report_text(summary["rejection_audit"], compact=True)
+             if summary.get("rejection_audit") else ""),
         ])
 
 

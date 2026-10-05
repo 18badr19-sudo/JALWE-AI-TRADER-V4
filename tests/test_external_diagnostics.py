@@ -30,6 +30,35 @@ class ExternalDiagnosticsTests(unittest.TestCase):
         self.assertIn('NY', text)
         self.assertIn('30 دقيقة: 1', text)
 
+    def test_rejections_command_routes_default_and_date(self):
+        with patch.object(controller, 'rejection_audit_text', return_value='audit') as audit:
+            self.assertEqual(controller.handle('/rejections'), 'audit')
+            audit.assert_called_with(None)
+            self.assertEqual(controller.handle('/rejections 2026-10-05'), 'audit')
+            audit.assert_called_with('2026-10-05')
+            controller.handle('/rejections extra extra')
+            self.assertEqual(audit.call_count, 2)
+
+    def test_rejections_invalid_date_and_db_error_are_honest(self):
+        memory = Mock()
+        with patch('decision_outcome_memory.get_decision_outcome_memory', return_value=memory):
+            memory.rejection_audit.side_effect = ValueError('bad date')
+            self.assertIn('YYYY-MM-DD', controller.rejection_audit_text('bad'))
+            memory.rejection_audit.side_effect = RuntimeError('db unavailable')
+            self.assertIn('تعذر', controller.rejection_audit_text())
+
+    def test_opportunity_evidence_freezes_threshold_without_changing_analysis(self):
+        from intelligence.decision_engine import DecisionEngine
+        analysis = SimpleNamespace(score=66., approved=False, grade='REJECT',
+                                   candidates=[], reasons=['reason'], warnings=['warning'])
+        snapshot = DecisionEngine._opportunity_evidence(analysis, 70.)
+        self.assertEqual(snapshot['minimum_score'], 70.)
+        self.assertEqual(snapshot['score'], 66.)
+        self.assertFalse(snapshot['approved'])
+        self.assertEqual(analysis.score, 66.)
+        self.assertEqual(DecisionEngine._opportunity_evidence(analysis, None), {})
+
+
 
 if __name__ == '__main__':
     unittest.main()

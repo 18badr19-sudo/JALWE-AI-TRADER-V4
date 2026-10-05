@@ -1992,6 +1992,27 @@ def _env_bool(name: str, default: bool = False) -> bool:
     }
 
 
+def extended_exit_status_text() -> str:
+    if not _env_bool('JALWE_EXTENDED_EXIT_ENABLED', True):
+        return '🌙 البيع خارج الجلسة: معطّل بالإعدادات'
+    try:
+        with database.connection() as conn:
+            row = conn.execute(
+                "SELECT metadata_json FROM system_events "
+                "WHERE event_type = 'EXTENDED_EXIT_DATA_ACCESS' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        payload = json.loads(row['metadata_json']) if row else {}
+    except Exception:
+        payload = {}
+    if payload.get('status') == 'UNAVAILABLE':
+        if payload.get('reason') == 'SUBSCRIPTION_REQUIRED':
+            return '🌙 البيع خارج الجلسة: متعطّل — صلاحية بيانات SIP غير متاحة حسب آخر فحص'
+        return '🌙 البيع خارج الجلسة: متعطّل — تعذر الوصول للبيانات حسب آخر فحص'
+    if payload.get('status') == 'AVAILABLE':
+        return '🌙 البيع خارج الجلسة: البيانات متاحة حسب آخر فحص؛ التنفيذ مشروط بسعر حديث'
+    return '🌙 البيع خارج الجلسة: صلاحية البيانات غير مؤكدة'
+
+
 def status_text() -> str:
     from service_health import apex_status_text, read_apex_health
     apex_status = apex.status() if MANAGE_APEX_CHILD else apex_status_text(read_apex_health())
@@ -2031,6 +2052,7 @@ def status_text() -> str:
         f"{'مفعّل' if AUTO_LEARNING else 'معطّل'}\n"
         f"📄 تنفيذ JALWE على Alpaca PAPER: "
         f"{'مفعّل' if paper_auto else 'معطّل'}\n"
+        f"{extended_exit_status_text()}\n"
         f"🚦 الصفقات الجديدة: "
         f"{'مسموحة' if load_runtime_controls().get('allow_new_entries', True) else 'موقوفة'}\n"
         f"🚨 طلب إغلاق طارئ: "

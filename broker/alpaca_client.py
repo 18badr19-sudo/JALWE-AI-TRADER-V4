@@ -482,6 +482,8 @@ class AlpacaClient:
             str
         ] = None,
 
+        before_submit=None,
+
     ) -> Any:
         """
         Submit a market order to Alpaca PAPER.
@@ -562,6 +564,9 @@ class AlpacaClient:
                 ),
             )
         )
+
+        if before_submit is not None:
+            before_submit()
 
         order = (
             self.client

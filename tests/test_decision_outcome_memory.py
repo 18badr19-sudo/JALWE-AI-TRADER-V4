@@ -284,6 +284,72 @@ class OutcomeMemoryTests(unittest.TestCase):
         self.assertEqual(payload["jalwe"]["state"], "REJECTED")
         ns["get_paper_trade_orchestrator"].assert_not_called()
 
+    def test_audit_uses_recorded_reason_not_default_false_gates(self):
+        self.memory.record(self.payload(gates={"market_data": True, "features": True,
+                           "opportunity": False, "trigger": False, "risk": False}), "v1")
+        audit = self.memory.rejection_audit("2026-10-02")
+        reasons = audit["states"]["REJECTED"]["reasons"]
+        self.assertEqual(len(reasons), 1)
+        self.assertEqual(reasons[0]["reason"], "OpportunityEngine rejected the setup.")
+        report = self.memory.rejection_report_text(audit)
+        self.assertIn("OpportunityEngine", report)
+        self.assertNotIn("risk:", report)
+
+    def test_audit_counts_rechecks_separately_from_reports_and_symbols(self):
+        self.memory.record(self.payload(), "v1")
+        self.memory.record(self.payload(reason="changed reason"), "v1")
+        self.memory.record(self.payload(), "v2")
+        self.memory.record(self.payload(state="WATCHING"), "v1")
+        audit = self.memory.rejection_audit("2026-10-02")
+        self.assertEqual(audit["states"]["REJECTED"]["count"], 3)
+        self.assertEqual(audit["states"]["REJECTED"]["episodes"], 2)
+        self.assertEqual(audit["states"]["REJECTED"]["symbols"], 1)
+        self.assertEqual(audit["states"]["WATCHING"]["count"], 1)
+
+    def test_audit_complete_target_first_only_is_candidate_for_review(self):
+        self.memory.record(self.payload(), "v1")
+        self.memory.record(self.payload(reason="other"), "v2")
+        with self.db.connection() as conn:
+            conn.execute("UPDATE decision_outcome_memory SET status='COMPLETE', result_json=? WHERE research_version='v1'",
+                         (json.dumps({"levels": {"outcome": "TARGET_FIRST"}}),))
+            conn.execute("UPDATE decision_outcome_memory SET status='PARTIAL_DATA', result_json=? WHERE research_version='v2'",
+                         (json.dumps({"levels": {"outcome": "TARGET_FIRST"}}),))
+        audit = self.memory.rejection_audit("2026-10-02")
+        self.assertEqual(audit["rejected_complete"], 1)
+        self.assertEqual(audit["rejected_incomplete"], 1)
+        self.assertEqual(len(audit["review_candidates"]), 1)
+        self.assertIn("لا يثبت خطأ الرفض", self.memory.rejection_report_text(audit))
+
+    def test_audit_ny_boundary_and_empty_day(self):
+        self.memory.record(self.payload(), "v1")
+        earlier = self.payload()
+        earlier["timestamp"] = "2026-10-02T03:59:00+00:00"
+        self.memory.record(earlier, "v2")
+        audit = self.memory.rejection_audit("2026-10-02")
+        self.assertEqual(audit["states"]["REJECTED"]["count"], 1)
+        empty = self.memory.rejection_audit("2026-10-03")
+        self.assertEqual(empty["states"]["REJECTED"]["count"], 0)
+
+    def test_audit_threshold_comes_from_immutable_snapshot_only(self):
+        payload = self.payload()
+        payload["jalwe"]["metadata"]["opportunity_evidence"] = {
+            "score": 66., "minimum_score": 70., "approved": False}
+        self.memory.record(payload, "v1")
+        self.memory.record(self.payload(), "legacy")
+        audit = self.memory.rejection_audit("2026-10-02")
+        self.assertEqual(len(audit["opportunity_score_evidence"]), 1)
+        report = self.memory.rejection_report_text(audit)
+        self.assertIn("درجة 66.00 / المطلوب 70.00", report)
+        self.assertIn("أقل من الحد: 1", report)
+
+    def test_audit_is_read_only_and_summary_contains_it(self):
+        self.memory.record(self.payload(), "v1")
+        before = self.row()
+        summary = self.memory.summary_for_ny_date("2026-10-02")
+        self.assertEqual(before, self.row())
+        self.assertIn("أسباب قلة الدخول", self.memory.report_text(summary))
+
+
 
 if __name__ == "__main__":
     unittest.main()

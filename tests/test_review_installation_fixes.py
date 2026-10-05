@@ -172,7 +172,10 @@ class InstallationFixTests(unittest.TestCase):
             engine.broker = Mock()
             engine.broker.market_is_open.return_value = True
             engine.broker.get_position.return_value = NS(qty='8')
-            engine.broker.submit_market_order.side_effect = TimeoutError('Accepted, response lost')
+            def accepted_response_lost(**options):
+                options['before_submit']()
+                raise TimeoutError('Accepted, response lost')
+            engine.broker.submit_market_order.side_effect = accepted_response_lost
             with self.assertRaises(TimeoutError):
                 submit_prepared_exit(db, 't', trade, decision, engine, manager)
             persisted = db.load_managed_trade('t')

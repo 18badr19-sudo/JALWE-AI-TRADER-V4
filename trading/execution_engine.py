@@ -1427,10 +1427,11 @@ class ExecutionEngine:
             response = self.broker.submit_extended_exit(symbol=symbol, quantity=quantity,
                 limit_price=limit_price, client_order_id=client_order_id, before_submit=before_submit)
         else:
+            submission_options = {}
             if before_submit is not None:
-                before_submit()
+                submission_options['before_submit'] = before_submit
             response = self.broker.submit_market_order(symbol=symbol, quantity=quantity,
-                side='SELL', client_order_id=client_order_id)
+                side='SELL', client_order_id=client_order_id, **submission_options)
         return self._build_broker_order(broker_response=response, symbol=symbol, side=TradeSide.SELL,
             quantity=quantity, requested_price=requested_price, client_order_id=client_order_id,
             metadata={'order_role': 'EXIT', 'exit_reason': reason, 'extended_hours': bool(extended_hours),

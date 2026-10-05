@@ -24,6 +24,20 @@ class PaperTargetTouchTests(
     unittest.TestCase
 ):
 
+    def test_actual_cane_target_waits_for_confirmed_fill_before_raising_stop(self):
+        manager = TradeManager()
+        trade = manager.create_trade('CANE', 11.66, 8, 11.58, 11.82, 11.90, 11.98)
+        self.assertNotEqual(manager.evaluate(trade, 11.815).action, TradeAction.TAKE_PROFIT_1)
+        decision = manager.evaluate(trade, 11.82)
+        self.assertEqual(decision.action, TradeAction.TAKE_PROFIT_1)
+        self.assertEqual(decision.quantity, 3)
+        self.assertEqual(trade.remaining_quantity, 8)
+        self.assertAlmostEqual(trade.current_stop, 11.58)
+        self._fill_exit(manager, trade, decision, 11.82, 'CANE-T1')
+        self.assertEqual(trade.remaining_quantity, 5)
+        self.assertTrue(trade.t1_completed)
+        self.assertAlmostEqual(trade.current_stop, 11.82)
+
     @staticmethod
     def _fill_exit(
         manager: TradeManager,

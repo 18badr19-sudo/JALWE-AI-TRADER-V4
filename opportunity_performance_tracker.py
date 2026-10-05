@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from decision_outcome_memory import DecisionOutcomeMemory
 from core.database import database
 from market.market_data import get_market_data
 
@@ -32,6 +33,7 @@ class OpportunityPerformanceTracker:
     It never submits orders and never changes DecisionEngine outcomes.
     """
 
+    PROTOCOL = "fixed-60m-complete-bars-v2"
     CHECKPOINTS = (5, 15, 30, 60)
     PRE_ENTRY_GATES = (
         "market_data",
@@ -270,40 +272,28 @@ class OpportunityPerformanceTracker:
         else:
             idx = idx.tz_convert("UTC")
 
-        target = pd.Timestamp(target_time)
-        eligible = bars.loc[idx < target]
-
-        if eligible.empty:
+        target = pd.Timestamp(target_time) - pd.Timedelta(minutes=1)
+        if target not in idx:
             return None
-
-        value = float(eligible["close"].iloc[-1])
+        value = float(bars.loc[target, "close"])
         return value if math.isfinite(value) and value > 0 else None
 
     def _update_row(self, row: dict[str, Any], now: datetime) -> None:
         symbol = str(row["symbol"]).upper()
         started_at = self._parse_utc(row["started_at"])
-        age_minutes = (now - started_at).total_seconds() / 60.0
-
-        bars = self.market_data.get_bars(
-            symbol=symbol,
-            timeframe="1m",
-            limit=180,
-        ).copy()
-
-        idx = pd.DatetimeIndex(bars.index)
-        if idx.tz is None:
-            idx = idx.tz_localize("UTC")
-        else:
-            idx = idx.tz_convert("UTC")
-
-        bars.index = idx
-
-        # Do not count the partly elapsed minute in which the signal appeared.
-        first_full_minute = pd.Timestamp(started_at).ceil("min")
-        segment = bars.loc[bars.index >= first_full_minute]
-
-        if segment.empty:
+        window_start = pd.Timestamp(started_at).ceil("min").to_pydatetime()
+        window_end = window_start + timedelta(minutes=60)
+        if now < window_end:
             return
+        frame = self.market_data.get_observation_bars(symbol, window_start, window_end)
+        segment = DecisionOutcomeMemory._valid_bars(frame, window_start, window_end)
+        metadata = json.loads(row.get("metadata_json") or "{}")
+        metadata.update({"measurement_protocol": self.PROTOCOL,
+                         "observed_minutes": len(segment), "expected_minutes": 60,
+                         "data_feed": frame.attrs.get("data_feed", "unknown"),
+                         "window_start": window_start.isoformat(),
+                         "window_end": window_end.isoformat()})
+        complete = len(segment) == 60
 
         entry = float(row["entry_price"])
         stop = float(row["stop_price"])
@@ -311,47 +301,24 @@ class OpportunityPerformanceTracker:
         t2 = float(row["target_2"])
         t3 = float(row["target_3"])
 
-        mfe_price = float(segment["high"].max())
-        mae_price = float(segment["low"].min())
-
-        mfe_pct = (mfe_price - entry) / entry * 100.0
-        mae_pct = (mae_price - entry) / entry * 100.0
-
+        mfe_price = float(segment["high"].max()) if not segment.empty else None
+        mae_price = float(segment["low"].min()) if not segment.empty else None
+        # Excursions include the reference entry: no adverse move means zero MAE.
         values: dict[str, Any] = {
-            "mfe_price": mfe_price,
-            "mae_price": mae_price,
-            "mfe_pct": mfe_pct,
-            "mae_pct": mae_pct,
+            "mfe_price": mfe_price, "mae_price": mae_price,
+            "mfe_pct": max(0., (mfe_price - entry) / entry * 100.) if mfe_price is not None else None,
+            "mae_pct": min(0., (mae_price - entry) / entry * 100.) if mae_price is not None else None,
+            "metadata_json": json.dumps(metadata, default=str),
         }
-
         for minutes in self.CHECKPOINTS:
-            column = f"price_{minutes}m"
-            if row.get(column) is None and age_minutes >= minutes + 1:
-                values[column] = self._checkpoint_price(
-                    segment,
-                    started_at + timedelta(minutes=minutes),
-                )
+            values[f"price_{minutes}m"] = self._checkpoint_price(
+                segment, window_start + timedelta(minutes=minutes))
 
-        hit_stop = row.get("hit_stop_at") or self._first_touch_time(
-            segment,
-            level=stop,
-            mode="low",
-        )
-        hit_t1 = row.get("hit_t1_at") or self._first_touch_time(
-            segment,
-            level=t1,
-            mode="high",
-        )
-        hit_t2 = row.get("hit_t2_at") or self._first_touch_time(
-            segment,
-            level=t2,
-            mode="high",
-        )
-        hit_t3 = row.get("hit_t3_at") or self._first_touch_time(
-            segment,
-            level=t3,
-            mode="high",
-        )
+        # Recompute from the fixed window; old rolling-window touches are not evidence.
+        hit_stop = self._first_touch_time(segment, level=stop, mode="low")
+        hit_t1 = self._first_touch_time(segment, level=t1, mode="high")
+        hit_t2 = self._first_touch_time(segment, level=t2, mode="high")
+        hit_t3 = self._first_touch_time(segment, level=t3, mode="high")
 
         values.update(
             {
@@ -362,8 +329,8 @@ class OpportunityPerformanceTracker:
             }
         )
 
-        first_level = row.get("first_level_hit")
-        first_level_at = row.get("first_level_hit_at")
+        first_level = None
+        first_level_at = None
 
         if not first_level:
             stop_dt = self._parse_utc(hit_stop) if hit_stop else None
@@ -389,20 +356,17 @@ class OpportunityPerformanceTracker:
         values["first_level_hit"] = first_level
         values["first_level_hit_at"] = first_level_at
 
-        # Give the 60-minute checkpoint a few extra minutes for the final
-        # completed 1-minute bar to become available.
-        values["status"] = (
-            "COMPLETE"
-            if age_minutes >= 65.0
-            else "TRACKING"
-        )
+        values["status"] = ("COMPLETE" if complete else
+                            "PARTIAL_DATA" if now >= window_end + timedelta(minutes=5)
+                            else "TRACKING")
+        if not complete:
+            values["first_level_hit"] = None
+            values["first_level_hit_at"] = None
 
         assignments = []
         params = []
 
         for name, value in values.items():
-            if value is None and name.startswith("price_"):
-                continue
             assignments.append(f"{name} = ?")
             params.append(value)
 
@@ -455,6 +419,11 @@ class OpportunityPerformanceTracker:
                 self._update_row(row, now)
                 updated += 1
             except Exception as exc:
+                end = pd.Timestamp(self._parse_utc(row["started_at"])).ceil("min").to_pydatetime() + timedelta(minutes=65)
+                if now >= end:
+                    with database.connection() as conn:
+                        conn.execute("UPDATE opportunity_performance SET status = 'DATA_UNAVAILABLE' WHERE signal_key = ?",
+                                     (row["signal_key"],))
                 try:
                     database.log_event(
                         event_type="OPPORTUNITY_TRACKER_UPDATE_ERROR",
@@ -508,7 +477,7 @@ class OpportunityPerformanceTracker:
 
         completed = [
             row for row in rows
-            if row.get("status") == "COMPLETE"
+            if OpportunityPerformanceTracker._verified_complete(row)
         ]
 
         stop_first = sum(
@@ -547,7 +516,9 @@ class OpportunityPerformanceTracker:
             "date": local_date.isoformat(),
             "total": len(rows),
             "completed": len(completed),
-            "tracking": len(rows) - len(completed),
+            "tracking": sum(row.get("status") == "TRACKING" for row in rows),
+            "incomplete": sum(row.get("status") in {"PARTIAL_DATA", "DATA_UNAVAILABLE"} for row in rows),
+            "unverified": sum(row.get("status") == "COMPLETE" and not self._verified_complete(row) for row in rows),
             "stop_first": stop_first,
             "target_first": target_first,
             "ambiguous": ambiguous,
@@ -567,6 +538,16 @@ class OpportunityPerformanceTracker:
         }
 
     @staticmethod
+    def _verified_complete(row: dict[str, Any]) -> bool:
+        try:
+            meta = json.loads(row.get("metadata_json") or "{}")
+            return (row.get("status") == "COMPLETE"
+                    and meta.get("measurement_protocol") == OpportunityPerformanceTracker.PROTOCOL
+                    and meta.get("observed_minutes") == 60)
+        except (ValueError, TypeError):
+            return False
+
+    @staticmethod
     def build_daily_report(summary: dict[str, Any]) -> str:
         def fmt(value: Any) -> str:
             try:
@@ -580,6 +561,8 @@ class OpportunityPerformanceTracker:
             f"الفرص المؤهلة للتتبع: {summary.get('total', 0)}",
             f"اكتمل تتبع 60 دقيقة: {summary.get('completed', 0)}",
             f"ما زالت تحت التتبع: {summary.get('tracking', 0)}",
+            f"بيانات ناقصة/غير متاحة: {summary.get('incomplete', 0)}",
+            f"سجلات قديمة لم تُتحقق تغطيتها: {summary.get('unverified', 0)}",
             "",
             f"🎯 وصل T1: {summary.get('hit_t1', 0)}",
             f"🎯 وصل T2: {summary.get('hit_t2', 0)}",
@@ -596,15 +579,30 @@ class OpportunityPerformanceTracker:
         rows = list(summary.get("rows") or [])
         completed = [
             row for row in rows
-            if row.get("status") == "COMPLETE"
+            if OpportunityPerformanceTracker._verified_complete(row)
         ]
+
+        groups = sorted({str(row.get("strategy") or "N/A") for row in rows})
+        if groups:
+            lines.extend(["", "حسب الاستراتيجية — نوافذ مكتملة فقط:"])
+        for strategy in groups:
+            group = [row for row in rows if str(row.get("strategy") or "N/A") == strategy]
+            valid = [row for row in group if OpportunityPerformanceTracker._verified_complete(row)]
+            target = sum(row.get("first_level_hit") == "T1" for row in valid)
+            stop = sum(row.get("first_level_hit") == "STOP" for row in valid)
+            symbols = len({row["symbol"] for row in valid})
+            mfe = [float(row["mfe_pct"]) for row in valid if row.get("mfe_pct") is not None]
+            mae = [float(row["mae_pct"]) for row in valid if row.get("mae_pct") is not None]
+            lines.append(f"• {strategy}: مكتملة {len(valid)}/{len(group)} | هدف أولًا {target} | وقف أولًا {stop} | أسهم مختلفة {symbols}")
+            if valid:
+                lines.append(f"  متوسط MFE {fmt(sum(mfe) / len(mfe) if mfe else None)} | MAE {fmt(sum(mae) / len(mae) if mae else None)}")
 
         if completed:
             lines.extend(["", "أبرز الفرص:"])
 
             ranked = sorted(
                 completed,
-                key=lambda row: float(row.get("mfe_pct") or -999.0),
+                key=lambda row: float(row["mfe_pct"]) if row.get("mfe_pct") is not None else -999.0,
                 reverse=True,
             )
 
@@ -621,6 +619,9 @@ class OpportunityPerformanceTracker:
         lines.extend(
             [
                 "",
+                "القياس من أول دقيقة كاملة، داخل 60 دقيقة فقط؛ النتائج تتطلب 60 شمعة صحيحة.",
+                "تغطية المزود لا تعني تغطية السوق كله؛ غياب شمعة لا يعني ثبات السعر.",
+                "المقارنة وصفية، وقد تتكرر الفرص لنفس السهم؛ لا تختار استراتيجية تلقائيًا.",
                 "ملاحظة: هذا تقييم للفرص المؤهلة، وليس صفقات منفذة فعليًا.",
             ]
         )

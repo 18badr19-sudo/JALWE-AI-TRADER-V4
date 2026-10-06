@@ -318,6 +318,8 @@ class OutcomeMemoryTests(unittest.TestCase):
         self.assertEqual(audit["rejected_complete"], 1)
         self.assertEqual(audit["rejected_incomplete"], 1)
         self.assertEqual(len(audit["review_candidates"]), 1)
+        self.assertEqual(audit["review_candidates"][0]["research_version"], "v1")
+        self.assertEqual(audit["review_candidates"][0]["decided_at"], self.payload()["timestamp"])
         self.assertIn("لا يثبت خطأ الرفض", self.memory.rejection_report_text(audit))
 
     def test_audit_ny_boundary_and_empty_day(self):

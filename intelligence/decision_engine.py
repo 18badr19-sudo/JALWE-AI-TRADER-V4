@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import math
 
 from dataclasses import dataclass, field
@@ -1073,6 +1074,13 @@ class DecisionEngine:
             )
 
         feature_diagnostics.update(self._apply_feature_freshness(features, timeframe))
+        if features.data_is_stale:
+            logger.info("FEATURE_FRESHNESS_DIAGNOSTIC %s", json.dumps({
+                "symbol": symbol, "timeframe": timeframe,
+                "feed": base_metadata.get("decision_data_feed", "unknown"),
+                "bar_timestamp": getattr(features, "timestamp", None),
+                "latest_bar_age_minutes": feature_diagnostics.get("latest_bar_age_minutes"),
+                "max_bar_age_minutes": feature_diagnostics.get("max_bar_age_minutes")}, default=str))
 
         # Freeze the evidence available at this decision, including failed quality
         # checks. Outcome research must never substitute a later feature snapshot.
@@ -1721,3 +1729,4 @@ def get_decision_engine() -> DecisionEngine:
         _decision_engine = DecisionEngine()
 
     return _decision_engine
+

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import time
 
@@ -14,6 +15,9 @@ import pandas as pd
 from decision_outcome_memory import DecisionOutcomeMemory
 from core.database import database
 from market.market_data import get_market_data
+from market.research_diagnostics import coverage_diagnostics, diagnostic_counts, diagnostic_text, error_diagnostics
+
+logger = logging.getLogger(__name__)
 
 
 class OpportunityPerformanceTracker:
@@ -175,6 +179,7 @@ class OpportunityPerformanceTracker:
         signal_key = hashlib.sha256(raw_key).hexdigest()
 
         metadata = {
+            "decision_data_feed": (jalwe.get("metadata") or {}).get("decision_data_feed", "unknown"),
             "research_version": version,
             "reason": jalwe.get("reason"),
             "gates": jalwe.get("gates"),
@@ -288,6 +293,7 @@ class OpportunityPerformanceTracker:
         frame = self.market_data.get_observation_bars(symbol, window_start, window_end)
         segment = DecisionOutcomeMemory._valid_bars(frame, window_start, window_end)
         metadata = json.loads(row.get("metadata_json") or "{}")
+        metadata["data_diagnostics"] = coverage_diagnostics(frame, segment, window_start, window_end)
         metadata.update({"measurement_protocol": self.PROTOCOL,
                          "observed_minutes": len(segment), "expected_minutes": 60,
                          "data_feed": frame.attrs.get("data_feed", "unknown"),
@@ -359,6 +365,11 @@ class OpportunityPerformanceTracker:
         values["status"] = ("COMPLETE" if complete else
                             "PARTIAL_DATA" if now >= window_end + timedelta(minutes=5)
                             else "TRACKING")
+        if values["status"] != "TRACKING":
+            logger.info("RESEARCH_DATA_DIAGNOSTIC %s", json.dumps({
+                "source": "OPPORTUNITY", "symbol": symbol, "signal_key": row["signal_key"],
+                "feed": frame.attrs.get("data_feed", "unknown"), "status": values["status"],
+                **metadata["data_diagnostics"]}))
         if not complete:
             values["first_level_hit"] = None
             values["first_level_hit_at"] = None
@@ -419,19 +430,25 @@ class OpportunityPerformanceTracker:
                 self._update_row(row, now)
                 updated += 1
             except Exception as exc:
+                diagnostics = error_diagnostics(exc)
+                metadata = json.loads(row.get("metadata_json") or "{}")
+                metadata["data_diagnostics"] = diagnostics
                 end = pd.Timestamp(self._parse_utc(row["started_at"])).ceil("min").to_pydatetime() + timedelta(minutes=65)
-                if now >= end:
-                    with database.connection() as conn:
-                        conn.execute("UPDATE opportunity_performance SET status = 'DATA_UNAVAILABLE' WHERE signal_key = ?",
-                                     (row["signal_key"],))
+                with database.connection() as conn:
+                    conn.execute("UPDATE opportunity_performance SET status = ?, metadata_json = ? WHERE signal_key = ?",
+                                 ("DATA_UNAVAILABLE" if now >= end else "TRACKING",
+                                  json.dumps(metadata), row["signal_key"]))
+                logger.warning("RESEARCH_DATA_DIAGNOSTIC %s", json.dumps({
+                    "source": "OPPORTUNITY", "symbol": row["symbol"], **diagnostics}))
                 try:
                     database.log_event(
                         event_type="OPPORTUNITY_TRACKER_UPDATE_ERROR",
                         severity="WARNING",
-                        message=f"{row.get('symbol')}: {exc}",
+                        message=f"{row.get('symbol')}: {diagnostics['reason']}",
                         metadata={
                             "signal_key": row.get("signal_key"),
                             "symbol": row.get("symbol"),
+                            "data_diagnostics": diagnostics,
                         },
                     )
                 except Exception:
@@ -535,6 +552,7 @@ class OpportunityPerformanceTracker:
                 if mae_values else None
             ),
             "rows": rows,
+            "data_diagnostic_counts": diagnostic_counts(rows),
         }
 
     @staticmethod
@@ -576,6 +594,9 @@ class OpportunityPerformanceTracker:
             f"📉 متوسط أسوأ حركة MAE: {fmt(summary.get('avg_mae_pct'))}",
         ]
 
+        reasons = diagnostic_text(summary.get("data_diagnostic_counts") or {})
+        if reasons:
+            lines.append("أسباب نقص بيانات التقييم الأصلي: " + reasons)
         rows = list(summary.get("rows") or [])
         completed = [
             row for row in rows
@@ -639,3 +660,4 @@ def get_opportunity_performance_tracker() -> OpportunityPerformanceTracker:
         _tracker = OpportunityPerformanceTracker()
 
     return _tracker
+

@@ -390,6 +390,7 @@ class MarketData:
 
     def get_observation_bars(
         self, symbol: str, start: datetime, end: datetime,
+        *, feed: Optional[str] = None,
     ) -> pd.DataFrame:
         """Read a fixed research window, including after restart. No latest-bar fallback."""
         symbol = self._normalize_symbol(symbol)
@@ -399,24 +400,35 @@ class MarketData:
         end = end.astimezone(timezone.utc)
         if not timedelta(0) < end - start <= timedelta(minutes=60):
             raise ValueError("Observation window must be at most 60 minutes.")
+        observation_feed = self.feed if feed is None else self._resolve_feed(feed)
         request = StockBarsRequest(
             symbol_or_symbols=symbol, timeframe=self._timeframe("1m"),
-            start=start, end=end, sort=Sort.ASC, limit=1000, feed=self.feed,
+            start=start, end=end, sort=Sort.ASC, limit=1000, feed=observation_feed,
         )
         try:
             frame = self.client.get_stock_bars(request).df
         except Exception as exc:
             raise MarketDataError(f"Observation data unavailable for {symbol}") from exc
         if frame is None or frame.empty:
-            return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+            frame = pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
         if isinstance(frame.index, pd.MultiIndex):
             frame = frame.xs(symbol, level=0)
         frame = frame.copy()
         frame.index = pd.to_datetime(frame.index, utc=True, errors="coerce")
         frame = frame.loc[(frame.index >= start) & (frame.index < end)]
         frame = completed_intraday_bars(frame.sort_index(), "1m", end)
-        frame.attrs["data_feed"] = self.get_feed_name()
+        frame.attrs["data_feed"] = str(getattr(observation_feed, "value", observation_feed)).lower()
         return frame
+
+    def get_research_observation_bars(self, symbol, start, end, *, as_of=None):
+        """Historical SIP only after the free-access delay; execution feed is untouched."""
+        from market.research_diagnostics import SIP_RESEARCH_DELAY_MINUTES
+        now = as_of or datetime.now(timezone.utc)
+        if end.tzinfo is None or now.tzinfo is None:
+            raise ValueError("Research timestamps must include a timezone")
+        if now - end < timedelta(minutes=SIP_RESEARCH_DELAY_MINUTES):
+            raise ValueError("Historical SIP research window is not old enough")
+        return self.get_observation_bars(symbol, start, end, feed="sip")
 
     # ========================================================
     # LATEST QUOTE
@@ -825,3 +837,4 @@ def get_market_data() -> MarketData:
         market_data = MarketData()
 
     return market_data
+

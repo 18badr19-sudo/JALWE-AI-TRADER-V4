@@ -729,10 +729,21 @@ class RecoveryEngine:
     def _recover_legacy_stop_rejection(self, trade_id, trade, lookup_error):
         """Recover old stuck intents only with persisted rejection and broker evidence."""
         metadata = trade.metadata
+        def blocked(reason, **details):
+            seen = getattr(self, '_legacy_stop_diagnostics', set())
+            key = (trade_id, reason)
+            if key not in seen:
+                logger.warning('Legacy stop recovery blocked | trade_id=%s reason=%s details=%s',
+                               trade_id, reason, details)
+                seen.add(key)
+                self._legacy_stop_diagnostics = seen
+            return False
         if (getattr(lookup_error, 'status_code', None) != 404
                 or metadata.get('protective_stop_prepared_at')
                 or metadata.get('protective_stop_submission_state') != 'SUBMITTING'):
-            return False
+            return blocked('INTENT_NOT_ELIGIBLE', status_code=getattr(lookup_error, 'status_code', None),
+                           state=metadata.get('protective_stop_submission_state'),
+                           prepared_at=metadata.get('protective_stop_prepared_at'))
         with database.connection() as conn:
             rows = conn.execute("""
                 SELECT message, metadata_json FROM system_events
@@ -747,7 +758,8 @@ class RecoveryEngine:
                 break
         if (payload is None or float(payload.get('stop_price', 0))
                 != float(metadata.get('protective_stop_price', -1))):
-            return False
+            return blocked('REJECTION_EVIDENCE_UNAVAILABLE', found=payload is not None,
+                           stored_stop=metadata.get('protective_stop_price'))
         # A 404 alone is never permission to resend an uncertain order.
         orders = self._get_broker_orders()
         for order in orders:
@@ -755,13 +767,15 @@ class RecoveryEngine:
                     and self._value(getattr(order, 'side', '')).lower() == 'sell'
                     and self._value(getattr(order, 'status', '')).lower()
                     not in {'filled', 'canceled', 'cancelled', 'expired', 'rejected'}):
-                return False
+                return blocked('ACTIVE_SELL_EXISTS', order_id=str(getattr(order, 'id', '')),
+                               status=self._value(getattr(order, 'status', '')))
         position = self._broker_read_with_retry(
             lambda: self.reconciliation.verify_position(trade.symbol),
             label='legacy_stop_position')
         if (not position.get('exists') or self._safe_int(position.get('quantity'))
                 != int(trade.remaining_quantity) or int(trade.remaining_quantity) <= 0):
-            return False
+            return blocked('POSITION_MISMATCH', broker=position.get('quantity'),
+                           local=trade.remaining_quantity, exists=position.get('exists'))
         persist_stop_rejection(database, trade_id, trade, payload,
                                source='LEGACY_PERSISTED_422_AND_BROKER_READS')
         logger.warning('Recovered explicitly rejected legacy protective stop | trade_id=%s symbol=%s remaining=%s',

@@ -391,6 +391,7 @@ BTN_JALWE_OFF = "⛔ إيقاف JALWE"
 BTN_BRIDGE = "📡 فحص الربط"
 BTN_STORAGE = "💾 فحص التخزين"
 BTN_NO_TRADE = "🔎 لماذا ما فيه صفقة؟"
+BTN_REJECTIONS = "🔎 أسباب قلة الدخول"
 BTN_HELP = "ℹ️ الأوامر"
 
 KEYBOARD = {
@@ -406,6 +407,7 @@ KEYBOARD = {
         [{"text": BTN_APEX_ON}, {"text": BTN_APEX_OFF}],
         [{"text": BTN_JALWE_ON}, {"text": BTN_JALWE_OFF}],
         [{"text": BTN_NO_TRADE}],
+        [{"text": BTN_REJECTIONS}],
         [{"text": BTN_STORAGE}],
         [{"text": BTN_BRIDGE}, {"text": BTN_HELP}],
     ],
@@ -2665,6 +2667,9 @@ def handle(text: str, requested_by=None) -> Any:
 
     if cmd == BTN_STORAGE or low == "/storage":
         return storage_status_text()
+
+    if cmd == BTN_REJECTIONS:
+        return rejection_audit_text()
 
     if low == "/rejections" or low.startswith("/rejections "):
         parts = cmd.split()

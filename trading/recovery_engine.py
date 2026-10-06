@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import math
 import time
 from datetime import datetime, timezone
@@ -13,6 +14,7 @@ from trading.reconciliation_engine import get_reconciliation_engine
 from trading.exit_submission import recover_exit_submission
 from core.lifecycle_audit import checkpoint
 from trading.protective_fills import apply_protective_stop_snapshot
+from trading.protective_submission import stop_price_rejection, persist_stop_rejection
 from trading.trade_manager import TradeStage, get_trade_manager
 
 
@@ -724,16 +726,63 @@ class RecoveryEngine:
     # BROKER PROTECTIVE STOP RECOVERY
     # ========================================================
 
+    def _recover_legacy_stop_rejection(self, trade_id, trade, lookup_error):
+        """Recover old stuck intents only with persisted rejection and broker evidence."""
+        metadata = trade.metadata
+        if (getattr(lookup_error, 'status_code', None) != 404
+                or metadata.get('protective_stop_prepared_at')
+                or metadata.get('protective_stop_submission_state') != 'SUBMITTING'):
+            return False
+        with database.connection() as conn:
+            rows = conn.execute("""
+                SELECT message, metadata_json FROM system_events
+                WHERE event_type='PAPER_TRADE_MANAGEMENT_ERROR'
+                ORDER BY id DESC LIMIT 100
+            """).fetchall()
+        payload = None
+        for row in rows:
+            context = json.loads(row['metadata_json'] or '{}')
+            if context.get('trade_id') == trade_id:
+                payload = stop_price_rejection(row['message'])
+                break
+        if (payload is None or float(payload.get('stop_price', 0))
+                != float(metadata.get('protective_stop_price', -1))):
+            return False
+        # A 404 alone is never permission to resend an uncertain order.
+        orders = self._get_broker_orders()
+        for order in orders:
+            if (self._normalize_symbol(getattr(order, 'symbol', '')) == trade.symbol
+                    and self._value(getattr(order, 'side', '')).lower() == 'sell'
+                    and self._value(getattr(order, 'status', '')).lower()
+                    not in {'filled', 'canceled', 'cancelled', 'expired', 'rejected'}):
+                return False
+        position = self._broker_read_with_retry(
+            lambda: self.reconciliation.verify_position(trade.symbol),
+            label='legacy_stop_position')
+        if (not position.get('exists') or self._safe_int(position.get('quantity'))
+                != int(trade.remaining_quantity) or int(trade.remaining_quantity) <= 0):
+            return False
+        persist_stop_rejection(database, trade_id, trade, payload,
+                               source='LEGACY_PERSISTED_422_AND_BROKER_READS')
+        logger.warning('Recovered explicitly rejected legacy protective stop | trade_id=%s symbol=%s remaining=%s',
+                       trade_id, trade.symbol, trade.remaining_quantity)
+        return True
+
     def _reconcile_protective_stop(self, trade_id: str, trade: Any) -> dict[str, Any]:
         metadata = dict(trade.metadata or {})
         order_id = str(metadata.get('protective_stop_order_id') or '').strip()
         if not order_id and metadata.get('protective_stop_submission_uncertain'):
-            raw = self._broker_read_with_retry(
-                lambda: self.broker.get_order_by_client_id(
-                    metadata['protective_stop_client_order_id']
-                ),
-                label="protective_stop_by_client_id",
-            )
+            try:
+                raw = self._broker_read_with_retry(
+                    lambda: self.broker.get_order_by_client_id(
+                        metadata['protective_stop_client_order_id']
+                    ),
+                    label="protective_stop_by_client_id",
+                )
+            except Exception as exc:
+                if self._recover_legacy_stop_rejection(trade_id, trade, exc):
+                    return {'checked': True, 'active': False, 'filled': False, 'rejected': True}
+                raise
             if str(getattr(raw, 'client_order_id', '')) != metadata['protective_stop_client_order_id']:
                 raise RuntimeError('Recovered stop client identity mismatch.')
             side = self._value(getattr(raw, 'side', '')).lower()

@@ -27,6 +27,7 @@ from broker.alpaca_client import get_alpaca_client
 from trading.execution_engine import get_execution_engine
 from trading.reconciliation_engine import get_reconciliation_engine
 from trading.recovery_engine import get_recovery_engine
+from trading.protective_submission import record_stop_submission_error
 
 
 logger = logging.getLogger(__name__)
@@ -1006,6 +1007,7 @@ class PaperTradeOrchestrator:
             protective_stop_price=stop_price,
             protective_stop_submission_uncertain=False,
             protective_stop_submission_state='PREPARED',
+            protective_stop_prepared_at=datetime.now(timezone.utc).isoformat(),
             protective_stop_applied_qty=0,
             protective_stop_applied_notional=0.0,
             protective_stop_fill_applied=False,
@@ -1016,10 +1018,14 @@ class PaperTradeOrchestrator:
             trade.metadata['protective_stop_submission_uncertain'] = True
             trade.metadata['protective_stop_submission_state'] = 'SUBMITTING'
             database.save_managed_trade(managed_trade_id, trade)
-        order = self.execution_engine.submit_protective_stop(
-            symbol=trade.symbol, quantity=quantity, stop_price=stop_price,
-            client_order_id=client_id, before_submit=before_submit,
-        )
+        try:
+            order = self.execution_engine.submit_protective_stop(
+                symbol=trade.symbol, quantity=quantity, stop_price=stop_price,
+                client_order_id=client_id, before_submit=before_submit,
+            )
+        except Exception as exc:
+            record_stop_submission_error(database, managed_trade_id, trade, exc)
+            raise
         trade.metadata['protective_stop_submission_state'] = 'REGISTERED'
         trade.metadata['protective_stop_submission_uncertain'] = False
         database.save_broker_order(order)

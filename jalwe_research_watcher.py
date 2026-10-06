@@ -48,6 +48,7 @@ from core.lifecycle_audit import checkpoint
 from trading.exit_sessions import exit_session, sell_limit, prepare_exit_context, settle_exit
 from trading.exit_submission import prepare_exit, submit_prepared_exit
 from trading.protective_fills import apply_protective_stop_snapshot, TERMINAL_STATUSES
+from trading.protective_submission import record_stop_submission_error
 from uuid import uuid4
 from trading.execution_engine import (
     get_execution_engine,
@@ -3134,7 +3135,8 @@ def _sync_protective_stop(trade_id: str, trade: Any, execution_engine: Any) -> d
             metadata = trade.metadata
             quantity = int(trade.remaining_quantity)
             active = status in {'new', 'accepted', 'pending_new', 'accepted_for_bidding', 'held', 'partially_filled', 'pending_replace', 'pending_cancel', 'done_for_day'}
-            if active and stored_qty == quantity and (abs(stored_stop - desired_stop) <= 0.0001):
+            unfilled_qty = stored_qty - int(snapshot['filled_quantity'])
+            if active and unfilled_qty == quantity and (abs(stored_stop - desired_stop) <= 0.0001):
                 metadata['protective_stop_active'] = True
                 metadata['protective_stop_status'] = status
                 trade.metadata = metadata
@@ -3160,6 +3162,7 @@ def _sync_protective_stop(trade_id: str, trade: Any, execution_engine: Any) -> d
     metadata['protective_stop_price'] = desired_stop
     metadata['protective_stop_submission_uncertain'] = False
     metadata['protective_stop_submission_state'] = 'PREPARED'
+    metadata['protective_stop_prepared_at'] = utc_now_iso()
     metadata['protective_stop_applied_qty'] = 0
     metadata['protective_stop_applied_notional'] = 0.0
     metadata['protective_stop_fill_applied'] = False
@@ -3170,10 +3173,14 @@ def _sync_protective_stop(trade_id: str, trade: Any, execution_engine: Any) -> d
         metadata['protective_stop_submission_uncertain'] = True
         metadata['protective_stop_submission_state'] = 'SUBMITTING'
         database.save_managed_trade(trade_id, trade)
-    stop_order = execution_engine.submit_protective_stop(
-        symbol=trade.symbol, quantity=quantity, stop_price=desired_stop,
-        client_order_id=client_id, before_submit=before_submit,
-    )
+    try:
+        stop_order = execution_engine.submit_protective_stop(
+            symbol=trade.symbol, quantity=quantity, stop_price=desired_stop,
+            client_order_id=client_id, before_submit=before_submit,
+        )
+    except Exception as exc:
+        record_stop_submission_error(database, trade_id, trade, exc)
+        raise
     metadata['protective_stop_submission_state'] = 'REGISTERED'
     metadata['protective_stop_submission_uncertain'] = False
     database.save_broker_order(stop_order)
@@ -3190,6 +3197,8 @@ def _sync_protective_stop(trade_id: str, trade: Any, execution_engine: Any) -> d
     trade.metadata = metadata
     database.save_managed_trade(trade_id, trade)
     database.log_event(event_type='BROKER_PROTECTIVE_STOP_SYNC', severity='INFO', message=f'{trade.symbol}: broker protective stop synced qty={quantity} stop={desired_stop}', metadata={'trade_id': trade_id, 'symbol': trade.symbol, 'quantity': quantity, 'stop_price': desired_stop, 'order_id': stop_order.order_id})
+    logger.info('Protective stop synced | trade_id=%s symbol=%s qty=%s stop=%s status=%s order_id=%s',
+                trade_id, trade.symbol, quantity, desired_stop, stop_order.status.value, stop_order.order_id)
     return {'enabled': True, 'active': True, 'order_id': stop_order.order_id, 'quantity': quantity, 'stop_price': desired_stop, 'status': stop_order.status.value, 'changed': True}
 
 

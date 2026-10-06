@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 from strategy_experiments import StrategyExperiments
+from market.research_diagnostics import coverage_diagnostics, diagnostic_counts, diagnostic_text, error_diagnostics
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,8 @@ class DecisionOutcomeMemory:
                 ON decision_outcome_memory(status, last_checked_at, window_end)""")
             conn.execute("""CREATE INDEX IF NOT EXISTS idx_decision_outcomes_date
                 ON decision_outcome_memory(decided_at)""")
+        from delayed_sip_research import DelayedSipResearch
+        self.delayed_sip_research = DelayedSipResearch(self.db, market_data)
 
     def record(self, payload: dict, research_version: str) -> bool:
         decision = payload.get("jalwe") or {}
@@ -209,6 +212,7 @@ class DecisionOutcomeMemory:
                 baseline = float(row["reference_price"])
                 payload = json.loads(row["payload_json"])
                 result = {"scope": "OBSERVED_PRICE_PATH_NOT_EXECUTED_PNL",
+                          "data_diagnostics": coverage_diagnostics(frame, bars, start, end),
                           "expected_bars": self.HORIZON_MINUTES,
                           "observed_bars": len(bars), "complete_path": complete,
                           "feed": observed_feed or row["data_feed"],
@@ -227,11 +231,17 @@ class DecisionOutcomeMemory:
             except Exception as exc:
                 # Provider failures are data failures, never losing/no-opportunity labels.
                 result = {"scope": "OBSERVED_PRICE_PATH_NOT_EXECUTED_PNL",
+                          "data_diagnostics": error_diagnostics(exc),
                           "error_type": type(exc).__name__, "complete_path": False}
                 bars = []
                 status = "DATA_UNAVAILABLE" if terminal else "PENDING"
-                logger.warning("Decision outcome data unavailable for %s (%s)",
-                               row["symbol"], type(exc).__name__)
+                logger.warning("RESEARCH_DATA_DIAGNOSTIC %s", json.dumps({
+                    "source": "DECISION", "symbol": row["symbol"], "status": status,
+                    "feed": row["data_feed"], **result["data_diagnostics"]}))
+            if status in {"COMPLETE", "PARTIAL_DATA"}:
+                logger.info("RESEARCH_DATA_DIAGNOSTIC %s", json.dumps({
+                    "source": "DECISION", "symbol": row["symbol"], "status": status,
+                    "feed": row["data_feed"], **result["data_diagnostics"]}))
             with self.db.connection() as conn:
                 conn.execute("""UPDATE decision_outcome_memory SET status = ?,
                     observed_bars = ?, result_json = ?, last_checked_at = ?,
@@ -254,7 +264,12 @@ class DecisionOutcomeMemory:
             except Exception:
                 logger.exception("Decision outcome refresh failed")
             finally:
-                self._worker_lock.release()
+                try:
+                    self.delayed_sip_research.update_due()
+                except Exception:
+                    logger.exception("Independent delayed SIP research refresh failed")
+                finally:
+                    self._worker_lock.release()
         try:
             threading.Thread(target=run, name="decision-outcomes", daemon=True).start()
         except Exception:
@@ -416,6 +431,9 @@ class DecisionOutcomeMemory:
         start = datetime(day.year, day.month, day.day, tzinfo=ZoneInfo("America/New_York"))
         end = start + timedelta(days=1)
         with self.db.connection() as conn:
+            diagnostic_rows = [dict(row) for row in conn.execute("""SELECT status, result_json
+                FROM decision_outcome_memory WHERE decided_at >= ? AND decided_at < ?""",
+                (start.astimezone(timezone.utc).isoformat(), end.astimezone(timezone.utc).isoformat())).fetchall()]
             groups = [dict(row) for row in conn.execute("""
                 SELECT source_state, COALESCE(strategy, 'UNSPECIFIED') AS strategy,
                        status, COUNT(*) AS count
@@ -438,7 +456,9 @@ class DecisionOutcomeMemory:
                     for state in ("COMPLETE", "PENDING", "PARTIAL_DATA", "DATA_UNAVAILABLE", "UNOBSERVABLE")}
         return {"decisions": counts, "statuses": statuses, "groups": groups, "outcomes": outcomes,
                 "strategy_experiments": self.experiments.status_text(),
-                "rejection_audit": self.rejection_audit(day)}
+                "rejection_audit": self.rejection_audit(day),
+                "data_diagnostic_counts": diagnostic_counts(diagnostic_rows, "result_json"),
+                "delayed_sip_research": self.delayed_sip_research.report_for_ny_date(day)}
 
     @staticmethod
     def report_text(summary: dict) -> str:
@@ -452,6 +472,8 @@ class DecisionOutcomeMemory:
             f"اكتملت بياناتها: {statuses['COMPLETE']} | تنتظر: {statuses['PENDING']}",
             f"بيانات ناقصة/غير متاحة: {statuses['PARTIAL_DATA'] + statuses['DATA_UNAVAILABLE']}",
             f"بدون سعر مرجعي موثوق: {statuses['UNOBSERVABLE']}",
+            ("أسباب نقص التقييم الأصلي: " + diagnostic_text(summary["data_diagnostic_counts"])
+             if summary.get("data_diagnostic_counts") else ""),
             f"المسارات المكتملة: هدف أولًا {counts['TARGET_FIRST']} | وقف أولًا {counts['STOP_FIRST']} | ترتيب غير محسوم {counts['AMBIGUOUS_STOP_TARGET']}",
             f"لم تتأكد فوق مستوى التفعيل: {counts['NOT_ACTIVATED']}",
             "القياس من شموع 1m وبحسب تغطية مزوّد البيانات؛ أهداف 2R افتراضية عند غياب الهدف الأصلي.",
@@ -459,6 +481,7 @@ class DecisionOutcomeMemory:
             summary.get("strategy_experiments", ""),
             (DecisionOutcomeMemory.rejection_report_text(summary["rejection_audit"], compact=True)
              if summary.get("rejection_audit") else ""),
+            summary.get("delayed_sip_research", ""),
         ])
 
 
@@ -470,3 +493,4 @@ def get_decision_outcome_memory() -> DecisionOutcomeMemory:
     if _memory is None:
         _memory = DecisionOutcomeMemory()
     return _memory
+

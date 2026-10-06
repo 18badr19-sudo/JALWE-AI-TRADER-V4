@@ -756,8 +756,10 @@ class RecoveryEngine:
             if context.get('trade_id') == trade_id:
                 payload = stop_price_rejection(row['message'])
                 break
-        if (payload is None or float(payload.get('stop_price', 0))
-                != float(metadata.get('protective_stop_price', -1))):
+        stored_price = float(metadata.get('protective_stop_price', -1))
+        # Match the exact precision used by AlpacaClient.submit_stop_order.
+        submitted_price = round(stored_price, 2 if stored_price >= 1.0 else 4)
+        if (payload is None or float(payload.get('stop_price', 0)) != submitted_price):
             return blocked('REJECTION_EVIDENCE_UNAVAILABLE', found=payload is not None,
                            stored_stop=metadata.get('protective_stop_price'))
         # A 404 alone is never permission to resend an uncertain order.

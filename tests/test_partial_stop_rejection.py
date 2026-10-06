@@ -123,3 +123,21 @@ class PartialStopRejectionTests(unittest.TestCase):
                     engine._reconcile_protective_stop('t', self.trade)
                 self.assertTrue(self.trade.metadata['protective_stop_submission_uncertain'])
                 self.trade.metadata = {}
+
+    def test_legacy_rejection_matches_broker_price_precision_only(self):
+        for stored, reported, expected in ((9.0018, '9', True),
+                                           (0.65184, '0.6518', True),
+                                           (9.0118, '9', False)):
+            with self.subTest(stored=stored):
+                engine = self.legacy()
+                self.trade.metadata['protective_stop_price'] = stored
+                payload = {**REJECTION, 'stop_price': reported}
+                self.db.log_event(event_type='PAPER_TRADE_MANAGEMENT_ERROR',
+                                  message=json.dumps(payload), metadata={'trade_id':'t'})
+                with patch.object(recovery_module, 'database', self.db):
+                    if expected:
+                        self.assertTrue(engine._reconcile_protective_stop('t', self.trade)['rejected'])
+                    else:
+                        with self.assertRaises(APIError):
+                            engine._reconcile_protective_stop('t', self.trade)
+                self.trade.metadata = {}

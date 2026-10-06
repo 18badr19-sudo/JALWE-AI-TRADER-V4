@@ -348,7 +348,9 @@ class DecisionOutcomeMemory:
             except (TypeError, ValueError):
                 continue
             if (result.get("levels") or {}).get("outcome") == "TARGET_FIRST":
-                reviews.append({"symbol": row["symbol"], "reason": row["reason"]})
+                reviews.append({"symbol": row["symbol"], "reason": row["reason"],
+                                "decided_at": row["decided_at"],
+                                "research_version": row["research_version"]})
         return {"date": day.isoformat(), "states": states,
                 "rejected_complete": len(verified),
                 "rejected_incomplete": len(rejected) - len(verified),
@@ -398,8 +400,10 @@ class DecisionOutcomeMemory:
             f"مرشحة للمراجعة (هدف قبل الوقف لاحقًا): {len(audit['review_candidates'])}",
         ])
         if not compact:
-            for row in audit["review_candidates"][:3]:
-                lines.append(f"• مراجعة {row['symbol']}: {row['reason'][:120]}")
+            for row in audit["review_candidates"][:5]:
+                stamp = row.get("decided_at")
+                clock = datetime.fromisoformat(stamp).astimezone(ZoneInfo("America/New_York")).strftime("%H:%M:%S NY") if stamp else ""
+                lines.append(f"• مراجعة {row['symbol']} {clock}: {row['reason'][:120]}")
         lines.extend([
             "الأعداد قرارات بحثية؛ تغير القرار لنفس السهم قد يتكرر، والجاهزية لا تثبت تنفيذ شراء.",
             "سبب الرفض مأخوذ من القرار؛ البوابات غير المفحوصة لا تُحسب أسبابًا إضافية.",

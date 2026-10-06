@@ -4215,6 +4215,7 @@ def main() -> None:
         day = datetime.now(ZoneInfo("America/New_York")).date()
         review = memory.rejection_audit(day)
         print("FRESHNESS_AUDIT " + json.dumps({"date": str(day), **review["freshness_review"]}, default=str), flush=True)
+        print("REJECTION_REVIEW_AUDIT " + json.dumps({"date": str(day), "candidates": review["review_candidates"][:5]}, default=str), flush=True)
     except Exception:
         logger.warning("Freshness audit unavailable at startup", exc_info=True)
     print("DECISION_OUTCOME_MEMORY: ENABLED | horizon=60m | all decisions | research only", flush=True)

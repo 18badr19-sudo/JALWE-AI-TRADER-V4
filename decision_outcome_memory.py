@@ -262,6 +262,38 @@ class DecisionOutcomeMemory:
             raise
         return True
 
+    @staticmethod
+    def _freshness_review(rows: list[dict]) -> dict:
+        counts = {"AGE_LIMIT": 0, "FUTURE_TIMESTAMP": 0,
+                  "MISSING_EVIDENCE": 0, "OTHER_STALE_FLAG": 0}
+        periods = {"regular_clock": 0, "outside_regular_clock": 0}
+        samples = []
+        for row in rows:
+            if row["reason"] != "Feature freshness check failed.":
+                continue
+            try:
+                metadata = (json.loads(row["payload_json"]).get("jalwe") or {}).get("metadata") or {}
+                diagnostics = metadata.get("feature_diagnostics") or {}
+                age = float(diagnostics["latest_bar_age_minutes"])
+                limit = float(diagnostics["max_bar_age_minutes"])
+                if not math.isfinite(age) or not math.isfinite(limit):
+                    raise ValueError("Non-finite evidence")
+                cause = "FUTURE_TIMESTAMP" if age < 0 else "AGE_LIMIT" if age > limit else "OTHER_STALE_FLAG"
+                local = utc(row["decided_at"]).astimezone(ZoneInfo("America/New_York"))
+                regular = 570 <= local.hour * 60 + local.minute < 960
+                periods["regular_clock" if regular else "outside_regular_clock"] += 1
+                samples.append({"symbol": row["symbol"], "decided_at": row["decided_at"],
+                                "age_minutes": age, "max_age_minutes": limit,
+                                "feed": metadata.get("decision_data_feed") or "unknown",
+                                "bar_time": (metadata.get("decision_features") or {}).get("timestamp"),
+                                "regular_clock": regular, "cause": cause})
+            except (TypeError, ValueError, KeyError, AttributeError):
+                cause = "MISSING_EVIDENCE"
+            counts[cause] += 1
+        # Show near-threshold regular-session cases first, not just overnight extremes.
+        samples.sort(key=lambda row: (not row["regular_clock"], abs(row["age_minutes"] - row["max_age_minutes"])))
+        return {"counts": counts, "periods_with_evidence": periods, "samples": samples[:5]}
+
     def rejection_audit(self, date_value) -> dict:
         """Explain recorded decisions, never infer evaluation from default-false gates."""
         day = datetime.fromisoformat(str(date_value)).date()
@@ -269,7 +301,7 @@ class DecisionOutcomeMemory:
         end = start + timedelta(days=1)
         with self.db.connection() as conn:
             rows = [dict(row) for row in conn.execute("""
-                SELECT symbol, research_version, source_state, reason, status,
+                SELECT symbol, research_version, source_state, reason, status, decided_at,
                        payload_json, result_json
                 FROM decision_outcome_memory WHERE decided_at >= ? AND decided_at < ?
                 ORDER BY decided_at ASC
@@ -320,7 +352,8 @@ class DecisionOutcomeMemory:
         return {"date": day.isoformat(), "states": states,
                 "rejected_complete": len(verified),
                 "rejected_incomplete": len(rejected) - len(verified),
-                "review_candidates": reviews, "opportunity_score_evidence": score_evidence}
+                "review_candidates": reviews, "opportunity_score_evidence": score_evidence,
+                "freshness_review": self._freshness_review(rows)}
 
     @staticmethod
     def rejection_report_text(audit: dict, *, compact: bool = False) -> str:
@@ -346,6 +379,13 @@ class DecisionOutcomeMemory:
                 reason = translations.get(group["reason"], group["reason"])
                 examples = ", ".join(group["symbols"][:3])
                 lines.append(f"• {reason[:150]}: {group['count']} | تقارير {group['episodes']} | {examples}")
+        freshness = audit.get("freshness_review", {})
+        causes = freshness.get("counts", {})
+        if sum(causes.values()):
+            lines.append(f"تقادم البيانات: تجاوز العمر {causes.get('AGE_LIMIT', 0)} | وقت مستقبلي {causes.get('FUTURE_TIMESTAMP', 0)} | دليل ناقص {causes.get('MISSING_EVIDENCE', 0)} | علامة تقادم أخرى {causes.get('OTHER_STALE_FLAG', 0)}")
+            if not compact:
+                for sample in freshness.get("samples", [])[:2]:
+                    lines.append(f"• {sample['symbol']}: عمر الشمعة {sample['age_minutes']:.1f} دقيقة / الحد {sample['max_age_minutes']:.1f} | {sample['feed']}")
         scores = audit.get("opportunity_score_evidence", [])
         if scores:
             below = sum(row["score"] < row["minimum_score"] for row in scores)

@@ -350,6 +350,42 @@ class OutcomeMemoryTests(unittest.TestCase):
         self.assertIn("أسباب قلة الدخول", self.memory.report_text(summary))
 
 
+    def test_freshness_audit_uses_recorded_age_and_threshold(self):
+        payload = self.payload(reason="Feature freshness check failed.")
+        payload["jalwe"]["metadata"]["feature_diagnostics"] = {
+            "latest_bar_age_minutes": 22., "max_bar_age_minutes": 15.}
+        self.memory.record(payload, "v1")
+        audit = self.memory.rejection_audit("2026-10-02")
+        review = audit["freshness_review"]
+        self.assertEqual(review["counts"]["AGE_LIMIT"], 1)
+        self.assertEqual(review["periods_with_evidence"]["regular_clock"], 1)
+        self.assertEqual(review["samples"][0]["age_minutes"], 22.)
+        self.assertIn("22.0 دقيقة / الحد 15.0", self.memory.rejection_report_text(audit))
+
+    def test_freshness_audit_distinguishes_future_missing_and_other_stale_flags(self):
+        for version, age in (("future", -1.), ("other", 5.), ("missing", None)):
+            payload = self.payload(reason="Feature freshness check failed.")
+            payload["jalwe"]["metadata"]["feature_diagnostics"] = {
+                "latest_bar_age_minutes": age, "max_bar_age_minutes": 15.}
+            self.memory.record(payload, version)
+        counts = self.memory.rejection_audit("2026-10-02")["freshness_review"]["counts"]
+        self.assertEqual(counts["FUTURE_TIMESTAMP"], 1)
+        self.assertEqual(counts["OTHER_STALE_FLAG"], 1)
+        self.assertEqual(counts["MISSING_EVIDENCE"], 1)
+        self.assertEqual(counts["AGE_LIMIT"], 0)
+
+    def test_freshness_audit_separates_after_close_and_does_not_modify_evidence(self):
+        payload = self.payload(reason="Feature freshness check failed.")
+        payload["timestamp"] = "2026-10-02T21:00:00+00:00"
+        payload["jalwe"]["metadata"]["feature_diagnostics"] = {
+            "latest_bar_age_minutes": 65., "max_bar_age_minutes": 15.}
+        self.memory.record(payload, "v1")
+        before = self.row()
+        review = self.memory.rejection_audit("2026-10-02")["freshness_review"]
+        self.assertEqual(review["periods_with_evidence"]["outside_regular_clock"], 1)
+        self.assertEqual(before, self.row())
+
+
 
 if __name__ == "__main__":
     unittest.main()

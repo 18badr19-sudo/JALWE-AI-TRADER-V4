@@ -4210,7 +4210,13 @@ def main() -> None:
 
     print_startup_health()
     print('RESEARCH_ALERTS: ' + ('QUIET' if QUIET_RESEARCH_ALERTS else 'VERBOSE'), flush=True)
-    get_decision_outcome_memory()
+    memory = get_decision_outcome_memory()
+    try:
+        day = datetime.now(ZoneInfo("America/New_York")).date()
+        review = memory.rejection_audit(day)
+        print("FRESHNESS_AUDIT " + json.dumps({"date": str(day), **review["freshness_review"]}, default=str), flush=True)
+    except Exception:
+        logger.warning("Freshness audit unavailable at startup", exc_info=True)
     print("DECISION_OUTCOME_MEMORY: ENABLED | horizon=60m | all decisions | research only", flush=True)
     print("STRATEGY_EXPERIMENTS: ENABLED | six native candidates | paired chronological validation | PAPER preference only", flush=True)
     print("STRATEGY_POLICY_GUARD: ENABLED | forward simulated monitoring | durable versions | 7d rollback cooldown", flush=True)

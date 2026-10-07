@@ -948,6 +948,39 @@ class DecisionEngine:
         return {"freshness_enforced": True, "latest_bar_age_minutes": age,
                 "max_bar_age_minutes": max_age, "data_is_stale": features.data_is_stale}
 
+    def _refresh_boundary_stale_bars(self, symbol, timeframe, bar_limit,
+                                     bars, features, diagnostics):
+        """One same-feed read near the age boundary; never relax freshness."""
+        age = diagnostics.get("latest_bar_age_minutes")
+        limit = diagnostics.get("max_bar_age_minutes")
+        feed = bars.attrs.get("data_feed")
+        if (not features.data_quality_ok or not features.data_is_stale
+                or not isinstance(age, (int, float))
+                or not isinstance(limit, (int, float))
+                or not math.isfinite(age) or not limit < age <= limit + 1
+                or not isinstance(feed, str) or not feed):
+            return bars, features, diagnostics, None
+        evidence = {"attempted": True, "initial_age_minutes": age,
+                    "feed": feed, "status": "NO_FRESH_REPLACEMENT"}
+        try:
+            refreshed = self.market_data.get_bars(symbol, timeframe, bar_limit)
+            if refreshed is None or refreshed.empty:
+                return bars, features, diagnostics, evidence
+            if refreshed.attrs.get("data_feed") != feed:
+                evidence["status"] = "FEED_MISMATCH"
+                return bars, features, diagnostics, evidence
+            candidate = self.feature_engine.build(symbol, refreshed)
+            fresh_diagnostics = self.feature_engine.diagnose_input(refreshed)
+            fresh_diagnostics.update(self._apply_feature_freshness(candidate, timeframe))
+            evidence["refreshed_age_minutes"] = fresh_diagnostics.get("latest_bar_age_minutes")
+            if (candidate.data_quality_ok and not candidate.data_is_stale
+                    and candidate.timestamp > features.timestamp):
+                evidence["status"] = "FRESH_REPLACEMENT"
+                return refreshed, candidate, fresh_diagnostics, evidence
+        except Exception as exc:
+            evidence.update(status="REFRESH_FAILED", error_type=type(exc).__name__)
+        return bars, features, diagnostics, evidence
+
     def analyze(
         self,
         symbol: str,
@@ -1074,6 +1107,10 @@ class DecisionEngine:
             )
 
         feature_diagnostics.update(self._apply_feature_freshness(features, timeframe))
+        bars, features, feature_diagnostics, refresh_evidence = self._refresh_boundary_stale_bars(
+            symbol, timeframe, bar_limit, bars, features, feature_diagnostics)
+        if refresh_evidence is not None:
+            base_metadata["freshness_refresh"] = refresh_evidence
         if features.data_is_stale:
             logger.info("FEATURE_FRESHNESS_DIAGNOSTIC %s", json.dumps({
                 "symbol": symbol, "timeframe": timeframe,

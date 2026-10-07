@@ -10,6 +10,55 @@ from intelligence.decision_engine import DecisionEngine, DecisionState
 
 
 class FeatureFreshnessTests(unittest.TestCase):
+    def refresh_case(self, replacement_age=5, replacement_feed='iex'):
+        engine = DecisionEngine.__new__(DecisionEngine)
+        original = pd.DataFrame({'close': [10]})
+        original.attrs['data_feed'] = 'iex'
+        replacement = pd.DataFrame({'close': [11]})
+        replacement.attrs['data_feed'] = replacement_feed
+        features = self.features(15.1)
+        diagnostics = DecisionEngine._apply_feature_freshness(features, '5m')
+        engine.market_data = Mock()
+        engine.market_data.get_bars.return_value = replacement
+        candidate = self.features(replacement_age)
+        engine.feature_engine = Mock()
+        engine.feature_engine.build.return_value = candidate
+        engine.feature_engine.diagnose_input.return_value = {}
+        return engine, original, features, diagnostics, replacement, candidate
+
+    def test_boundary_refresh_accepts_only_new_fresh_same_feed_features(self):
+        engine, bars, features, diagnostics, replacement, candidate = self.refresh_case()
+        result = engine._refresh_boundary_stale_bars('TEST', '5m', 300, bars, features, diagnostics)
+        self.assertIs(result[0], replacement)
+        self.assertIs(result[1], candidate)
+        self.assertEqual(result[3]['status'], 'FRESH_REPLACEMENT')
+        engine.market_data.get_bars.assert_called_once_with('TEST', '5m', 300)
+
+    def test_boundary_refresh_keeps_original_on_stale_invalid_feed_or_failure(self):
+        for case in ('stale', 'quality', 'feed', 'failure'):
+            with self.subTest(case=case):
+                engine, bars, features, diagnostics, _, candidate = self.refresh_case(
+                    replacement_age=15.1 if case == 'stale' else 5,
+                    replacement_feed='sip' if case == 'feed' else 'iex')
+                if case == 'quality':
+                    candidate.data_quality_ok = False
+                if case == 'failure':
+                    engine.market_data.get_bars.side_effect = TimeoutError()
+                result = engine._refresh_boundary_stale_bars('TEST', '5m', 300, bars, features, diagnostics)
+                self.assertIs(result[0], bars)
+                self.assertIs(result[1], features)
+                self.assertTrue(features.data_is_stale)
+                engine.market_data.get_bars.assert_called_once()
+
+    def test_boundary_refresh_skips_old_future_missing_and_fresh_data(self):
+        for age in (20, -1, None, 5):
+            with self.subTest(age=age):
+                engine, bars, features, diagnostics, _, _ = self.refresh_case()
+                diagnostics['latest_bar_age_minutes'] = age
+                result = engine._refresh_boundary_stale_bars('TEST', '5m', 300, bars, features, diagnostics)
+                self.assertIsNone(result[3])
+                engine.market_data.get_bars.assert_not_called()
+
     def features(self, age):
         return FeatureSnapshot(symbol='TEST', data_quality_ok=True,
             timestamp=datetime.now(timezone.utc) - timedelta(minutes=age))

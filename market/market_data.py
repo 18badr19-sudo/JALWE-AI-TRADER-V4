@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from time import monotonic
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -28,6 +29,16 @@ class MarketDataError(RuntimeError):
     """
     Raised when reliable market data cannot be obtained.
     """
+
+
+class ExecutionQuoteUnavailable(MarketDataError):
+    """Live SIP access was denied; no alternate feed is executable here."""
+
+    status_code = 403
+
+    def __init__(self, reason):
+        self.reason = reason
+        super().__init__('Live SIP execution quotes unavailable: ' + reason)
 
 
 class MarketData:
@@ -437,8 +448,23 @@ class MarketData:
     def get_execution_quote(self, symbol):
         # Extended-session execution requires consolidated live quotes. IEX-only
         # or delayed data cannot establish an executable after-hours bid.
-        request = StockLatestQuoteRequest(symbol_or_symbols=self._normalize_symbol(symbol), feed=DataFeed.SIP)
-        quote = self.client.get_stock_latest_quote(request)[self._normalize_symbol(symbol)]
+        denied_until, reason = getattr(self, '_execution_quote_denial', (0, None))
+        if monotonic() < denied_until:
+            raise ExecutionQuoteUnavailable(reason)
+        symbol = self._normalize_symbol(symbol)
+        request = StockLatestQuoteRequest(symbol_or_symbols=symbol, feed=DataFeed.SIP)
+        try:
+            quote = self.client.get_stock_latest_quote(request)[symbol]
+        except Exception as exc:
+            if getattr(exc, 'status_code', None) != 403:
+                raise
+            reason = ('SUBSCRIPTION_REQUIRED' if 'subscription' in str(exc).lower()
+                      else 'FORBIDDEN')
+            # Entitlements apply to the account, not one ticker. Retry after five
+            # minutes so an upgraded subscription can recover without a restart.
+            self._execution_quote_denial = (monotonic() + 300, reason)
+            raise ExecutionQuoteUnavailable(reason) from None
+        self._execution_quote_denial = (0, None)
         return {'bid': quote.bid_price, 'ask': quote.ask_price, 'timestamp': quote.timestamp}
 
     def get_latest_quote(

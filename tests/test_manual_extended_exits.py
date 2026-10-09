@@ -17,6 +17,7 @@ from trading.exit_sessions import exit_session, sell_limit, prepare_exit_context
 import trading.exit_sessions as sessions
 import jalwe_research_watcher as watcher
 import railway_controller as controller
+from market.market_data import ExecutionQuoteUnavailable, MarketData
 
 
 class ManualSellTests(unittest.TestCase):
@@ -310,6 +311,39 @@ class WatcherIntegrationTests(unittest.TestCase):
         execution.submit_exit.assert_not_called()
         self.assertEqual(self.db.load_managed_trade('t').remaining_quantity, 8)
 
+    def test_denied_sip_keeps_manual_request_cursor_stage_and_protection(self):
+        request = self.queue.prepare('t', 'owner')
+        self.queue.confirm(request['request_id'], 'owner')
+        execution, reconciliation, market, cancel, sync = self.fixtures('EXTENDED')
+        market.get_execution_quote.side_effect = ExecutionQuoteUnavailable('SUBSCRIPTION_REQUIRED')
+        with patch.object(self.db, 'log_event', wraps=self.db.log_event) as log:
+            with self.assertLogs(watcher.logger, level='WARNING'):
+                self.assertEqual(watcher.manage_active_paper_trades({}), 1)
+                self.assertEqual(watcher.manage_active_paper_trades({}), 1)
+            blocked = [call for call in log.call_args_list
+                       if call.kwargs.get('event_type') == 'EXTENDED_EXIT_DATA_BLOCKED']
+            self.assertEqual(len(blocked), 1)
+        actual = self.db.load_managed_trade('t')
+        self.assertEqual(actual.stage, self.trade.stage)
+        self.assertEqual(actual.current_stop, self.trade.current_stop)
+        self.assertEqual(actual.remaining_quantity, 8)
+        self.assertNotIn('management_trade_scan_at', actual.metadata)
+        self.assertIsNotNone(self.queue.pending_for('t'))
+        market.get_trade_range.assert_not_called()
+        market.get_last_price.assert_not_called()
+        self.assertEqual(sync.call_count, 2)
+        cancel.assert_not_called()
+        execution.submit_exit.assert_not_called()
+
+    def test_regular_management_resumes_without_sip_after_denial(self):
+        self.trade.metadata['extended_exit_data_blocked'] = 'SUBSCRIPTION_REQUIRED'
+        self.db.save_managed_trade('t', self.trade)
+        execution, reconciliation, market, cancel, sync = self.fixtures('REGULAR')
+        watcher.manage_active_paper_trades({})
+        market.get_execution_quote.assert_not_called()
+        self.assertNotIn('extended_exit_data_blocked', self.db.load_managed_trade('t').metadata)
+        sync.assert_called_once()
+
     def test_lifecycle_checkpoint_records_changes_once(self):
         from core.lifecycle_audit import checkpoint
         with patch.object(self.db, 'log_event', wraps=self.db.log_event) as log:
@@ -341,6 +375,39 @@ class DataAccessDiagnosticsTests(unittest.TestCase):
 
     def test_other_forbidden_errors_are_not_mislabeled_subscription(self):
         self.assertEqual(self.run_probe('provider details containing a private value')['reason'], 'FORBIDDEN')
+
+
+class ExecutionQuoteAccessTests(unittest.TestCase):
+    def test_account_denial_is_cached_and_retried_without_feed_fallback(self):
+        class Forbidden(RuntimeError):
+            status_code = 403
+        market = MarketData.__new__(MarketData)
+        market.client = Mock()
+        market.client.get_stock_latest_quote.side_effect = [
+            Forbidden('subscription does not permit querying recent SIP data'),
+            {'SNAP': NS(bid_price=6.5, ask_price=6.51, timestamp=datetime.now(timezone.utc))}]
+        with patch('market.market_data.monotonic', return_value=100):
+            with self.assertRaises(ExecutionQuoteUnavailable) as error:
+                market.get_execution_quote('SNAP')
+        self.assertEqual(error.exception.reason, 'SUBSCRIPTION_REQUIRED')
+        with patch('market.market_data.monotonic', return_value=399):
+            with self.assertRaises(ExecutionQuoteUnavailable):
+                market.get_execution_quote('ABEV')
+        self.assertEqual(market.client.get_stock_latest_quote.call_count, 1)
+        with patch('market.market_data.monotonic', return_value=400):
+            self.assertEqual(market.get_execution_quote('SNAP')['bid'], 6.5)
+        self.assertEqual(market._execution_quote_denial, (0, None))
+        for call in market.client.get_stock_latest_quote.call_args_list:
+            self.assertEqual(call.args[0].feed.value, 'sip')
+
+    def test_transient_failure_is_not_cached_as_entitlement_denial(self):
+        market = MarketData.__new__(MarketData)
+        market.client = Mock()
+        market.client.get_stock_latest_quote.side_effect = RuntimeError('temporary outage')
+        for _ in range(2):
+            with self.assertRaisesRegex(RuntimeError, 'temporary outage'):
+                market.get_execution_quote('SNAP')
+        self.assertEqual(market.client.get_stock_latest_quote.call_count, 2)
 
 
 if __name__ == '__main__':

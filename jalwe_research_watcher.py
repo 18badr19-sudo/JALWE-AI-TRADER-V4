@@ -36,7 +36,7 @@ from intelligence.external_research_bridge import (
     get_external_research_bridge,
 )
 
-from market.market_data import get_market_data
+from market.market_data import ExecutionQuoteUnavailable, get_market_data
 
 from opportunity_performance_tracker import (
     get_opportunity_performance_tracker,
@@ -3360,6 +3360,26 @@ def manage_active_paper_trades(state: dict) -> int:
             observed_high = None
             execution_quote = None
             session = exit_session(execution_engine.broker, enabled=settings.EXTENDED_EXIT_ENABLED)
+            if session == 'EXTENDED':
+                try:
+                    execution_quote = market_data.get_execution_quote(trade.symbol)
+                    sell_limit(execution_quote, slippage_pct=settings.MAX_EXIT_SLIPPAGE_PCT)
+                except ExecutionQuoteUnavailable as exc:
+                    metadata = trade.metadata if isinstance(trade.metadata, dict) else {}
+                    changed = metadata.get('extended_exit_data_blocked') != exc.reason
+                    metadata['extended_exit_data_blocked'] = exc.reason
+                    trade.metadata = metadata
+                    database.save_managed_trade(trade_id, trade)
+                    _sync_protective_stop(trade_id, trade, execution_engine)
+                    if changed:
+                        logger.warning('Extended exit deferred | symbol=%s reason=%s', trade.symbol, exc.reason)
+                        database.log_event(event_type='EXTENDED_EXIT_DATA_BLOCKED', severity='WARNING',
+                            message='Extended exit deferred: live SIP access unavailable.',
+                            metadata={'trade_id': trade_id, 'symbol': trade.symbol, 'reason': exc.reason})
+                    managed_count += 1
+                    continue
+            if isinstance(trade.metadata, dict):
+                trade.metadata.pop('extended_exit_data_blocked', None)
             trade_range = None
             try:
                 trade_range = market_data.get_trade_range(symbol=trade.symbol, start=scan_start, end=now_utc)
@@ -3383,8 +3403,6 @@ def manage_active_paper_trades(state: dict) -> int:
                 logger.warning('Trade-range target scan failed | symbol=%s error=%s', trade.symbol, exc)
                 current_price = float(market_data.get_last_price(trade.symbol))
             if session == 'EXTENDED':
-                execution_quote = market_data.get_execution_quote(trade.symbol)
-                sell_limit(execution_quote, slippage_pct=settings.MAX_EXIT_SLIPPAGE_PCT)
                 current_price = float(execution_quote['bid'])
                 observed_high = None
             manual = manual_queue.pending_for(trade_id)

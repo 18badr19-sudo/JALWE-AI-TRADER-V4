@@ -1,5 +1,6 @@
 import tempfile
 from contextlib import ExitStack
+from dataclasses import replace
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -302,6 +303,23 @@ class WatcherIntegrationTests(unittest.TestCase):
         self.assertEqual(self.db.load_managed_trade('t').remaining_quantity, 8)
         self.assertIsNotNone(self.queue.pending_for('t'))
 
+    def test_closed_session_does_not_mark_single_share_target_or_move_stop(self):
+        trade = TradeManager().create_trade('TEST', 10, 1, 9, 11, 12, 13)
+        self.db.save_managed_trade('t', trade)
+        execution, reconciliation, market, cancel, sync = self.fixtures('CLOSED')
+        market.get_trade_range.return_value = {'last': 11.2, 'high': 13.2, 'count': 1}
+        watcher.manage_active_paper_trades({})
+        actual = self.db.load_managed_trade('t')
+        self.assertEqual(actual.stage, trade.stage)
+        self.assertEqual(actual.current_stop, 9)
+        self.assertFalse(actual.t1_completed)
+        self.assertEqual(actual.highest_price, trade.highest_price)
+        self.assertNotIn('management_trade_scan_at', actual.metadata)
+        market.get_trade_range.assert_not_called()
+        market.get_last_price.assert_not_called()
+        execution.submit_exit.assert_not_called()
+        sync.assert_called_once()
+
     def test_unavailable_extended_quote_does_not_cancel_stop(self):
         execution, reconciliation, market, cancel, sync = self.fixtures('EXTENDED')
         market.get_execution_quote.side_effect = RuntimeError('SIP unavailable')
@@ -343,6 +361,57 @@ class WatcherIntegrationTests(unittest.TestCase):
         market.get_execution_quote.assert_not_called()
         self.assertNotIn('extended_exit_data_blocked', self.db.load_managed_trade('t').metadata)
         sync.assert_called_once()
+
+    def test_denied_sip_inspects_real_stop_without_replacing_it(self):
+        real_sync = watcher._sync_protective_stop
+        self.trade.metadata.update(protective_stop_order_id='protect',
+            protective_stop_quantity=8, protective_stop_price=9)
+        self.db.save_managed_trade('t', self.trade)
+        execution, reconciliation, market, cancel, sync = self.fixtures('EXTENDED')
+        sync.side_effect = real_sync
+        execution.broker.get_order.return_value = NS(id='protect', symbol='TEST', side='sell',
+            status='new', filled_qty='0', filled_avg_price=None)
+        market.get_execution_quote.side_effect = ExecutionQuoteUnavailable('SUBSCRIPTION_REQUIRED')
+        with patch.object(watcher, 'settings', replace(watcher.settings, BROKER_PROTECTIVE_STOP_ENABLED=True)):
+            watcher.manage_active_paper_trades({})
+            watcher.manage_active_paper_trades({})
+        self.assertEqual(execution.broker.get_order.call_count, 2)
+        actual = self.db.load_managed_trade('t')
+        self.assertTrue(actual.metadata['protective_stop_active'])
+        self.assertEqual(actual.metadata['protective_stop_order_id'], 'protect')
+        cancel.assert_not_called()
+        execution.submit_protective_stop.assert_not_called()
+        execution.submit_exit.assert_not_called()
+
+    def test_emergency_denied_sip_keeps_request_and_protection_without_error_flood(self):
+        execution, reconciliation, market, cancel, sync = self.fixtures('EXTENDED')
+        market.get_last_price.return_value = 10
+        market.get_execution_quote.side_effect = ExecutionQuoteUnavailable('SUBSCRIPTION_REQUIRED')
+        with patch.object(watcher, 'emergency_close_requested', return_value=True), \
+             patch.object(watcher, 'clear_emergency_close_request') as clear, \
+             patch.object(self.db, 'log_event', wraps=self.db.log_event) as log:
+            watcher.process_emergency_paper_close()
+            watcher.process_emergency_paper_close()
+            categories = [call.kwargs.get('event_type') for call in log.call_args_list]
+            self.assertEqual(categories.count('EXTENDED_EXIT_DATA_BLOCKED'), 1)
+            self.assertNotIn('PAPER_EMERGENCY_CLOSE_ERROR', categories)
+            clear.assert_not_called()
+        self.assertEqual(sync.call_count, 2)
+        self.assertEqual(self.db.load_managed_trade('t').remaining_quantity, 8)
+        cancel.assert_not_called()
+        execution.submit_exit.assert_not_called()
+
+    def test_emergency_closed_session_needs_no_price_and_keeps_request(self):
+        execution, reconciliation, market, cancel, sync = self.fixtures('CLOSED')
+        with patch.object(watcher, 'emergency_close_requested', return_value=True), \
+             patch.object(watcher, 'clear_emergency_close_request') as clear:
+            watcher.process_emergency_paper_close()
+            clear.assert_not_called()
+        market.get_last_price.assert_not_called()
+        market.get_execution_quote.assert_not_called()
+        sync.assert_called_once()
+        cancel.assert_not_called()
+        execution.submit_exit.assert_not_called()
 
     def test_lifecycle_checkpoint_records_changes_once(self):
         from core.lifecycle_audit import checkpoint

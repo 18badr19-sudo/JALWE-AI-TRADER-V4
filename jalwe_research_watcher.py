@@ -3317,6 +3317,22 @@ def _management_trade_scan_start(
 # ACTIVE PAPER TRADE MANAGEMENT
 # ============================================================
 
+def _defer_extended_exit(trade_id, trade, execution_engine, reason):
+    """Keep broker protection and persist a bounded, restart-safe diagnostic."""
+    metadata = trade.metadata if isinstance(trade.metadata, dict) else {}
+    changed = metadata.get('extended_exit_data_blocked') != reason
+    metadata['extended_exit_data_blocked'] = reason
+    trade.metadata = metadata
+    database.save_managed_trade(trade_id, trade)
+    _sync_protective_stop(trade_id, trade, execution_engine)
+    checkpoint(database, trade_id, trade)
+    if changed:
+        logger.warning('Extended exit deferred | symbol=%s reason=%s', trade.symbol, reason)
+        database.log_event(event_type='EXTENDED_EXIT_DATA_BLOCKED', severity='WARNING',
+            message='Extended exit deferred: live SIP access unavailable.',
+            metadata={'trade_id': trade_id, 'symbol': trade.symbol, 'reason': reason})
+
+
 def manage_active_paper_trades(state: dict) -> int:
     """
     Manage confirmed Alpaca PAPER positions.
@@ -3360,22 +3376,19 @@ def manage_active_paper_trades(state: dict) -> int:
             observed_high = None
             execution_quote = None
             session = exit_session(execution_engine.broker, enabled=settings.EXTENDED_EXIT_ENABLED)
+            if session == 'CLOSED':
+                # Broker reconciliation/protection still runs, but prices from
+                # an ineligible session must not complete targets or raise stops.
+                _sync_protective_stop(trade_id, trade, execution_engine)
+                checkpoint(database, trade_id, trade)
+                managed_count += 1
+                continue
             if session == 'EXTENDED':
                 try:
                     execution_quote = market_data.get_execution_quote(trade.symbol)
                     sell_limit(execution_quote, slippage_pct=settings.MAX_EXIT_SLIPPAGE_PCT)
                 except ExecutionQuoteUnavailable as exc:
-                    metadata = trade.metadata if isinstance(trade.metadata, dict) else {}
-                    changed = metadata.get('extended_exit_data_blocked') != exc.reason
-                    metadata['extended_exit_data_blocked'] = exc.reason
-                    trade.metadata = metadata
-                    database.save_managed_trade(trade_id, trade)
-                    _sync_protective_stop(trade_id, trade, execution_engine)
-                    if changed:
-                        logger.warning('Extended exit deferred | symbol=%s reason=%s', trade.symbol, exc.reason)
-                        database.log_event(event_type='EXTENDED_EXIT_DATA_BLOCKED', severity='WARNING',
-                            message='Extended exit deferred: live SIP access unavailable.',
-                            metadata={'trade_id': trade_id, 'symbol': trade.symbol, 'reason': exc.reason})
+                    _defer_extended_exit(trade_id, trade, execution_engine, exc.reason)
                     managed_count += 1
                     continue
             if isinstance(trade.metadata, dict):
@@ -3517,9 +3530,17 @@ def process_emergency_paper_close() -> int:
             if quantity <= 0:
                 database.save_managed_trade(trade_id, trade)
                 continue
+            if exit_session(execution_engine.broker, enabled=settings.EXTENDED_EXIT_ENABLED) == 'CLOSED':
+                _sync_protective_stop(trade_id, trade, execution_engine)
+                checkpoint(database, trade_id, trade)
+                continue
             current_price = float(market_data.get_last_price(trade.symbol))
             decision = TradeManagementDecision(symbol=trade.symbol, action=TradeAction.EXIT_TRAILING, quantity=quantity, current_price=current_price, stage_before=trade.stage, stage_after=trade.stage, stop_before=trade.current_stop, stop_after=trade.current_stop, reason='EMERGENCY_PAPER_CLOSE', metadata={'emergency': True})
-            context = prepare_exit_context(execution_engine, market_data, trade, decision)
+            try:
+                context = prepare_exit_context(execution_engine, market_data, trade, decision)
+            except ExecutionQuoteUnavailable as exc:
+                _defer_extended_exit(trade_id, trade, execution_engine, exc.reason)
+                continue
             if context['session'] == 'CLOSED':
                 database.save_managed_trade(trade_id, trade)
                 _sync_protective_stop(trade_id, trade, execution_engine)

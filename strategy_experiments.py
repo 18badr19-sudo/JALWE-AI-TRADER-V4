@@ -174,6 +174,14 @@ class StrategyExperiments:
             if status == "COMPLETE":
                 candidate = json.loads(row["candidate_json"])
                 result = simulate(bars, candidate.get("trigger_price"), candidate.get("invalidation_price"))
+                # Sidecar research cannot enter the preference-selection pipeline.
+                from research_variants import retest, runner_stops
+                trigger, stop = candidate.get("trigger_price"), candidate.get("invalidation_price")
+                if row["strategy"] in {"PREMARKET_HIGH_BREAK", "OPENING_RANGE_BREAKOUT", "COMPRESSION_BREAKOUT", "BULL_FLAG_BREAKOUT"}:
+                    result["breakout_retest"] = retest(bars, trigger, stop)
+                if result.get("traded") and result.get("entry_at"):
+                    runner_bars = bars.loc[bars.index >= result["entry_at"]]
+                    result["runner_stop_comparison"] = runner_stops(runner_bars, number(trigger), number(stop), entry_fill=result["entry_fill"])
                 trial_status = "COMPLETE" if number(result.get("net_r")) is not None else "AMBIGUOUS"
             else:
                 result, trial_status = {"protocol": PROTOCOL, "net_r": None}, status
@@ -329,11 +337,30 @@ class StrategyExperiments:
             preferred = conn.execute("""SELECT preferred_strategy, context FROM strategy_preferences
                 WHERE preferred_strategy IS NOT NULL AND expires_at > ? AND protocol = ?
                 ORDER BY context LIMIT 3""", (datetime.now(timezone.utc).isoformat(), PROTOCOL)).fetchall()
+            variants = conn.execute("SELECT strategy, result_json FROM strategy_trials WHERE protocol = ? AND result_json IS NOT NULL", (PROTOCOL,)).fetchall()
+        retests = premarket = comparisons = ambiguous = 0
+        edges = []
+        for trial in variants:
+            result = json.loads(trial["result_json"])
+            premarket += trial["strategy"] == "PREMARKET_HIGH_BREAK" and number(result.get("net_r")) is not None
+            retests += number((result.get("breakout_retest") or {}).get("net_r")) is not None
+            rules = (result.get("runner_stop_comparison") or {}).get("rules") or {}
+            if rules and all(r.get("reached_t2") for r in rules.values()):
+                if all(number(r.get("net_r")) is not None for r in rules.values()):
+                    comparisons += 1
+                    edges.append(rules["T2"]["net_r"] - rules["T1"]["net_r"])
+                else:
+                    ambiguous += 1
         return (f"🧪 تجارب الاستراتيجيات الافتراضية: {completed}/{count}\n"
                 f"تفضيلات PAPER المجتازة للتقييم: {active}\n"
                 "تكلفة مفترضة 0.10% لكل جانب؛ التقييم لا يمثل أرباحًا فعلية.\n" +
                 ("\n".join(f"• {r['preferred_strategy']} | {r['context']}" for r in preferred)
                  if preferred else "الاختيار الأصلي مستمر حتى اجتياز المقارنة.") +
+                f"\nاختراق قمة ما قبل الافتتاح: {premarket} نتيجة مكتملة." +
+                f"\nإعادة اختبار الاختراق: {retests} نتيجة قابلة للقياس." +
+                (f"\nفرق متوسط المحاكاة لصالح وقف T2: {statistics.mean(edges):+.3f}R." if edges else "\nفرق وقف T2: لا توجد مقارنة مكتملة بعد." ) +
+                (f"\nمقارنة وقف T2 عند T1 أو T2 للجزء المتبقي: {comparisons} مسارًا بعد T2 | ترتيب غير محسوم {ambiguous}.") +
+                "\nتجارب إضافية فقط؛ لا تغيّر الدخول أو الوقف تلقائيًا، وأهداف المقارنة 2R/3R/4R افتراضية؛ قد تتكرر نوافذ السهم." +
                 "\n" + self.guard.status_text())
 
 

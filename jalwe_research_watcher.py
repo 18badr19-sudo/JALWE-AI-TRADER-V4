@@ -2460,7 +2460,7 @@ def notify_execution_lifecycle(
             "🟢 JALWE — تم الدخول PAPER\n\n"
             f"📌 السهم: ${symbol}\n"
             f"💲 سعر الدخول الفعلي: ${format_number(trade.entry_price)}\n"
-            f"🔢 الكمية: ${trade.initial_quantity}\n"
+            f"🔢 الكمية: {trade.initial_quantity} سهم\n"
             f"🛑 الستوب: ${format_number(trade.current_stop)}\n"
             f"🎯 T1: ${format_number(trade.target_1)}\n"
             f"🎯 T2: ${format_number(trade.target_2)}\n"
@@ -2513,7 +2513,7 @@ def notify_execution_lifecycle(
                 "🛡 JALWE — حماية Alpaca مفعلة\n\n"
                 f"📌 السهم: ${symbol}\n"
                 f"🛑 Stop: ${format_number(protective.get('stop_price'))}\n"
-                f"🔢 الكمية المحمية: ${protective.get('quantity', trade.remaining_quantity)}\n"
+                f"🔢 الكمية المحمية: {protective.get('quantity', trade.remaining_quantity)} سهم\n"
                 "✅ أمر GTC موجود عند الوسيط حتى لو توقف JALWE مؤقتًا."
             ),
         )
@@ -2827,7 +2827,7 @@ def notify_recovered_protective_stop_fills(
                 "🛡 JALWE — Alpaca نفذ Protective Stop\n\n"
                 f"📌 السهم: ${row.get('symbol', '')}\n"
                 f"💲 سعر التنفيذ: ${format_number(protective.get('fill_price'))}\n"
-                f"🔢 الكمية المنفذة: ${protective.get('filled_quantity', 0)}\n"
+                f"🔢 الكمية المنفذة: {protective.get('filled_quantity', 0)} سهم\n"
                 f"💰 PnL المحقق للصفقة: ${format_number(realized_total)}\n"
                 f"💼 قيمة محفظة JALWE الآن: ${equity_text}\n"
                 "🧠 النتيجة محفوظة في سجل JALWE للتعلم."

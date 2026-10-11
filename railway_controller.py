@@ -972,6 +972,47 @@ def portfolio_text() -> str:
     return "\n".join(lines)
 
 
+def _open_strategy_marks(trades, positions):
+    """Attribute broker marks only when one managed trade matches the full position."""
+    import math
+    details = []
+    total = 0.0
+    complete = True
+    for trade in trades.values():
+        matches = [p for p in positions if p.get("symbol") == trade.symbol]
+        mark = None
+        try:
+            if (sum(t.symbol == trade.symbol for t in trades.values()) == 1
+                    and len(matches) == 1
+                    and float(matches[0]["qty"]) == trade.remaining_quantity):
+                price = float(matches[0]["current_price"])
+                if math.isfinite(price) and price > 0:
+                    mark = (price - trade.entry_price) * trade.remaining_quantity
+        except (KeyError, TypeError, ValueError):
+            pass
+        complete = complete and mark is not None
+        if mark is not None:
+            total += mark
+        details.append({"symbol": trade.symbol, "bought": trade.initial_quantity,
+                        "sold": trade.initial_quantity - trade.remaining_quantity,
+                        "remaining": trade.remaining_quantity, "unrealized": mark})
+    return {"unrealized": total if complete else None, "positions": details}
+
+
+def _strategy_mark_lines(strategy):
+    unrealized = strategy.get("unrealized")
+    equity = strategy.get("marked_equity")
+    lines = ["💹 غير المحقق للمفتوح الآن: " + (money(unrealized) if unrealized is not None else "غير متاح"),
+             "💰 القيمة شاملة المفتوح: " + (money(equity) if equity is not None else "غير متاحة")]
+    for item in strategy.get("positions", []):
+        mark = item["unrealized"]
+        lines.append(f"• {item['symbol']}: شراء {item['bought']} | مباع {item['sold']} | متبقٍ {item['remaining']} سهم | غير محقق "
+                     + (money(mark) if mark is not None else "غير متاح"))
+    if strategy.get("positions"):
+        lines.append("تقييم المفتوح حسب سعر الوسيط عند القراءة؛ ليس ربحًا محققًا أو نتيجة الفترة.")
+    return lines
+
+
 def _strategy_report_snapshot(
     since_ny: datetime,
 ) -> dict[str, Any]:
@@ -1042,6 +1083,12 @@ def _strategy_report_snapshot(
         database
         .get_active_managed_trade_rows()
     )
+
+    trades = database.load_active_managed_trades()
+    try:
+        marks = _open_strategy_marks(trades, get_positions() if trades else [])
+    except Exception:
+        marks = _open_strategy_marks(trades, [])
 
     with database.connection() as conn:
         rows = conn.execute(
@@ -1115,6 +1162,8 @@ def _strategy_report_snapshot(
     return {
         "starting_capital": starting_capital,
         "strategy_equity": strategy_equity,
+        **marks,
+        "marked_equity": strategy_equity + marks["unrealized"] if marks["unrealized"] is not None else None,
         "capital_adjustments_total": total_adjustments,
         "capital_adjustments_period": period_adjustments,
         "period_realized": period_realized,
@@ -1197,14 +1246,14 @@ def daily_report_text() -> str:
             f"{money(strategy['starting_capital'])}"
         ),
         (
-            "💰 قيمة الاستراتيجية الحالية: "
+            "💼 رصيد الاستراتيجية بعد المحقق: "
             f"{money(strategy['strategy_equity'])}"
         ),
         (
             "🔄 صافي إيداع/سحب اليوم: "
             f"{money(strategy['capital_adjustments_period'])}"
         ),
-        f"📈 النتيجة: {label}",
+        f"📈 النتيجة المحققة: {label}",
         (
             "💲 الربح/الخسارة المحققة اليوم: "
             f"{money(realized)}"
@@ -1223,13 +1272,10 @@ def daily_report_text() -> str:
         ),
     ]
 
-    lines.extend(
-        account_lines
-    )
+    lines.extend(_strategy_mark_lines(strategy))
+    lines.extend(account_lines)
 
-    return "\n".join(
-        lines
-    )
+    return "\n".join(lines)
 
 
 def weekly_report_text() -> str:
@@ -1290,7 +1336,7 @@ def weekly_report_text() -> str:
             f"{money(strategy['starting_capital'])}"
         ),
         (
-            "💰 قيمة الاستراتيجية الحالية: "
+            "💼 رصيد الاستراتيجية بعد المحقق: "
             f"{money(strategy['strategy_equity'])}"
         ),
         (
@@ -1327,9 +1373,8 @@ def weekly_report_text() -> str:
         ),
     ]
 
-    lines.extend(
-        account_lines
-    )
+    lines.extend(_strategy_mark_lines(strategy))
+    lines.extend(account_lines)
 
     return "\n".join(
         lines

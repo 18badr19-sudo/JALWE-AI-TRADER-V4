@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 from strategy_experiments import StrategyExperiments
-from market.research_diagnostics import coverage_diagnostics, diagnostic_counts, diagnostic_text, error_diagnostics
+from market.research_diagnostics import coverage_diagnostics, diagnostic_counts, diagnostic_text, coverage_text, error_diagnostics
 
 logger = logging.getLogger(__name__)
 
@@ -458,6 +458,7 @@ class DecisionOutcomeMemory:
                 "strategy_experiments": self.experiments.status_text(),
                 "rejection_audit": self.rejection_audit(day),
                 "data_diagnostic_counts": diagnostic_counts(diagnostic_rows, "result_json"),
+                "data_coverage_text": coverage_text(diagnostic_rows, "result_json"),
                 "delayed_sip_research": self.delayed_sip_research.report_for_ny_date(day)}
 
     @staticmethod
@@ -474,6 +475,7 @@ class DecisionOutcomeMemory:
             f"بدون سعر مرجعي موثوق: {statuses['UNOBSERVABLE']}",
             ("أسباب نقص التقييم الأصلي: " + diagnostic_text(summary["data_diagnostic_counts"])
              if summary.get("data_diagnostic_counts") else ""),
+            summary.get("data_coverage_text", ""),
             f"المسارات المكتملة: هدف أولًا {counts['TARGET_FIRST']} | وقف أولًا {counts['STOP_FIRST']} | ترتيب غير محسوم {counts['AMBIGUOUS_STOP_TARGET']}",
             f"لم تتأكد فوق مستوى التفعيل: {counts['NOT_ACTIVATED']}",
             "القياس من شموع 1m وبحسب تغطية مزوّد البيانات؛ أهداف 2R افتراضية عند غياب الهدف الأصلي.",

@@ -13,7 +13,7 @@ import pandas as pd
 
 from market.research_diagnostics import (
     SIP_RESEARCH_DELAY_MINUTES, coverage_diagnostics, diagnostic_counts,
-    diagnostic_text, error_diagnostics,
+    diagnostic_text, coverage_text, error_diagnostics,
 )
 
 logger = logging.getLogger(__name__)
@@ -183,6 +183,9 @@ class DelayedSipResearch:
         reasons = diagnostic_text(diagnostic_counts(rows, "result_json"))
         if reasons:
             lines.append("أسباب نقص SIP: " + reasons)
+        coverage = coverage_text(rows, "result_json")
+        if coverage:
+            lines.append(coverage)
         lines.append("بحث إضافي فقط؛ لا يغيّر قرار الدخول أو تفضيلات الاستراتيجيات، ولا يثبت بيعًا لحظيًا خارج الجلسة.")
         lines.append("الحركة من المرجع الأصلي؛ هدف 2R افتراضي عند غياب T1. قد يتكرر السهم بين السجلات.")
         return "\n".join(lines)

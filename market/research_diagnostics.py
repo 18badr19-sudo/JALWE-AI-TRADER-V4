@@ -55,7 +55,8 @@ def coverage_diagnostics(frame, valid, start, end) -> dict:
     stamps = (pd.DatetimeIndex([], tz="UTC") if frame is None else
               pd.to_datetime(frame.index, utc=True, errors="coerce"))
     in_window = stamps[(stamps >= start) & (stamps < end)]
-    valid_stamps = pd.DatetimeIndex(valid.index)
+    valid_stamps = pd.to_datetime(valid.index, utc=True, errors="coerce")
+    valid_stamps = valid_stamps[(valid_stamps >= start) & (valid_stamps < end)].unique()
     missing = expected.difference(valid_stamps)
     columns = {"open", "high", "low", "close", "volume"}
     if frame is None or frame.empty:
@@ -68,7 +69,16 @@ def coverage_diagnostics(frame, valid, start, end) -> dict:
         reason = "INVALID_OR_DUPLICATE_BARS"
     else:
         reason = "MISSING_PROVIDER_MINUTES"
+    raw_minutes = in_window.floor("min").unique()
+    absent = expected.difference(raw_minutes)
+    rejected = missing.intersection(raw_minutes)
+    interior = absent[(absent > valid_stamps.min()) & (absent < valid_stamps.max())] if len(valid_stamps) else absent[:0]
     return {"reason": reason, "expected_minutes": len(expected),
+            "coverage_pct": round(100 * len(valid_stamps) / len(expected), 2) if len(expected) else 0,
+            "absent_provider_minutes": len(absent), "rejected_minutes": len(rejected),
+            "interior_missing_minutes": len(interior),
+            "leading_or_trailing_missing_minutes": len(absent) - len(interior),
+            "coverage_cause": "UNKNOWN_NO_PRICE_INFERENCE",
             "raw_rows": 0 if frame is None else len(frame),
             "observed_minutes": len(valid_stamps), "missing_minutes": len(missing),
             "duplicate_rows": int(in_window.duplicated().sum()),
@@ -103,3 +113,22 @@ def diagnostic_text(counts: dict) -> str:
               "LEGACY_UNCLASSIFIED": "سجل سابق دون سبب مفصل"}
     return " | ".join(f"{labels.get(reason, reason)}: {count}"
                       for reason, count in sorted(counts.items()))
+
+
+def coverage_text(rows, field="metadata_json"):
+    """Describe retrieval coverage separately from provider request failures."""
+    measured = []
+    for row in rows:
+        try:
+            info = (json.loads(row.get(field) or "{}").get("data_diagnostics") or {})
+            if "absent_provider_minutes" in info:
+                measured.append(info)
+        except (ValueError, TypeError):
+            continue
+    if not measured:
+        return ""
+    absent = sum(d["absent_provider_minutes"] for d in measured)
+    invalid = sum(d["rejected_minutes"] for d in measured)
+    interior = sum(d["interior_missing_minutes"] for d in measured)
+    return (f"تشخيص {len(measured)} نافذة: دقائق غير مرجعة {absent} (داخل النافذة {interior}) | مرجعة ومرفوضة {invalid}. "
+            "قد تتكرر النوافذ؛ سبب غياب الدقيقة غير مثبت، ولا يُستنتج منها سعر.")

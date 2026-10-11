@@ -131,6 +131,20 @@ class StrategyExperimentTests(unittest.TestCase):
         self.assertFalse(evidence[0]["eligible_at_decision"])
         self.assertTrue(all(e["eligible_at_decision"] for e in evidence[1:]))
 
+    def test_sidecar_research_is_persisted_without_native_preference_changes(self):
+        self.memory.record(self.payload(), "weekend")
+        with self.db.connection() as conn:
+            key = conn.execute("SELECT decision_key FROM strategy_trials LIMIT 1").fetchone()[0]
+            self.engine.observe(conn, key, self.bars(), "COMPLETE")
+            rows = conn.execute("SELECT * FROM strategy_trials").fetchall()
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM strategy_preferences").fetchone()[0], 0)
+        baseline = next(r for r in rows if r["strategy"] == "OPENING_RANGE_BREAKOUT")
+        result = json.loads(baseline["result_json"])
+        self.assertEqual(result["breakout_retest"]["entry_rule"], "BREAKOUT_RETEST")
+        self.assertFalse(result["runner_stop_comparison"]["auto_apply"])
+        self.assertEqual(len(rows), 2)
+        self.assertIn("إعادة اختبار الاختراق", self.engine.status_text())
+
     def test_partial_paths_are_not_simulated_or_promoted(self):
         self.memory.record(self.payload(), "v")
         with self.db.connection() as conn:

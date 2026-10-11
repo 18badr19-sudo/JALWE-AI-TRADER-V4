@@ -15,7 +15,7 @@ import pandas as pd
 from decision_outcome_memory import DecisionOutcomeMemory
 from core.database import database
 from market.market_data import get_market_data
-from market.research_diagnostics import coverage_diagnostics, diagnostic_counts, diagnostic_text, error_diagnostics
+from market.research_diagnostics import coverage_diagnostics, diagnostic_counts, diagnostic_text, coverage_text, error_diagnostics
 
 logger = logging.getLogger(__name__)
 
@@ -598,6 +598,9 @@ class OpportunityPerformanceTracker:
         if reasons:
             lines.append("أسباب نقص بيانات التقييم الأصلي: " + reasons)
         rows = list(summary.get("rows") or [])
+        coverage = coverage_text(rows)
+        if coverage:
+            lines.append(coverage)
         completed = [
             row for row in rows
             if OpportunityPerformanceTracker._verified_complete(row)

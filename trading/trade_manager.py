@@ -1253,13 +1253,13 @@ class TradeManager:
 
         trade.current_stop = max(
             trade.current_stop,
-            trade.target_1,
+            trade.entry_price,
         )
 
         trade.metadata[
             "profit_lock_floor"
         ] = float(
-            trade.target_1
+            trade.entry_price
         )
 
         self._sync_metadata(
@@ -1600,7 +1600,7 @@ class TradeManager:
                         "Target 1 reached. "
                         "Waiting for broker fill "
                         "before moving stop "
-                        "to Target 1."
+                        "to entry price."
                     ),
 
                     planned_target_quantity=(
@@ -1636,7 +1636,7 @@ class TradeManager:
                     "Target 1 reached. "
                     "Position is too small for "
                     "another whole-share partial, "
-                    "so stop moved to Target 1."
+                    "so stop moved to entry price."
                 ),
             )
 
@@ -2284,16 +2284,16 @@ class TradeManager:
                 )
 
                 # Profit Lock 1:
-                # lock the remaining position at Target 1.
+                # protect the remaining position at entry after a confirmed T1 fill.
                 trade.current_stop = max(
                     trade.current_stop,
-                    trade.target_1,
+                    trade.entry_price,
                 )
 
                 trade.metadata[
                     "profit_lock_floor"
                 ] = float(
-                    trade.target_1
+                    trade.entry_price
                 )
 
             # ================================================

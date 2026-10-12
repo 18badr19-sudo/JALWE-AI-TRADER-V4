@@ -36,7 +36,41 @@ class PaperTargetTouchTests(
         self._fill_exit(manager, trade, decision, 11.82, 'CANE-T1')
         self.assertEqual(trade.remaining_quantity, 5)
         self.assertTrue(trade.t1_completed)
-        self.assertAlmostEqual(trade.current_stop, 11.82)
+        self.assertAlmostEqual(trade.current_stop, 11.66)
+
+    def test_snap_t1_fill_allows_pullback_then_t2_locks_t1(self):
+        manager = TradeManager()
+        trade = manager.create_trade('SNAP', 6.20, 3, 6.0731, 6.4538, 6.5807, 6.7076)
+        t1 = manager.evaluate(trade, 6.4538)
+        self.assertEqual(t1.action, TradeAction.TAKE_PROFIT_1)
+        self.assertAlmostEqual(trade.current_stop, 6.0731)
+        self._fill_exit(manager, trade, t1, 6.45, 'SNAP-T1')
+        self.assertEqual(trade.remaining_quantity, 2)
+        self.assertAlmostEqual(trade.current_stop, 6.20)
+        self.assertNotIn(manager.evaluate(trade, 6.44).action,
+                         (TradeAction.EXIT_STOP, TradeAction.EXIT_TRAILING))
+        t2 = manager.evaluate(trade, 6.5807)
+        if t2.quantity:
+            self.assertEqual(t2.action, TradeAction.TAKE_PROFIT_2)
+            self.assertAlmostEqual(trade.current_stop, 6.20)
+            self._fill_exit(manager, trade, t2, 6.58, 'SNAP-T2')
+        else:
+            self.assertEqual(t2.action, TradeAction.LOCK_T2)
+        self.assertTrue(trade.t2_completed)
+        self.assertAlmostEqual(trade.current_stop, 6.4538)
+
+    def test_single_share_uses_entry_then_t1_then_t2_stops(self):
+        manager = TradeManager(trailing_distance_pct=20.0)
+        trade = manager.create_trade('ONE', 10.0, 1, 9.5, 11.0, 12.0, 13.0)
+        self.assertEqual(manager.evaluate(trade, 11.0).action, TradeAction.LOCK_T1)
+        self.assertAlmostEqual(trade.current_stop, 10.0)
+        self.assertNotEqual(manager.evaluate(trade, 10.99).action, TradeAction.EXIT_STOP)
+        self.assertEqual(manager.evaluate(trade, 12.0).action, TradeAction.LOCK_T2)
+        self.assertAlmostEqual(trade.current_stop, 11.0)
+        manager.evaluate(trade, 13.0)
+        self.assertTrue(trade.t3_completed)
+        self.assertAlmostEqual(trade.current_stop, 12.0)
+        self.assertEqual(trade.remaining_quantity, 1)
 
     @staticmethod
     def _fill_exit(
@@ -146,7 +180,7 @@ class PaperTargetTouchTests(
         )
         self.assertAlmostEqual(
             trade.current_stop,
-            11.0,
+            10.0,
         )
 
         t2 = manager.evaluate(
@@ -212,7 +246,7 @@ class PaperTargetTouchTests(
             trade.trailing_active
         )
 
-    def test_t1_fill_locks_remaining_cane_position_at_t1(
+    def test_t1_fill_locks_remaining_cane_position_at_entry(
         self,
     ) -> None:
         manager = TradeManager()
@@ -250,18 +284,18 @@ class PaperTargetTouchTests(
         )
         self.assertAlmostEqual(
             trade.current_stop,
-            11.79,
+            11.66,
         )
         self.assertAlmostEqual(
             trade.metadata[
                 "profit_lock_floor"
             ],
-            11.79,
+            11.66,
         )
 
         stop_decision = manager.evaluate(
             trade,
-            current_price=11.78,
+            current_price=11.65,
         )
 
         self.assertEqual(

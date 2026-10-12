@@ -55,6 +55,20 @@ class RestartAndProtectiveStopSafetyTests(
             order,
         )
 
+    def test_t1_entry_stop_survives_restart(self):
+        manager = TradeManager()
+        trade = manager.create_trade('SNAP', 6.20, 3, 6.0731, 6.4538, 6.5807, 6.7076)
+        self._fill_exit(manager, trade, manager.evaluate(trade, 6.4538), 6.45, 'SNAP-T1')
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / 'ladder.db')
+            Database(path).save_managed_trade('ladder', trade)
+            restored = Database(path).load_managed_trade('ladder')
+        self.assertTrue(restored.t1_completed)
+        self.assertEqual(restored.remaining_quantity, 2)
+        self.assertAlmostEqual(restored.current_stop, 6.20)
+        self.assertAlmostEqual(restored.metadata['profit_lock_floor'], 6.20)
+        self.assertNotEqual(manager.evaluate(restored, 6.44).action, TradeAction.EXIT_STOP)
+
     def test_runner_state_survives_database_restart(
         self,
     ) -> None:
@@ -308,7 +322,7 @@ class RestartAndProtectiveStopSafetyTests(
             order_id="NEW-CANE-STOP",
             client_order_id="JALWE-STOP-NEW",
             status=OrderStatus.ACCEPTED,
-            requested_price=11.79,
+            requested_price=11.66,
             filled_quantity=0,
         )
 
@@ -372,7 +386,7 @@ class RestartAndProtectiveStopSafetyTests(
         execution_engine.submit_protective_stop.assert_called_once_with(
             symbol="CANE",
             quantity=5,
-            stop_price=11.79,
+            stop_price=11.66,
             client_order_id=ANY,
             before_submit=ANY,
         )
@@ -390,7 +404,7 @@ class RestartAndProtectiveStopSafetyTests(
         )
         self.assertAlmostEqual(
             result["stop_price"],
-            11.79,
+            11.66,
         )
 
         self.assertEqual(
@@ -409,7 +423,7 @@ class RestartAndProtectiveStopSafetyTests(
             trade.metadata[
                 "protective_stop_price"
             ],
-            11.79,
+            11.66,
         )
         self.assertTrue(
             trade.metadata[

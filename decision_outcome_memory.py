@@ -386,6 +386,17 @@ class DecisionOutcomeMemory:
             "Price reached the setup invalidation level before entry.": "وصل السعر إلى إلغاء الفرصة قبل الدخول",
             "All native JALWE decision gates passed.": "اجتازت جميع بوابات القرار",
         }
+        translations.update({
+            "Latched entry failed current native quality recheck.": "تراجعت جودة الفرصة عند إعادة الفحص قبل الدخول",
+            "Latched market-regime refresh unavailable.": "تعذر تحديث حالة السوق قبل الدخول",
+            "Final entry quality failed: CURRENT_RVOL_BELOW_MIN": "النشاط الحالي أقل من الحد عند الدخول",
+            "Final entry quality failed: MISSING_CURRENT_ACTIVITY": "دليل النشاط والسيولة الحالي ناقص",
+            "Final entry quality failed: SPREAD_TOO_LARGE_FOR_RISK": "السبريد كبير مقارنة بالسعر أو مسافة الوقف",
+            "Final entry quality failed: ENTRY_QUOTE_UNAVAILABLE": "تعذر قراءة عرض حديث قبل الدخول",
+            "Final entry quality failed: STALE_OR_MISSING_QUOTE": "العرض قبل الدخول قديم أو بلا وقت موثوق",
+            "Final entry quality failed: INVALID_QUOTE": "عرض غير صالح قبل الدخول",
+            "Final entry quality failed: QUOTE_FEED_MISMATCH": "مصدر عرض الدخول لا يطابق مصدر القرار",
+        })
         lines = [f"🔎 أسباب قلة الدخول — {audit['date']} NY"]
         for state, label in labels.items():
             data = audit["states"][state]

@@ -206,8 +206,10 @@ class ResearchReaderTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             reader.get_research_observation_bars("TEST", start, end, as_of=end + timedelta(minutes=15))
         reader.client.get_stock_bars.assert_not_called()
-        frame = reader.get_research_observation_bars("TEST", start, end,
-                                                   as_of=end + timedelta(minutes=16))
+        with patch.object(reader, "diagnose_missing_minute", return_value=[]) as probe:
+            frame = reader.get_research_observation_bars("TEST", start, end,
+                                                       as_of=end + timedelta(minutes=16))
+            probe.assert_called_once()
         request = reader.client.get_stock_bars.call_args.args[0]
         self.assertEqual(request.feed, DataFeed.SIP)
         self.assertEqual(frame.attrs["data_feed"], "sip")

@@ -694,6 +694,7 @@ class DecisionEngine:
             )
             if (
                 current_market_name in {"PANIC", "UNKNOWN"}
+                or not math.isfinite(float(current_market.confidence))
                 or current_market.confidence < 0.50
             ):
                 self._breakout_latches.pop(symbol, None)
@@ -716,9 +717,11 @@ class DecisionEngine:
                     stop_price=stop_price,
                 )
         except Exception as exc:
-            warnings.append(
-                f"Latched market-regime refresh unavailable: {exc}"
-            )
+            gates["market_regime"] = False
+            self._breakout_latches.pop(symbol, None)
+            return self._reject(symbol=symbol, reason="Latched market-regime refresh unavailable.",
+                                gates=gates, warnings=warnings,
+                                metadata={**base_metadata, "refresh_error_type": type(exc).__name__})
 
         try:
             current_price = float(
@@ -835,33 +838,55 @@ class DecisionEngine:
                 stop_price=breakout.stop_price,
             )
 
-        latched_ai_score = float(
-            latch.get("ai_score", settings.MIN_SIGNAL_SCORE)
-            or settings.MIN_SIGNAL_SCORE
-        )
-
-        latched_ai = AIAnalysis(
-            symbol=symbol,
-            action=SignalAction.BUY,
-            score=latched_ai_score,
-            probability=min(1.0, max(0.0, latched_ai_score / 100.0)),
-            confidence=1.0,
-            bullish_score=latched_ai_score,
-            bearish_score=max(0.0, 100.0 - latched_ai_score),
-            reasons=["AI BUY gate was passed before breakout latch."],
-            metadata={"latched": True},
-        )
+        # Confirmed latch must pass current native quality; retain the original setup
+        # and deadline, never let a later strategy switch resurrect it.
+        for name in ("ai", "opportunity", "strategy_router", "session_strategy"):
+            gates[name] = False
+        try:
+            self._apply_news(features, warnings)
+            self._apply_options(features, warnings)
+            current_ai = self.ai_engine.evaluate(features)
+            current_opportunity = self.opportunity_engine.evaluate(features)
+            current_routed = self.strategy_router.route(current_opportunity, current_market)
+            session = self.session_feature_engine.build(symbol, bars)
+            current_session = self.session_strategy_engine.evaluate(features, session, bars)
+            candidates = self._session_experiment_evidence(current_session, self.session_strategy_engine.minimum_score)
+            selected = next((c for c in candidates if c["strategy"] == latch.get("strategy")), None)
+            gates["ai"] = getattr(current_ai.action, "value", str(current_ai.action)) == "BUY"
+            gates["opportunity"] = bool(current_opportunity.approved)
+            gates["strategy_router"] = bool(current_routed.approved)
+            gates["session_strategy"] = bool(current_session.approved and selected and selected["eligible_at_decision"])
+            latch_metadata["latched_quality_refresh"] = {
+                "ai_score": current_ai.score, "opportunity_score": current_opportunity.score,
+                "original_opportunity_score": latch.get("opportunity_score"),
+                "selected_candidate": selected, "gates": {k: gates[k] for k in
+                    ("ai", "opportunity", "strategy_router", "session_strategy")}}
+            latch_metadata["decision_features"] = self._decision_feature_evidence(features)
+            if not all(gates[k] for k in ("ai", "opportunity", "strategy_router", "session_strategy")):
+                raise ValueError("Current native quality no longer passes")
+            if selected["invalidation_price"] >= current_price:
+                gates["session_strategy"] = False
+                raise ValueError("Current candidate is invalidated")
+            if current_price < selected["trigger_price"]:
+                gates["trigger"] = False
+                raise ValueError("Current candidate trigger has not been reached")
+        except Exception as exc:
+            self._breakout_latches.pop(symbol, None)
+            latch_metadata["latched_quality_refresh_error"] = type(exc).__name__
+            return self._reject(symbol=symbol, reason="Latched entry failed current native quality recheck.",
+                                gates=gates, warnings=warnings, metadata=latch_metadata,
+                                strategy=latch.get("strategy"), entry_price=trigger_price, stop_price=stop_price)
+        latched_ai_score = float(current_ai.score)
+        # Current grading can reduce risk, but cannot increase the original budget.
+        risk_budget = min(float(latch.get("risk_pct", 0) or 0), float(current_routed.final_risk_pct))
 
         risk = self.risk_engine.evaluate(
             features=features,
-            ai_analysis=latched_ai,
+            ai_analysis=current_ai,
             daily_start_equity=daily_start_equity,
             strategy_equity=strategy_equity,
-            recommended_risk_pct=float(
-                latch.get("risk_pct", 0.0)
-                or 0.0
-            ),
-            setup_grade=latch.get("setup_grade"),
+            recommended_risk_pct=risk_budget,
+            setup_grade=current_routed.grade.value,
             confirmed_entry_price=breakout.close_price,
             confirmed_stop_price=breakout.stop_price,
             confirmation_approved=True,
@@ -892,17 +917,25 @@ class DecisionEngine:
                 stop_price=breakout.stop_price,
             )
 
+        evidence = self._final_entry_evidence(symbol, features, breakout.close_price,
+                                              risk.stop_price, base_metadata.get("decision_data_feed"))
+        gates["entry_quality"] = bool(evidence["approved"])
+        latch_metadata["entry_quality"] = evidence
         self._breakout_latches.pop(symbol, None)
+        if not evidence["approved"]:
+            return self._reject(symbol=symbol, reason="Final entry quality failed: " + evidence["reason"],
+                                gates=gates, warnings=warnings, metadata=latch_metadata,
+                                strategy=latch.get("strategy"), entry_price=breakout.close_price, stop_price=risk.stop_price)
 
         return FinalTradeDecision(
             symbol=symbol,
             state=DecisionState.READY_FOR_PAPER_EXECUTION,
             ready_for_execution=True,
-            market_regime=latch.get("market_regime"),
+            market_regime=current_market_name,
             strategy=latch.get("strategy"),
-            setup_grade=latch.get("setup_grade"),
-            opportunity_score=latch.get("opportunity_score"),
-            session_strategy_score=latch.get("session_strategy_score"),
+            setup_grade=current_routed.grade.value,
+            opportunity_score=current_routed.routed_score,
+            session_strategy_score=selected["score"],
             breakout_score=breakout.score,
             ai_score=latched_ai_score,
             risk_pct=risk.risk_pct,
@@ -923,6 +956,17 @@ class DecisionEngine:
                 },
             ),
         )
+
+    def _final_entry_evidence(self, symbol, features, entry, stop, feed):
+        from trading.entry_quality import assess_entry
+        try:
+            quote = self.market_data.get_latest_quote(symbol)
+        except Exception as exc:
+            return {"approved": False, "reason": "ENTRY_QUOTE_UNAVAILABLE",
+                    "error_type": type(exc).__name__, "feed": feed}
+        return assess_entry(features, quote, entry, stop, feed,
+                            now=datetime.now(timezone.utc), min_rvol=settings.MIN_RVOL,
+                            max_spread_pct=settings.MAX_SPREAD_PCT)
 
     # ========================================================
     # MAIN ANALYSIS
@@ -1122,6 +1166,11 @@ class DecisionEngine:
         # Freeze the evidence available at this decision, including failed quality
         # checks. Outcome research must never substitute a later feature snapshot.
         base_metadata["decision_features"] = self._decision_feature_evidence(features)
+        base_metadata["research_stop_context"] = {
+            "atr": getattr(features, "atr", None), "atr_timeframe": timeframe,
+            "model_low": float(bars["low"].tail(5).min()) if "low" in bars else None,
+            "model_bars": 5, "available_at_decision": True,
+        }
 
         if not features.data_quality_ok or features.data_is_stale:
             valid_rows = int(
@@ -1694,6 +1743,14 @@ class DecisionEngine:
         # 13. ALL NATIVE JALWE GATES MUST PASS
         # ====================================================
 
+        evidence = self._final_entry_evidence(symbol, features, breakout.close_price,
+                                              risk.stop_price, base_metadata.get("decision_data_feed"))
+        gates["entry_quality"] = bool(evidence["approved"])
+        base_metadata["entry_quality"] = evidence
+        if not evidence["approved"]:
+            return self._reject(symbol=symbol, reason="Final entry quality failed: " + evidence["reason"],
+                                gates=gates, warnings=warnings, metadata=base_metadata,
+                                strategy=session_strategy_name, entry_price=breakout.close_price, stop_price=risk.stop_price)
         all_required_gates = all(gates.values())
 
         if not all_required_gates:

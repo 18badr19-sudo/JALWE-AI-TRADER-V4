@@ -7,6 +7,43 @@ PROTOCOL = "breakout-retest-runner-stop-cost10bps-v1"
 COST = .001
 
 
+def entry_stop_matrix(bars, trigger, stop, context):
+    """Paired 2x2 research: same future window, frozen structure, $1 risk/$100 cash."""
+    from strategy_experiments import simulate, number
+    base = {"protocol": "paired-entry-structure-atr-fixed-risk-v1",
+            "scope": "SIMULATED_NOT_REALIZED_PNL", "auto_apply": False,
+            "risk_budget": 1.0, "cash_limit": 100.0, "atr_buffer_multiple": .25,
+            "target_rule": "2R_FROM_TRIGGER", "one_way_cost_pct": COST * 100,
+            "rules": {}}
+    trigger, stop = number(trigger), number(stop)
+    context = context if isinstance(context, dict) else {}
+    atr, low = number(context.get("atr")), number(context.get("model_low"))
+    if (not context.get("available_at_decision") or atr is None or low is None
+            or atr <= 0 or low <= 0 or trigger is None or stop is None
+            or not trigger > stop > 0):
+        return {**base, "outcome": "MISSING_FROZEN_STOP_CONTEXT"}
+    structure_stop = min(stop, low - .25 * atr)
+    if structure_stop <= 0:
+        return {**base, "outcome": "INVALID_STRUCTURE_STOP"}
+    base.update(atr=atr, atr_timeframe=context.get("atr_timeframe"), model_low=low)
+    for stop_name, stop_price in (("CURRENT", stop), ("STRUCTURE_ATR", structure_stop)):
+        for entry_name, entry_fn in (("DIRECT", simulate), ("RETEST", retest)):
+            result = entry_fn(bars, trigger, stop_price)
+            quantity = 0
+            fill = number(result.get("entry_fill"))
+            if result.get("traded") and fill is not None and fill > stop_price:
+                quantity = max(0, math.floor(min(1.0 / (fill - stop_price), 100.0 / fill)))
+            net_r = number(result.get("net_r"))
+            # Ambiguous paths remain unknown even when shares cannot be allocated.
+            pnl = (None if net_r is None else 0.0 if quantity == 0 else
+                   net_r * (trigger - stop_price) * quantity)
+            base["rules"][entry_name + "_" + stop_name] = {
+                **result, "stop": stop_price, "quantity": quantity,
+                "planned_risk_dollars": quantity * (fill - stop_price) if fill is not None else 0,
+                "net_pnl_dollars": pnl, "traded": bool(result.get("traded") and quantity > 0)}
+    return {**base, "outcome": "PAIRED_RESEARCH"}
+
+
 def retest(bars, trigger, stop):
     """Wait for a closed breakout, a later retest, then enter at next open."""
     from strategy_experiments import simulate, number

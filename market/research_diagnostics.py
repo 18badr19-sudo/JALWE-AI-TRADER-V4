@@ -23,7 +23,7 @@ def error_diagnostics(exc: Exception) -> dict:
         candidate = getattr(getattr(item, "response", None), "status_code", None)
         if candidate is None:
             try:
-                candidate = getattr(item, "status_code", None)
+                candidate = getattr(item, "status_code", None) or getattr(item, "code", None)
             except Exception:
                 candidate = None
         if isinstance(candidate, int) and 100 <= candidate <= 599:
@@ -73,7 +73,8 @@ def coverage_diagnostics(frame, valid, start, end) -> dict:
     absent = expected.difference(raw_minutes)
     rejected = missing.intersection(raw_minutes)
     interior = absent[(absent > valid_stamps.min()) & (absent < valid_stamps.max())] if len(valid_stamps) else absent[:0]
-    return {"reason": reason, "expected_minutes": len(expected),
+    return {"gap_trade_evidence": frame.attrs.get("gap_trade_evidence", []) if frame is not None else [],
+            "reason": reason, "expected_minutes": len(expected),
             "coverage_pct": round(100 * len(valid_stamps) / len(expected), 2) if len(expected) else 0,
             "absent_provider_minutes": len(absent), "rejected_minutes": len(rejected),
             "interior_missing_minutes": len(interior),
@@ -130,5 +131,17 @@ def coverage_text(rows, field="metadata_json"):
     absent = sum(d["absent_provider_minutes"] for d in measured)
     invalid = sum(d["rejected_minutes"] for d in measured)
     interior = sum(d["interior_missing_minutes"] for d in measured)
+    samples = Counter(sample.get("classification", "UNKNOWN")
+                      for d in measured for sample in d.get("gap_trade_evidence", []))
+    labels = {"NO_TRADES_IN_FEED": "بلا صفقات في المصدر",
+              "ONLY_NON_PRICE_UPDATING_TRADES": "صفقات لا تكوّن أسعار شمعة",
+              "REGULAR_TRADES_WITHOUT_BAR": "صفقات عادية دون شمعة",
+              "UNKNOWN_TRADE_CONDITIONS": "شروط صفقات غير محسومة",
+              "INCOMPLETE_TRADE_READ": "قراءة صفقات غير مكتملة",
+              "TRADE_PROBE_FAILED": "فشل فحص الصفقات",
+              "WAITING_FOR_HISTORICAL_DELAY": "ينتظر إتاحة التاريخي"}
+    evidence_text = (" عينة صفقات SIP للدقائق الغائبة: " +
+                     " | ".join(f"{labels.get(k, k)} {v}" for k, v in sorted(samples.items())) +
+                     ". العينة لا تفسر بقية الدقائق ولا تثبت السعر أو اكتمال المسار.") if samples else ""
     return (f"تشخيص {len(measured)} نافذة: دقائق غير مرجعة {absent} (داخل النافذة {interior}) | مرجعة ومرفوضة {invalid}. "
-            "قد تتكرر النوافذ؛ سبب غياب الدقيقة غير مثبت، ولا يُستنتج منها سعر.")
+            "قد تتكرر النوافذ؛ لا يُستنتج سعر من غياب الدقيقة." + evidence_text)

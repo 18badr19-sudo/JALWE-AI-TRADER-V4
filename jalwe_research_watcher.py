@@ -48,7 +48,7 @@ from core.lifecycle_audit import checkpoint
 from trading.exit_sessions import exit_session, sell_limit, prepare_exit_context, settle_exit
 from trading.exit_submission import prepare_exit, submit_prepared_exit
 from trading.protective_fills import apply_protective_stop_snapshot, TERMINAL_STATUSES
-from trading.protective_submission import record_stop_submission_error
+from trading.protective_submission import record_stop_submission_error, stop_response_active
 from uuid import uuid4
 from trading.execution_engine import (
     get_execution_engine,
@@ -3190,16 +3190,17 @@ def _sync_protective_stop(trade_id: str, trade: Any, execution_engine: Any) -> d
     metadata['protective_stop_quantity'] = quantity
     metadata['protective_stop_price'] = desired_stop
     metadata['protective_stop_status'] = stop_order.status.value
-    metadata['protective_stop_active'] = True
+    active = stop_response_active(stop_order.status)
+    metadata['protective_stop_active'] = active
     metadata['protective_stop_fill_applied'] = False
     metadata['protective_stop_applied_qty'] = 0
     metadata['protective_stop_applied_notional'] = 0.0
     trade.metadata = metadata
     database.save_managed_trade(trade_id, trade)
-    database.log_event(event_type='BROKER_PROTECTIVE_STOP_SYNC', severity='INFO', message=f'{trade.symbol}: broker protective stop synced qty={quantity} stop={desired_stop}', metadata={'trade_id': trade_id, 'symbol': trade.symbol, 'quantity': quantity, 'stop_price': desired_stop, 'order_id': stop_order.order_id})
-    logger.info('Protective stop synced | trade_id=%s symbol=%s qty=%s stop=%s status=%s order_id=%s',
+    database.log_event(event_type='BROKER_PROTECTIVE_STOP_SYNC', severity='INFO', message=f'{trade.symbol}: broker stop response status={stop_order.status.value} active={active} qty={quantity} stop={desired_stop}', metadata={'trade_id': trade_id, 'symbol': trade.symbol, 'quantity': quantity, 'stop_price': desired_stop, 'order_id': stop_order.order_id})
+    logger.info('Protective stop response | trade_id=%s symbol=%s qty=%s stop=%s status=%s order_id=%s',
                 trade_id, trade.symbol, quantity, desired_stop, stop_order.status.value, stop_order.order_id)
-    return {'enabled': True, 'active': True, 'order_id': stop_order.order_id, 'quantity': quantity, 'stop_price': desired_stop, 'status': stop_order.status.value, 'changed': True}
+    return {'enabled': True, 'active': active, 'order_id': stop_order.order_id, 'quantity': quantity, 'stop_price': desired_stop, 'status': stop_order.status.value, 'changed': True}
 
 
 # ============================================================

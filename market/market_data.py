@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from time import monotonic
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -643,7 +644,7 @@ class MarketData:
                 trade.price
             )
 
-            if price > 0:
+            if math.isfinite(price) and price > 0:
                 return price
 
         except Exception as exc:
@@ -666,7 +667,7 @@ class MarketData:
             bars["close"].iloc[-1]
         )
 
-        if price <= 0:
+        if not math.isfinite(price) or price <= 0:
             raise MarketDataError(
                 f"Invalid latest price for {symbol}"
             )
@@ -809,7 +810,7 @@ class MarketData:
             ):
                 continue
 
-            if price > 0:
+            if math.isfinite(price) and price > 0:
                 prices.append(
                     price
                 )

@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 from uuid import uuid4
 from trading.exit_sessions import exit_session
+from core.runtime_controls import new_entries_allowed
 
 from broker.alpaca_client import (
     get_alpaca_client,
@@ -1106,15 +1107,23 @@ class ExecutionEngine:
             final_client_order_id,
         )
 
-        submit_options = {}
-        if before_submit is not None:
-            submit_options["before_submit"] = before_submit
+        def final_preflight():
+            # The broker clock/position reads can outlast the quote validity.
+            # Reject before the durable SUBMITTING checkpoint and POST.
+            reason = self._final_decision_reject_reason(decision)
+            if reason is not None:
+                raise RuntimeError(reason)
+            if not new_entries_allowed():
+                raise RuntimeError('New entries are paused or runtime controls are unavailable.')
+            if before_submit is not None:
+                before_submit()
+
         broker_response = self.broker.submit_protected_entry(
             symbol=symbol,
             quantity=quantity,
             reference_price=float(decision.entry_price),
             client_order_id=final_client_order_id,
-            **submit_options,
+            before_submit=final_preflight,
         )
 
         # ====================================================

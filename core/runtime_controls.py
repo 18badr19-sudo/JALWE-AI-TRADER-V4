@@ -56,11 +56,18 @@ def load_runtime_controls() -> dict[str, Any]:
             )
         )
 
-        if isinstance(raw, dict):
-            controls.update(raw)
+        if (not isinstance(raw, dict)
+                or not isinstance(raw.get('allow_new_entries'), bool)
+                or not isinstance(raw.get('emergency_close_requested', False), bool)):
+            raise ValueError('Invalid runtime control flags.')
+        controls.update(raw)
 
-    except Exception:
-        pass
+    except Exception as exc:
+        # A corrupt/unreadable persisted pause must never silently resume buys.
+        # Do not infer an emergency SELL from malformed control evidence.
+        controls['allow_new_entries'] = False
+        controls['emergency_close_requested'] = False
+        controls['runtime_control_error'] = type(exc).__name__
 
     controls["allow_new_entries"] = bool(
         controls.get(

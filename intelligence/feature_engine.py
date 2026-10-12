@@ -196,6 +196,10 @@ class FeatureEngine:
             )
         )
 
+        # A completed period with gains and no losses has RSI 100.
+        # Keep the warmup and the undefined all-flat ratio unavailable.
+        rsi = rsi.mask((average_loss == 0) & (average_gain > 0), 100.0)
+
         return rsi.clip(
             0,
             100,

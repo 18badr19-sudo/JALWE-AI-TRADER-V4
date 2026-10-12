@@ -1,5 +1,12 @@
 """Persist explicit stop-price rejection while retaining ambiguous submissions."""
 import json
+from core.models import OrderStatus
+
+
+def stop_response_active(status):
+    """Terminal order responses cannot protect an unfilled position."""
+    return status in {OrderStatus.NEW, OrderStatus.SUBMITTED,
+                      OrderStatus.ACCEPTED, OrderStatus.PARTIALLY_FILLED}
 
 
 def stop_price_rejection(error):

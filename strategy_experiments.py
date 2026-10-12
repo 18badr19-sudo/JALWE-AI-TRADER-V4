@@ -161,7 +161,7 @@ class StrategyExperiments:
                 (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
             """, (key, episode, decision_key, payload["symbol"], stamp.isoformat(),
                   stamp.astimezone(NY).date().isoformat(), ctx, name, baseline,
-                  int(eligible), json.dumps(candidate, default=str), PROTOCOL,
+                  int(eligible), json.dumps({**candidate, "research_stop_context": metadata.get("research_stop_context")}, default=str), PROTOCOL,
                   "PENDING" if eligible else "INELIGIBLE"))
         self.guard.record_selection(conn, metadata, episode, decision_key, stamp, ctx, native_ok)
 
@@ -175,8 +175,9 @@ class StrategyExperiments:
                 candidate = json.loads(row["candidate_json"])
                 result = simulate(bars, candidate.get("trigger_price"), candidate.get("invalidation_price"))
                 # Sidecar research cannot enter the preference-selection pipeline.
-                from research_variants import retest, runner_stops
+                from research_variants import retest, runner_stops, entry_stop_matrix
                 trigger, stop = candidate.get("trigger_price"), candidate.get("invalidation_price")
+                result["entry_stop_matrix"] = entry_stop_matrix(bars, trigger, stop, candidate.get("research_stop_context"))
                 if row["strategy"] in {"PREMARKET_HIGH_BREAK", "OPENING_RANGE_BREAKOUT", "COMPRESSION_BREAKOUT", "BULL_FLAG_BREAKOUT"}:
                     result["breakout_retest"] = retest(bars, trigger, stop)
                 if result.get("traded") and result.get("entry_at"):
@@ -340,8 +341,15 @@ class StrategyExperiments:
             variants = conn.execute("SELECT strategy, result_json FROM strategy_trials WHERE protocol = ? AND result_json IS NOT NULL", (PROTOCOL,)).fetchall()
         retests = premarket = comparisons = ambiguous = 0
         edges = []
+        paired_stop_trials = 0
         for trial in variants:
             result = json.loads(trial["result_json"])
+            matrix = result.get("entry_stop_matrix") or {}
+            matrix_rules = matrix.get("rules") or {}
+            if (matrix.get("protocol") == "paired-entry-structure-atr-fixed-risk-v1"
+                    and len(matrix_rules) == 4
+                    and all(number(r.get("net_pnl_dollars")) is not None for r in matrix_rules.values())):
+                paired_stop_trials += 1
             premarket += trial["strategy"] == "PREMARKET_HIGH_BREAK" and number(result.get("net_r")) is not None
             retests += number((result.get("breakout_retest") or {}).get("net_r")) is not None
             rules = (result.get("runner_stop_comparison") or {}).get("rules") or {}
@@ -358,6 +366,8 @@ class StrategyExperiments:
                  if preferred else "الاختيار الأصلي مستمر حتى اجتياز المقارنة.") +
                 f"\nاختراق قمة ما قبل الافتتاح: {premarket} نتيجة مكتملة." +
                 f"\nإعادة اختبار الاختراق: {retests} نتيجة قابلة للقياس." +
+                f"\nمقارنة الدخول والوقف: {paired_stop_trials} نافذة مشتركة قابلة للقياس؛ مخاطرة افتراضية $1 وسقف كاش $100." +
+                "\nالوقف البديل: قاع آخر 5 شموع قبل القرار مع هامش 0.25 ATR من نفس الفترة؛ الكمية تتناقص مع اتساع الوقف. هدف 2R ومحاكاة خروج كامل، دون اعتماد تلقائي." +
                 (f"\nفرق متوسط المحاكاة لصالح وقف T2: {statistics.mean(edges):+.3f}R." if edges else "\nفرق وقف T2: لا توجد مقارنة مكتملة بعد." ) +
                 (f"\nمقارنة وقف T2 عند T1 أو T2 للجزء المتبقي: {comparisons} مسارًا بعد T2 | ترتيب غير محسوم {ambiguous}.") +
                 "\nتجارب إضافية فقط؛ لا تغيّر الدخول أو الوقف تلقائيًا، وأهداف المقارنة 2R/3R/4R افتراضية؛ قد تتكرر نوافذ السهم." +

@@ -439,7 +439,54 @@ class MarketData:
             raise ValueError("Research timestamps must include a timezone")
         if now - end < timedelta(minutes=SIP_RESEARCH_DELAY_MINUTES):
             raise ValueError("Historical SIP research window is not old enough")
-        return self.get_observation_bars(symbol, start, end, feed="sip")
+        frame = self.get_observation_bars(symbol, start, end, feed="sip")
+        try:
+            frame.attrs["gap_trade_evidence"] = self.diagnose_missing_minute(
+                symbol, frame, start, end, feed="sip", as_of=now)
+        except Exception as exc:
+            from market.research_diagnostics import error_diagnostics
+            frame.attrs["gap_trade_evidence"] = [{"classification": "TRADE_PROBE_FAILED",
+                                                 **error_diagnostics(exc)}]
+        return frame
+
+    def diagnose_missing_minute(self, symbol, frame, start, end, *, feed, as_of):
+        """Sample one absent minute after the SIP delay; never infer an OHLC price."""
+        from market.gap_evidence import probe_minute
+        from market.research_diagnostics import error_diagnostics, SIP_RESEARCH_DELAY_MINUTES
+        import json
+        import urllib.parse
+        import urllib.request
+        expected = pd.date_range(start, end, freq="min", inclusive="left")
+        missing = expected.difference(pd.to_datetime(frame.index, utc=True).floor("min"))
+        if not len(missing):
+            return []
+        if as_of - end < timedelta(minutes=SIP_RESEARCH_DELAY_MINUTES):
+            return [{"classification": "WAITING_FOR_HISTORICAL_DELAY", "feed": feed}]
+        minute = missing[0].to_pydatetime()
+        key = (symbol, feed, minute.isoformat())
+        cache = getattr(self, "_gap_evidence_cache", {})
+        if key in cache:
+            checked_at, saved = cache[key]
+            if saved.get("complete") or as_of - checked_at < timedelta(minutes=5):
+                return [saved]
+        def fetch_page(params):
+            query = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
+            request = urllib.request.Request("https://data.alpaca.markets/v2/stocks/trades?" + query,
+                headers={"APCA-API-KEY-ID": settings.ALPACA_API_KEY,
+                         "APCA-API-SECRET-KEY": settings.ALPACA_SECRET_KEY})
+            with urllib.request.urlopen(request, timeout=2) as response:
+                return json.loads(response.read())
+        try:
+            evidence = probe_minute(symbol, minute, feed, fetch_page)
+        except Exception as exc:
+            evidence = {"minute": minute.isoformat(), "feed": feed,
+                        "classification": "TRADE_PROBE_FAILED", **error_diagnostics(exc)}
+        # Bound rate and memory; a failed sample is also cached for this process.
+        if len(cache) >= 1000:
+            cache.pop(next(iter(cache)))
+        cache[key] = (as_of, evidence)
+        self._gap_evidence_cache = cache
+        return [evidence]
 
     # ========================================================
     # LATEST QUOTE
@@ -556,6 +603,8 @@ class MarketData:
             "mid": mid,
             "spread": spread,
             "spread_pct": spread_pct,
+            "timestamp": getattr(quote, "timestamp", None),
+            "feed": self.get_feed_name(),
         }
 
     # ========================================================

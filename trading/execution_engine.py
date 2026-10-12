@@ -753,6 +753,20 @@ class ExecutionEngine:
                 )
             )
 
+        # New native decisions carry timestamped final entry evidence. A delay
+        # between analysis and order submission must not reuse an expired quote.
+        metadata = getattr(decision, "metadata", {}) or {}
+        evidence = metadata.get("entry_quality") if isinstance(metadata, dict) else None
+        if "entry_quality" in gates or evidence is not None:
+            if not gates.get("entry_quality") or not isinstance(evidence, dict) or not evidence.get("approved"):
+                return "Final entry quality evidence is not approved."
+            try:
+                quote_at = datetime.fromisoformat(str(evidence["quote_timestamp"]).replace("Z", "+00:00"))
+                if quote_at.tzinfo is None or not -5 <= (datetime.now(timezone.utc) - quote_at).total_seconds() <= 30:
+                    return "Final entry quote expired before submission."
+            except (KeyError, ValueError, TypeError):
+                return "Final entry quote timestamp is missing."
+
         # ----------------------------------------------------
         # QUANTITY
         # ----------------------------------------------------

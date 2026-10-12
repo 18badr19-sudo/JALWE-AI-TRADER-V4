@@ -145,6 +145,30 @@ class StrategyExperimentTests(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         self.assertIn("إعادة اختبار الاختراق", self.engine.status_text())
 
+    def test_entry_stop_context_is_frozen_and_comparison_is_isolated(self):
+        payload = self.payload()
+        payload['jalwe']['metadata']['research_stop_context'] = dict(
+            available_at_decision=True, atr=.4, atr_timeframe='5m', model_low=8.8)
+        self.memory.record(payload, 'fixed-stop')
+        with self.db.connection() as conn:
+            key = conn.execute("SELECT decision_key FROM strategy_trials LIMIT 1").fetchone()[0]
+            original = json.loads(conn.execute("SELECT candidate_json FROM strategy_trials LIMIT 1").fetchone()[0])
+            self.assertEqual(original['research_stop_context']['model_low'], 8.8)
+            self.engine.observe(conn, key, self.bars(), 'COMPLETE')
+            result = json.loads(conn.execute("SELECT result_json FROM strategy_trials WHERE strategy = 'OPENING_RANGE_BREAKOUT'").fetchone()[0])
+            self.assertEqual(len(result['entry_stop_matrix']['rules']), 4)
+            self.assertFalse(result['entry_stop_matrix']['auto_apply'])
+            baseline = simulate(self.bars(), 10, 9)
+            self.assertEqual(result['net_r'], baseline['net_r'])
+            self.assertEqual(result['protocol'], baseline['protocol'])
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM strategy_preferences").fetchone()[0], 0)
+        payload['jalwe']['metadata']['research_stop_context']['model_low'] = 99
+        payload['timestamp'] = '2026-10-02T13:45:45+00:00'
+        self.memory.record(payload, 'fixed-stop')
+        with self.db.connection() as conn:
+            candidate = json.loads(conn.execute("SELECT candidate_json FROM strategy_trials LIMIT 1").fetchone()[0])
+            self.assertEqual(candidate['research_stop_context']['model_low'], 8.8)
+
     def test_partial_paths_are_not_simulated_or_promoted(self):
         self.memory.record(self.payload(), "v")
         with self.db.connection() as conn:

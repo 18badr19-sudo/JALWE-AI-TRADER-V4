@@ -745,16 +745,20 @@ class TradeManager:
                 "Symbol cannot be empty."
             )
 
+        if any(not math.isfinite(float(value)) for value in
+               (entry_price, stop_price, target_1, target_2, target_3)):
+            raise ValueError('Trade prices and targets must be finite.')
+
         if entry_price <= 0:
 
             raise ValueError(
                 "entry_price must be positive."
             )
 
-        if quantity <= 0:
+        if not math.isfinite(float(quantity)) or not float(quantity).is_integer() or quantity <= 0:
 
             raise ValueError(
-                "quantity must be positive."
+                "quantity must be positive whole shares."
             )
 
         if not (
@@ -1344,6 +1348,13 @@ class TradeManager:
         ] = None,
 
     ) -> TradeManagementDecision:
+
+        # Validate all supplied observations before mutating the quantity plan,
+        # high-water mark, targets, or trailing stop.
+        for name, value in (('current_price', current_price), ('observed_high', observed_high),
+                            ('atr', atr), ('structure_stop', structure_stop)):
+            if value is not None and not math.isfinite(float(value)):
+                raise ValueError(f'{name} must be finite.')
 
         if current_price <= 0:
 

@@ -27,7 +27,7 @@ from broker.alpaca_client import get_alpaca_client
 from trading.execution_engine import get_execution_engine
 from trading.reconciliation_engine import get_reconciliation_engine
 from trading.recovery_engine import get_recovery_engine
-from trading.protective_submission import record_stop_submission_error
+from trading.protective_submission import record_stop_submission_error, stop_response_active
 
 
 logger = logging.getLogger(__name__)
@@ -1034,11 +1034,12 @@ class PaperTradeOrchestrator:
         trade.metadata['protective_stop_price'] = stop_price
         trade.metadata['protective_stop_quantity'] = quantity
         trade.metadata['protective_stop_status'] = order.status.value
-        trade.metadata['protective_stop_active'] = True
+        active = stop_response_active(order.status)
+        trade.metadata['protective_stop_active'] = active
         trade.metadata['protective_stop_fill_applied'] = False
         database.save_managed_trade(managed_trade_id, trade)
-        database.log_event(event_type='BROKER_PROTECTIVE_STOP_ARMED', severity='INFO', message=f'{trade.symbol}: broker protective stop armed qty={quantity} stop={stop_price}', metadata={'trade_id': managed_trade_id, 'symbol': trade.symbol, 'quantity': quantity, 'stop_price': stop_price, 'order_id': order.order_id, 'client_order_id': order.client_order_id})
-        return {'enabled': True, 'active': True, 'order_id': order.order_id, 'client_order_id': order.client_order_id, 'quantity': quantity, 'stop_price': stop_price, 'status': order.status.value}
+        database.log_event(event_type='BROKER_PROTECTIVE_STOP_ARMED', severity='INFO', message=f'{trade.symbol}: broker stop response status={order.status.value} active={active} qty={quantity} stop={stop_price}', metadata={'trade_id': managed_trade_id, 'symbol': trade.symbol, 'quantity': quantity, 'stop_price': stop_price, 'order_id': order.order_id, 'client_order_id': order.client_order_id})
+        return {'enabled': True, 'active': active, 'order_id': order.order_id, 'client_order_id': order.client_order_id, 'quantity': quantity, 'stop_price': stop_price, 'status': order.status.value}
 
     # ========================================================
     # RUN SYMBOL
@@ -1859,6 +1860,12 @@ class PaperTradeOrchestrator:
                         )
                     )
                 )
+                if protective_stop.get('enabled') and not protective_stop.get('active'):
+                    protective_warnings.append(
+                        'Broker stop response is not active; status='
+                        + str(protective_stop.get('status', 'UNKNOWN'))
+                        + '. Awaiting broker reconciliation.'
+                    )
 
             except Exception as exc:
                 logger.exception(

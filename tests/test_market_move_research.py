@@ -324,6 +324,12 @@ class BotBoundaryTests(unittest.TestCase):
         with patch('market_move_research.read_packet', side_effect=RuntimeError('offline')):
             controller.maybe_send_move_research_report()
 
+    def test_missing_optional_module_does_not_stop_report_polling(self):
+        import sys
+        with patch.dict(sys.modules, {'market_move_research': None}), patch('builtins.print') as output:
+            controller.maybe_send_move_research_report()
+        self.assertIn('ModuleNotFoundError', str(output.call_args))
+
     def test_worker_lifecycle_is_managed_independently(self):
         with patch.object(controller, 'MANAGE_APEX_CHILD', False), patch.object(controller, 'jalwe') as jalwe, \
              patch.object(controller, 'move_research') as worker:

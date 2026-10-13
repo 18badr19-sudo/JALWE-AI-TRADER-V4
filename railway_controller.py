@@ -1618,8 +1618,8 @@ def poll_filled_order_alerts() -> None:
 
 def maybe_send_move_research_report() -> None:
     """Receive the advisory outbox and send one settled research report per session."""
-    from market_move_research import read_packet, report_text
     try:
+        from market_move_research import read_packet, report_text
         packet = read_packet()
         if packet is None:
             return

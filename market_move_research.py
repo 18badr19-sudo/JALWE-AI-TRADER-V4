@@ -103,11 +103,15 @@ def observe_session(frame, session):
     start, end = utc(session['open']), utc(session['close'])
     expected = pd.date_range(start, end, freq='min', inclusive='left')
     data = frame.copy()
+    from market_move_diagnostics import VERSION
+    from market.research_diagnostics import coverage_diagnostics
     required = ['open', 'high', 'low', 'close', 'volume']
     if not set(required).issubset(data.columns) or not isinstance(data.index, pd.DatetimeIndex):
-        return {'status': 'PARTIAL_DATA', 'missing_minutes': len(expected), 'outcome': None}
+        return {'status': 'PARTIAL_DATA', 'missing_minutes': len(expected), 'outcome': None,
+                'diagnostic_version': VERSION, 'data_diagnostics': {'reason':'MISSING_OHLCV_OR_TIMESTAMP_SCHEMA'}}
     if data.index.tz is None:
-        return {'status': 'PARTIAL_DATA', 'missing_minutes': len(expected), 'outcome': None}
+        return {'status': 'PARTIAL_DATA', 'missing_minutes': len(expected), 'outcome': None,
+                'diagnostic_version': VERSION, 'data_diagnostics': {'reason':'NAIVE_TIMESTAMP'}}
     data.index = pd.to_datetime(data.index, utc=True, errors='coerce')
     for col in required:
         data[col] = pd.to_numeric(data[col], errors='coerce')
@@ -122,6 +126,13 @@ def observe_session(frame, session):
     result = dict(status='PARTIAL_DATA', source_feed='sip', expected_minutes=len(expected),
                   observed_minutes=len(data), missing_minutes=missing, duplicates=duplicates,
                   outcome=None, scope='OBSERVED_MOVEMENT_NOT_TRADE_PNL')
+    diagnostics = coverage_diagnostics(frame, data, start, end)
+    stamps = pd.to_datetime(frame.index, utc=True, errors='coerce').dropna()
+    absent = expected.difference(stamps.floor('min').unique())
+    diagnostics['first_absent_minutes'] = [stamp.isoformat() for stamp in absent[:2]]
+    if duplicates:
+        diagnostics['reason'] = 'INVALID_OR_DUPLICATE_BARS'
+    result.update(diagnostic_version=VERSION, data_diagnostics=diagnostics)
     if missing or duplicates or len(data) != len(expected):
         return result
     baseline = float(data['open'].iloc[0])
@@ -248,13 +259,25 @@ class MoveStore:
             row['result'] = json.loads(row['result_json'] or '{}')
         return rows
 
-    def settle(self, key, result, now):
+    def settle(self, key, result, now, *, retry=False):
         if result['status'] not in {'COMPLETE', 'PARTIAL_DATA', 'DATA_UNAVAILABLE'}:
             raise ValueError('Invalid observation status')
         with self.connect() as conn:
-            conn.execute('''UPDATE move_episodes SET status=?, result_json=?, checked_at=?, attempts=attempts+1
-                WHERE episode_key=? AND status='PENDING' ''',
-                (result['status'], json.dumps(result, allow_nan=False), now.isoformat(), key))
+            row = conn.execute('SELECT * FROM move_episodes WHERE episode_key=?', (key,)).fetchone()
+            if row is None:
+                return False
+            if row['status'] != 'PENDING':
+                from market_move_diagnostics import observation_due
+                evidence = dict(row)
+                evidence['session'] = json.loads(row['session_json'])
+                evidence['result'] = json.loads(row['result_json'] or '{}')
+                if not retry or not observation_due(evidence, now):
+                    return False
+            changed = conn.execute('''UPDATE move_episodes SET status=?, result_json=?, checked_at=?, attempts=attempts+1
+                WHERE episode_key=? AND status=? AND attempts=?''',
+                (result['status'], json.dumps(result, allow_nan=False), now.isoformat(), key,
+                 row['status'], row['attempts'])).rowcount
+        return bool(changed)
 
     def state(self, key, value=None):
         with self.connect() as conn:
@@ -269,6 +292,7 @@ class MoveStore:
         with self.connect() as conn:
             conn.execute('DELETE FROM move_episodes WHERE session_day < ?', (cutoff,))
         rows = self.episodes()
+        from market_move_diagnostics import aggregate
         counts = Counter(r['status'] for r in rows)
         cases = sorted(rows, key=lambda r: (r['status'] == 'COMPLETE', r['role'] == 'HOT_CASE',
                                            r['session_day'], r['episode_key']), reverse=True)[:12]
@@ -279,6 +303,11 @@ class MoveStore:
             comparison=comparison(rows), latest_cases=[dict(symbol=r['symbol'], session_day=r['session_day'],
                 role=r['role'], prospective=bool(r['prospective']), status=r['status'],
                 frozen_features=r['features'], result=r['result']) for r in cases],
+            diagnostics=aggregate(rows, now),
+            forward_cohort=[dict(symbol=r['symbol'], role=r['role'], session_day=r['session_day'],
+                frozen_at=r['frozen_at'], evidence_day=r['features'].get('evidence_day'),
+                evaluate_after=(utc(r['session']['close'])+timedelta(minutes=16)).isoformat())
+                for r in rows if r['prospective'] and r['status'] == 'PENDING'][-16:],
             limits=['Regular-session completed studies', 'Current Alpaca active universe, not historical delisted universe',
                     'Missing minutes remain inconclusive', 'News failures remain unavailable, never neutral scores',
                     'Retrospective SIP context was not necessarily available live',
@@ -324,6 +353,8 @@ def read_packet(symbol=None, *, now=None, path=None):
         if any(not isinstance(result[k],dict) for k in ('health','counts','comparison')):
             return None
         result['cases'] = [c for c in packet['latest_cases'] if symbol is None or c['symbol'] == symbol]
+        result['diagnostics'] = packet.get('diagnostics', {})
+        result['forward_cohort'] = [c for c in packet.get('forward_cohort', []) if symbol is None or c['symbol'] == symbol]
         return result
     except (sqlite3.Error, OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError):
         return None
@@ -347,6 +378,24 @@ def report_text(packet):
         f"عينات مجمدة قبل الجلسة: {packet['prospective_episodes']} | دراسات صعود لاحقة: {packet['hot_case_episodes']}",
         f"مكتملة: {counts.get('COMPLETE', 0)} | تنتظر: {counts.get('PENDING', 0)} | ناقصة/غير متاحة: {counts.get('PARTIAL_DATA',0)+counts.get('DATA_UNAVAILABLE',0)}",
         f"مقارنات مستقبلية مكتملة: {comp['complete_pairs']} على {comp['unique_days']} أيام | {comparisons.get(comp['state'], 'غير متاح')}"]
+    diagnostics = packet.get('diagnostics', {})
+    if diagnostics:
+        from market.research_diagnostics import diagnostic_text
+        lines.append('تشخيص النقص: '+diagnostic_text(diagnostics.get('reasons', {})))
+        lines.append(f"إعادة فحص مؤهلة الآن: {diagnostics.get('retry_eligible', 0)} | حد المحاولات: 3 خلال 48 ساعة")
+        labels = {'NO_TRADES_IN_FEED':'بلا صفقات في المصدر',
+                  'ONLY_NON_PRICE_UPDATING_TRADES':'صفقات لا تحدد سعر الشمعة',
+                  'REGULAR_TRADES_WITHOUT_BAR':'صفقات عادية دون شمعة',
+                  'UNKNOWN_TRADE_CONDITIONS':'علامات صفقات غير محسومة',
+                  'INCOMPLETE_TRADE_READ':'صفحات صفقات غير مكتملة',
+                  'TRADE_READ_UNAVAILABLE':'تعذر قراءة الصفقات'}
+        if diagnostics.get('sampled_minutes'):
+            lines.append('عينات دقائق: '+' | '.join(f"{labels.get(k,k)} {v}" for k,v in diagnostics['sampled_minutes'].items()))
+            lines.append('العينات لا تفسر بقية الدقائق، ولا تعوّض شموعًا ناقصة.')
+    cohort = packet.get('forward_cohort', [])
+    if cohort:
+        at = utc(min(c['evaluate_after'] for c in cohort)).astimezone(ZoneInfo('Asia/Riyadh'))
+        lines.append('أقرب تقييم للعينة بعد إتاحة البيانات: '+at.strftime('%Y-%m-%d %H:%M')+' السعودية')
     for c in packet.get('cases', [])[:5]:
         result = c['result']
         lines.append(f"• {c['symbol']} {c['session_day']} | {roles.get(c['role'], c['role'])} | {outcomes.get(result.get('outcome'), 'غير محسوم')}")

@@ -98,6 +98,46 @@ def choose_pairs(features, target_day, limit=8):
     return pairs
 
 
+def _before_move(data, up_at):
+    before = data.loc[data.index < up_at].tail(20) if up_at is not None else data.iloc[:0]
+    result = {'status':'UNAVAILABLE_LESS_THAN_20M', 'bars':len(before)}
+    if len(before) == 20:
+        recent, earlier = float(before['volume'].tail(5).mean()), float(before['volume'].head(15).mean())
+        typical = (before['high'] + before['low'] + before['close']) / 3
+        vwap = float((typical * before['volume']).sum() / before['volume'].sum())
+        result = dict(status='COMPLETE',bars=20,cutoff=up_at.isoformat(),source_feed='sip',
+            scope='RETROSPECTIVE_CONTEXT_NOT_LIVE_FEATURES',
+            return_pct=100*(float(before['close'].iloc[-1])/float(before['open'].iloc[0])-1),
+            volume_acceleration=recent/earlier,vwap=vwap,
+            close_above_vwap=bool(float(before['close'].iloc[-1]) >= vwap))
+    return result
+
+
+def _opening_prefix(data, expected, end, duplicates):
+    """Describe only consecutive valid bars from the actual session open to first gap."""
+    gaps = expected.difference(data.index)
+    cutoff = gaps[0] if len(gaps) else end
+    prefix = data.loc[data.index < cutoff]
+    result = dict(status='UNAVAILABLE',scope='CONTIGUOUS_PREFIX_ONLY_NOT_FULL_SESSION_OR_PNL',
+                  cutoff=cutoff.isoformat(),bars=len(prefix),observed_barrier_order=None)
+    if duplicates or prefix.empty:
+        return result
+    baseline = float(prefix['open'].iloc[0])
+    up = prefix.loc[prefix['high'] >= baseline*(1+UP_PCT/100)]
+    down = prefix.loc[prefix['low'] <= baseline*(1-DOWN_PCT/100)]
+    up_at, down_at = (None if x.empty else x.index[0] for x in (up, down))
+    order = ('AMBIGUOUS' if up_at is not None and up_at == down_at else
+             'UP8_FIRST' if up_at is not None and (down_at is None or up_at < down_at) else
+             'DOWN3_FIRST' if down_at is not None else 'NO_BARRIER_OBSERVED_IN_PREFIX')
+    result.update(status='OBSERVED_PREFIX',observed_barrier_order=order,
+        up_at=up_at.isoformat() if up_at is not None else None,
+        down_at=down_at.isoformat() if down_at is not None else None,
+        observed_prefix_mfe_pct=100*(float(prefix['high'].max())/baseline-1),
+        observed_prefix_mae_pct=100*(float(prefix['low'].min())/baseline-1),
+        pre_move_context=_before_move(prefix,up_at))
+    return result
+
+
 def observe_session(frame, session):
     """Conservative whole-session path, including early-close calendars; never fill gaps."""
     start, end = utc(session['open']), utc(session['close'])
@@ -134,6 +174,7 @@ def observe_session(frame, session):
         diagnostics['reason'] = 'INVALID_OR_DUPLICATE_BARS'
     result.update(diagnostic_version=VERSION, data_diagnostics=diagnostics)
     if missing or duplicates or len(data) != len(expected):
+        result['prefix_context'] = _opening_prefix(data,expected,end,duplicates)
         return result
     baseline = float(data['open'].iloc[0])
     up = data.loc[data['high'] >= baseline * (1 + UP_PCT/100)]
@@ -148,19 +189,7 @@ def observe_session(frame, session):
         down_at=down_at.isoformat() if down_at is not None else None,
         observed_mfe_pct=100 * (float(data['high'].max()) / baseline - 1),
         observed_mae_pct=100 * (float(data['low'].min()) / baseline - 1))
-    # Minute containing the move is excluded from the pre-event context.
-    before = data.loc[data.index < up_at].tail(20) if up_at is not None else data.iloc[:0]
-    result['pre_move_context'] = {'status': 'UNAVAILABLE_LESS_THAN_20M', 'bars': len(before)}
-    if len(before) == 20:
-        recent, earlier = float(before['volume'].tail(5).mean()), float(before['volume'].head(15).mean())
-        typical = (before['high'] + before['low'] + before['close']) / 3
-        vwap = float((typical * before['volume']).sum() / before['volume'].sum())
-        result['pre_move_context'] = dict(status='COMPLETE', bars=20,
-            cutoff=up_at.isoformat(), source_feed='sip',
-            scope='RETROSPECTIVE_CONTEXT_NOT_LIVE_FEATURES',
-            return_pct=100*(float(before['close'].iloc[-1])/float(before['open'].iloc[0])-1),
-            volume_acceleration=recent/earlier, vwap=vwap,
-            close_above_vwap=bool(float(before['close'].iloc[-1]) >= vwap))
+    result['pre_move_context'] = _before_move(data,up_at)
     return result
 
 
@@ -382,15 +411,18 @@ def report_text(packet):
     if diagnostics:
         from market.research_diagnostics import diagnostic_text
         lines.append('تشخيص النقص: '+diagnostic_text(diagnostics.get('reasons', {})))
+        if 'unique_incomplete_symbol_days' in diagnostics:
+            lines.append(f"السجلات الناقصة تخص {diagnostics['unique_incomplete_symbol_days']} سهم/جلسة مختلفة.")
         lines.append(f"إعادة فحص مؤهلة الآن: {diagnostics.get('retry_eligible', 0)} | حد المحاولات: 3 خلال 48 ساعة")
         labels = {'NO_TRADES_IN_FEED':'بلا صفقات في المصدر',
                   'ONLY_NON_PRICE_UPDATING_TRADES':'صفقات لا تحدد سعر الشمعة',
                   'REGULAR_TRADES_WITHOUT_BAR':'صفقات عادية دون شمعة',
                   'UNKNOWN_TRADE_CONDITIONS':'علامات صفقات غير محسومة',
                   'INCOMPLETE_TRADE_READ':'صفحات صفقات غير مكتملة',
-                  'TRADE_READ_UNAVAILABLE':'تعذر قراءة الصفقات'}
+                  'TRADE_READ_UNAVAILABLE':'تعذر قراءة الصفقات',
+                  'CONFLICTING_TRADE_SAMPLES':'عينات متعارضة'}
         if diagnostics.get('sampled_minutes'):
-            lines.append('عينات دقائق: '+' | '.join(f"{labels.get(k,k)} {v}" for k,v in diagnostics['sampled_minutes'].items()))
+            lines.append('عينات دقائق مختلفة: '+' | '.join(f"{labels.get(k,k)} {v}" for k,v in diagnostics['sampled_minutes'].items()))
             lines.append('العينات لا تفسر بقية الدقائق، ولا تعوّض شموعًا ناقصة.')
     cohort = packet.get('forward_cohort', [])
     if cohort:
@@ -409,6 +441,13 @@ def report_text(packet):
             keywords = sorted({k for a in news.get('articles', []) for k in a.get('keywords', [])})
             lines.append(f"  أخبار مقبولة زمنيًا: {news.get('count',0)} | كلمات وصفية: {', '.join(keywords) or 'لا كلمات مصنفة'}")
         if result.get('status') == 'PARTIAL_DATA':
-            lines.append(f"  دقائق ناقصة: {result.get('missing_minutes', 'غير متاح')}؛ ترتيب الحركة غير محسوم.")
+            lines.append(f"  دقائق ناقصة: {result.get('missing_minutes', 'غير متاح')}؛ تقييم الجلسة الكاملة غير مكتمل.")
+            prefix = result.get('prefix_context', {})
+            if prefix.get('status') == 'OBSERVED_PREFIX':
+                order = outcomes.get(prefix.get('observed_barrier_order'), 'لم يبلغ العتبتين في الجزء المرصود')
+                lines.append(f"  الجزء المتصل قبل أول فجوة: {prefix['bars']} دقيقة | {order}؛ وصف جزئي فقط.")
+                context = prefix.get('pre_move_context', {})
+                if context.get('status') == 'COMPLETE':
+                    lines.append(f"  قبل الصعود في هذا الجزء: تغير {context['return_pct']:+.2f}% | تسارع حجم {context['volume_acceleration']:.2f}x")
     lines.append('عتبات الحركة 8%/3% بحثية؛ ليست أهداف صفقة أو أرباحًا فعلية. النتائج لا تغيّر بوابات الدخول تلقائيًا.')
     return '\n'.join(lines)

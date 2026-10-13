@@ -43,6 +43,19 @@ probe checks up to two pages. It distinguishes no returned trades, recognized od
 lots, regular trades without a bar, unknown conditions and incomplete requests.
 These are samples: they do not explain every gap or synthesize an OHLCV bar.
 Successful samples are reused during retries; unavailable samples may be retried.
+Repeated case/control episodes for the same symbol reuse intraday and completed
+trade-sample reads within a cycle. Diagnostic counts report episodes separately
+from distinct symbol-days and sampled symbol-minutes; conflicting samples remain
+explicitly conflicting.
+
+For an incomplete session, a separate `prefix_context` can describe consecutive
+valid minute bars from the actual session open to the first gap. It reports a
+barrier observed inside that interval and up to twenty complete pre-move minutes.
+Missing opening bars or duplicate evidence make the prefix unavailable. Later
+bars cannot influence it, and a same-bar crossing stays ambiguous. This is a
+partial case-study description: the session status remains PARTIAL_DATA, its
+outcome stays null, and this prefix never enters the forward preference comparison.
+No barrier inside the prefix does not mean no barrier in the rest of the day.
 
 Incomplete/unavailable observations can be rechecked after 15 minutes, at most
 three total observation attempts, within 48 hours of session close. A legacy
@@ -53,7 +66,7 @@ each worker cycle processes at most twelve observations. HTTP-level retries are
 separately bounded by the transport. Reports include diagnostics and the next
 forward-cohort availability time in Saudi time. Bounded, deduplicated
 `MARKET_MOVE_EVIDENCE` manifests allow operators to review stored coverage and
-cohort timing without exporting credentials, headlines, full prices or raw trades.
+cohort timing without exporting credentials, headlines, full price series or raw trades.
 
 The path starts at the first regular-session bar open, with research barriers
 of +8% and −3%. A same-minute crossing remains ambiguous. These are movement

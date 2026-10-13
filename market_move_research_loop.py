@@ -103,14 +103,20 @@ class MoveResearchWorker:
             due = [r for r in self.store.episodes() if observation_due(r, now)]
             # First observations precede retries; bounded work cannot starve a new cohort.
             due.sort(key=lambda r: (r['status'] != 'PENDING', r['session_day'], r['attempts'], r['episode_key']))
+            frames, samples = {}, {}
             for row in due[:12]:
                 try:
-                    data = self.provider.intraday(row['symbol'],row['session'],now)
+                    frame_key = (row['symbol'],row['session']['open'],row['session']['close'])
+                    if frame_key not in frames:
+                        frames[frame_key] = self.provider.intraday(row['symbol'],row['session'],now)
+                    data = frames[frame_key]
                     result = observe_session(data,row['session'])
                     if result['status'] == 'PARTIAL_DATA':
                         cached = {s['minute']:s for s in row['result'].get('data_diagnostics', {}).get('gap_trade_evidence', [])
                                   if s.get('complete') and s.get('minute')}
-                        diagnose_gaps(self.provider,row['symbol'],result,now,cached=cached)
+                        cached.update({minute:value for (symbol,minute),value in samples.items() if symbol==row['symbol']})
+                        probed = diagnose_gaps(self.provider,row['symbol'],result,now,cached=cached)
+                        samples.update({(row['symbol'],s['minute']):s for s in probed if s.get('complete') and s.get('minute')})
                     if result['status'] == 'COMPLETE':
                         cutoff = utc(result['up_at']) if result.get('up_at') else utc(row['session']['open'])
                         try:

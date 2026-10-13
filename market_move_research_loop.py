@@ -67,9 +67,9 @@ class MoveResearchWorker:
         preceding = sessions[sessions.index(future)-1] if future is not None and sessions.index(future) else None
         if (future is not None and preceding is not None and preceding['date'] == latest['date']
                 and self.store.state('frozen:'+future['date']) is None):
-            inserted = 0
+            prepared_pairs = []
             for case, control in choose_pairs(features_latest,future['date']):
-                pair = stable_key(case['symbol']+'|prospective',future['date'])
+                prepared = []
                 for features, role in ((case,'ACTIVITY'),(control,'CONTROL')):
                     features = dict(features)
                     try:
@@ -77,12 +77,11 @@ class MoveResearchWorker:
                         features['news_evidence_available'] = features['pre_session_news']['status'] == 'AVAILABLE'
                     except Exception as exc:
                         features['pre_session_news'] = {'status':'UNAVAILABLE','error_type':type(exc).__name__}
-                    frozen_at = clock() if clock else now
-                    if frozen_at >= utc(future['open']):
-                        break
-                    inserted += self.store.add(features,future,role,pair,frozen_at,prospective=True)
-            if inserted:
-                self.store.state('frozen:'+future['date'],{'created_at':now.isoformat(),'prior_day':latest['date']})
+                    prepared.append(features)
+                prepared_pairs.append(tuple(prepared))
+            frozen_at = clock() if clock else now
+            if frozen_at < utc(future['open']):
+                self.store.freeze_cohort(prepared_pairs,future,frozen_at,clock=clock)
         return dict(state='READY',universe_count=len(symbols),daily_symbols=len(daily),
                     completed_session=latest['date'],eligible_prior_features=len(features_latest),
                     historical_bars_delayed=True,selection_scope='ALPACA_ACTIVE_US_EQUITY_CATALOG')

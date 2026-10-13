@@ -267,19 +267,63 @@ class MoveStore:
         finally:
             conn.close()
 
-    def add(self, features, session, role, pair_key, now, *, prospective):
+    @staticmethod
+    def _episode_values(features, session, role, pair_key, now, *, prospective):
         if prospective and not (utc(features['available_after']) <= now < utc(session['open'])):
             raise ValueError('Prospective evidence was unavailable or cohort froze after open')
         if role not in {'ACTIVITY', 'CONTROL', 'HOT_CASE'} or (role == 'HOT_CASE' and prospective):
             raise ValueError('Invalid study role')
         key = stable_key(features['symbol']+'|'+role+'|'+pair_key, session['date'])
+        return (key, session['date'], features['symbol'], role, pair_key, int(prospective), now.isoformat(),
+                json.dumps(features, allow_nan=False), json.dumps(session))
+
+    def add(self, features, session, role, pair_key, now, *, prospective):
+        values = self._episode_values(features, session, role, pair_key, now, prospective=prospective)
         with self.connect() as conn:
             inserted = conn.execute('''INSERT OR IGNORE INTO move_episodes
                 (episode_key, session_day, symbol, role, pair_key, prospective, frozen_at,
                  features_json, session_json) VALUES (?,?,?,?,?,?,?,?,?)''',
-                (key, session['date'], features['symbol'], role, pair_key, int(prospective), now.isoformat(),
-                 json.dumps(features, allow_nan=False), json.dumps(session))).rowcount
+                values).rowcount
         return bool(inserted)
+
+    def freeze_cohort(self, pairs, session, now, *, clock=None):
+        """Commit a complete cohort and its restart marker in one transaction."""
+        def cohort_values(at):
+            values = []
+            for case, control in pairs:
+                if case['symbol'] == control['symbol']:
+                    raise ValueError('A prospective pair needs distinct symbols')
+                pair = stable_key(case['symbol']+'|prospective', session['date'])
+                for features, role in ((case,'ACTIVITY'), (control,'CONTROL')):
+                    values.append(self._episode_values(features,session,role,pair,at,prospective=True))
+            return values
+        values = cohort_values(now)
+        if not values:
+            return False
+        mark = 'frozen:'+session['date']
+        with self.connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            if conn.execute('SELECT 1 FROM move_state WHERE key=?', (mark,)).fetchone():
+                return False
+            # Do not rewrite legacy evidence if an older version crashed mid-freeze.
+            if conn.execute('SELECT 1 FROM move_episodes WHERE session_day=? AND prospective=1',
+                            (session['date'],)).fetchone():
+                raise ValueError('Unmarked prospective evidence already exists')
+            # SQLite can wait for another writer; recheck after obtaining the lock.
+            if clock is not None:
+                now = clock()
+                if now >= utc(session['open']):
+                    return False
+                values = cohort_values(now)
+            conn.executemany('''INSERT INTO move_episodes
+                (episode_key, session_day, symbol, role, pair_key, prospective, frozen_at,
+                 features_json, session_json) VALUES (?,?,?,?,?,?,?,?,?)''', values)
+            conn.execute('INSERT INTO move_state VALUES (?,?)', (mark,json.dumps(dict(
+                created_at=now.isoformat(),prior_day=pairs[0][0]['evidence_day']))))
+            if clock is not None and clock() >= utc(session['open']):
+                conn.rollback()
+                return False
+        return True
 
     def episodes(self):
         with self.connect() as conn:
@@ -325,8 +369,10 @@ class MoveStore:
         rows = self.episodes()
         from market_move_diagnostics import aggregate
         counts = Counter(r['status'] for r in rows)
-        cases = sorted(rows, key=lambda r: (r['status'] == 'COMPLETE', r['role'] == 'HOT_CASE',
-                                           r['session_day'], r['episode_key']), reverse=True)[:12]
+        day = health.get('completed_session')
+        examples = [r for r in rows if r['session_day'] <= day] if day else [r for r in rows if r['status'] != 'PENDING']
+        cases = sorted(examples, key=lambda r: (r['session_day'], r['role'] == 'HOT_CASE',
+                                               r['status'] == 'COMPLETE', r['episode_key']), reverse=True)[:12]
         packet = dict(protocol=PROTOCOL, scope='RESEARCH_ONLY_NOT_TRADE_SIGNAL',
             published_at=now.isoformat(), source_feed='sip', automatic_application=False,
             health=health, counts=dict(counts), prospective_episodes=sum(r['prospective'] for r in rows),

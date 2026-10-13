@@ -27,6 +27,11 @@ they are not represented as exclusively regular-session statistics.
    Selection uses a deterministic symbol/date hash and matches log2 price and
    log10 dollar-volume bins. Controls do not satisfy the activity rule. Later
    outcomes cannot change these immutable cohorts. Missing matches are omitted.
+  Both members of every pair and the session freeze marker are committed in one
+  transaction after news retrieval. The live clock is checked again after the
+  SQLite writer lock and before commit; a crossed opening deadline or storage
+  failure rolls the new cohort back rather than leaving an orphan or partial batch.
+  Existing frozen cohorts and legacy evidence are never rewritten.
 
 Historical bars are queried only after a 16-minute delay beyond the session close.
 Every regular-session minute must be present, valid, timezone-aware and unique
@@ -95,6 +100,9 @@ controller sends one research report per completed session after all that
 session's queued examples have been checked. Pending future cohorts do not block
 this report. Restart markers suppress ordinary repeated reports; a crash between
 Telegram delivery and persisting the marker may repeat a report.
+Examples prioritize the most recent completed session, including incomplete
+observations. Older complete examples cannot crowd it out; future pending cohorts
+are shown separately from those completed-session examples.
 
 Only complete, unambiguous prospective pairs enter the fixed comparison of
 UP8_FIRST frequencies. It requires at least 40 pairs, 90% pair coverage and ten

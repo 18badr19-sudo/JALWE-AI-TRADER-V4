@@ -121,6 +121,36 @@ class StoreTests(unittest.TestCase):
         result = next(r for r in self.store.episodes() if r['episode_key'] == rows[0]['episode_key'])
         self.assertEqual(result['result']['outcome'], 'UP8_FIRST'); self.assertEqual(result['attempts'], 1)
 
+    def test_cohort_transaction_rolls_back_both_members_and_marker_on_write_failure(self):
+        import sqlite3
+        with self.store.connect() as conn:
+            conn.execute("""CREATE TRIGGER fail_control BEFORE INSERT ON move_episodes
+                WHEN NEW.symbol='CONTROL2' BEGIN SELECT RAISE(ABORT,'simulated storage failure'); END""")
+        pairs = [(feature(),feature('CONTROL',case=False)),
+                 (feature('CASE2'),feature('CONTROL2',case=False))]
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store.freeze_cohort(pairs,session(),self.now)
+        self.assertEqual(self.store.episodes(), [])
+        self.assertIsNone(self.store.state('frozen:2026-10-12'))
+        with self.store.connect() as conn:
+            conn.execute('DROP TRIGGER fail_control')
+        self.assertTrue(self.store.freeze_cohort(pairs,session(),self.now))
+        rows = self.store.episodes()
+        self.assertEqual(len(rows),4)
+        self.assertEqual(len({r['frozen_at'] for r in rows}),1)
+        changed = [(dict(feature(),close=99),feature('OTHER',case=False))]
+        self.assertFalse(research.MoveStore(self.path).freeze_cohort(changed,session(),self.now))
+        self.assertEqual(rows,self.store.episodes())
+
+    def test_opening_deadline_during_sqlite_write_rolls_back_the_cohort(self):
+        opening = research.utc(session()['open'])
+        pairs = [(feature(),feature('CONTROL',case=False))]
+        for clock in (Mock(return_value=opening),
+                      Mock(side_effect=[opening-timedelta(seconds=1),opening])):
+            self.assertFalse(self.store.freeze_cohort(pairs,session(),self.now,clock=clock))
+            self.assertEqual(self.store.episodes(),[])
+            self.assertIsNone(self.store.state('frozen:2026-10-12'))
+
     def test_packet_read_is_readonly_fresh_and_protocol_scoped(self):
         self.store.publish(self.now, {'state':'READY'})
         packet = research.read_packet(path=self.path, now=self.now)
@@ -264,6 +294,20 @@ class WorkerTests(unittest.TestCase):
         worker.prepare(self.now, sessions, ['CASE','CONTROL'], clock=lambda:research.utc(session()['open']))
         self.assertFalse(any(r['prospective'] for r in self.store.episodes()))
 
+    def test_news_read_crossing_open_cannot_leave_an_orphan_case(self):
+        worker, sessions, _ = self.setup_worker()
+        opening = research.utc(session()['open'])
+        calls = []
+        def news(*args):
+            calls.append(args)
+            return {'status':'AVAILABLE','articles':[]}
+        worker.provider.news_before.side_effect = news
+        clock = lambda: opening if len(calls)>=2 else opening-timedelta(seconds=1)
+        worker.prepare(self.now, sessions, ['CASE','CONTROL'], clock=clock)
+        rows = [r for r in self.store.episodes() if r['prospective']]
+        self.assertEqual(rows, [])
+        self.assertIsNone(self.store.state('frozen:2026-10-12'))
+
     def test_provider_failure_publishes_unavailability_without_outcome(self):
         worker, _, _ = self.setup_worker(); worker.provider.calendar.side_effect = ResearchReadError('HTTP_403')
         packet = worker.cycle(self.now)
@@ -271,6 +315,28 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(packet['comparison']['complete_pairs'], 0)
         self.assertFalse(packet['automatic_application'])
 
+
+class CurrentSessionReportTests(unittest.TestCase):
+    setUp = StoreTests.setUp
+    def test_new_incomplete_session_is_not_hidden_by_old_completed_cases(self):
+        for index in range(13):
+            self.store.add(feature('OLD'+str(index)), session('2026-10-09'), 'HOT_CASE',
+                           'old'+str(index), self.now, prospective=False)
+        for row in self.store.episodes():
+            self.store.settle(row['episode_key'], dict(status='COMPLETE', outcome='UP8_FIRST',
+                observed_mfe_pct=10., observed_mae_pct=-1.), self.now)
+        self.store.add(feature('NEW'), session(), 'HOT_CASE', 'new', self.now, prospective=False)
+        new = next(r for r in self.store.episodes() if r['symbol']=='NEW')
+        self.store.settle(new['episode_key'], dict(status='PARTIAL_DATA', outcome=None, missing_minutes=2), self.now)
+        # Tomorrow's pending cohort belongs in forward_cohort, not today's examples.
+        for index in range(16):
+            self.store.add(feature('FUTURE'+str(index)), session('2026-10-13'), 'ACTIVITY',
+                           'future'+str(index), self.now, prospective=True)
+        _, raw = self.store.publish(self.now, dict(state='READY', completed_session='2026-10-12'))
+        packet = research.read_packet(path=self.path, now=self.now)
+        self.assertEqual(raw['latest_cases'][0]['symbol'], 'NEW')
+        self.assertIn('NEW 2026-10-12', research.report_text(packet))
+        self.assertFalse(any(c['session_day']>'2026-10-12' for c in raw['latest_cases']))
 
 class BotBoundaryTests(unittest.TestCase):
     def test_unexpected_reader_failure_preserves_native_entry_and_rejection(self):

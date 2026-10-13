@@ -2824,6 +2824,8 @@ def main() -> None:
         )
 
     probe = update_persistence_probe()
+    from missed_opportunity_audit import emit_audit
+    emit_audit(database.database_path)
 
     print(
         "Persistence probe | "

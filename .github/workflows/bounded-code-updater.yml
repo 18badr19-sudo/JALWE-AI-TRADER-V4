@@ -205,7 +205,7 @@ jobs:
         with:
           name: validated-code-${{ github.run_id }}-${{ github.run_attempt }}
           path: .agent-work
-      - name: Verify artifact and publish exact tested child with expected-base lease
+      - name: Verify artifact and open tested PR awaiting owner approval
         env:
           CODE_UPDATE_GITHUB_TOKEN: ${{ github.token }}
         run: python -m self_update.cli publish

@@ -102,7 +102,7 @@ def attest(folder, log_path, *, candidate_path=TARGET):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["prepare", "validate", "attest", "publish"])
+    parser.add_argument("command", choices=["prepare", "validate", "attest", "publish", "review-prepare", "review-publish"])
     parser.add_argument("--folder", default=".agent-work")
     parser.add_argument("--log", default=".agent-work/tests.log")
     args = parser.parse_args()
@@ -114,6 +114,12 @@ def main():
         validate(args.folder, os.environ.get("CODE_AGENT_PROPOSAL", ""))
     elif args.command == "attest":
         attest(args.folder, args.log)
+    elif args.command == 'review-prepare':
+        from self_update.owner_review import prepare as review_prepare
+        review_prepare(args.folder)
+    elif args.command == 'review-publish':
+        from self_update.owner_review import publish as review_publish
+        summary(json.dumps(review_publish(args.folder)))
     else:
         from self_update.publisher import publish
         summary(json.dumps(publish(Path(args.folder))))

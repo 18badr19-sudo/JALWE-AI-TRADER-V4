@@ -3793,6 +3793,11 @@ def process_research(
             )
         )
 
+        # Observe the frozen, already recorded native decision asynchronously.
+        # No model response participates in entry, exits or protective stops.
+        from intelligence.shadow_advisor import submit_shadow_review
+        payload['shadow_ai_state'] = submit_shadow_review(payload)
+
         # ====================================================
         # TELEGRAM
         # ====================================================

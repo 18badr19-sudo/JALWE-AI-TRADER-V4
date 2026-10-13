@@ -299,10 +299,10 @@ def default_path():
 
 def read_packet(symbol=None, *, now=None, path=None):
     now = now or datetime.now(timezone.utc)
-    target = Path(path or default_path())
-    if not target.exists():
-        return None
     try:
+        target = Path(path or default_path())
+        if not target.exists():
+            return None
         conn = sqlite3.connect(target.resolve().as_uri()+'?mode=ro', uri=True, timeout=.2)
         try:
             row = conn.execute('SELECT packet_id, published_at, payload_json FROM move_packets ORDER BY published_at DESC LIMIT 1').fetchone()
@@ -325,7 +325,7 @@ def read_packet(symbol=None, *, now=None, path=None):
             return None
         result['cases'] = [c for c in packet['latest_cases'] if symbol is None or c['symbol'] == symbol]
         return result
-    except (sqlite3.Error, ValueError, KeyError, TypeError, AttributeError):
+    except (sqlite3.Error, OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError):
         return None
 
 

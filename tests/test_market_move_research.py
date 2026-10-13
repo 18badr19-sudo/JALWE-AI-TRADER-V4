@@ -142,6 +142,11 @@ class StoreTests(unittest.TestCase):
         _, packet = self.store.publish(self.now, {'state':'READY'})
         self.assertEqual(packet['hot_case_episodes'], 0)
 
+    def test_filesystem_probe_and_resolution_errors_are_unavailable(self):
+        for method in ('exists', 'resolve'):
+            with patch.object(Path, method, side_effect=PermissionError('private path')):
+                self.assertIsNone(research.read_packet(path=self.path, now=self.now))
+
 
 class ComparisonTests(unittest.TestCase):
     def rows(self, outcome='UP8_FIRST'):
@@ -268,6 +273,28 @@ class WorkerTests(unittest.TestCase):
 
 
 class BotBoundaryTests(unittest.TestCase):
+    def test_unexpected_reader_failure_preserves_native_entry_and_rejection(self):
+        fixture = entry_fixtures.CurrentLatchTests(); fixture.setUp(); self.addCleanup(fixture.doCleanups)
+        fixture.confirm()
+        with patch('market_move_research.read_packet', side_effect=TimeoutError('private details')), \
+             self.assertLogs('intelligence.decision_engine', level='WARNING') as logs:
+            decision = fixture.analyze()
+            self.assertTrue(decision.ready_for_execution)
+            self.assertEqual(decision.metadata['market_move_research_unavailable']['error_type'], 'TimeoutError')
+            fixture.engine.ai_engine.evaluate.return_value.action = 'SELL'
+            fixture.engine.ai_engine.evaluate.return_value.score = 40
+            self.assertFalse(fixture.analyze().ready_for_execution)
+        self.assertNotIn('private details', str(logs.output))
+
+    def test_missing_research_module_does_not_abort_native_analysis(self):
+        import sys
+        fixture = entry_fixtures.CurrentLatchTests(); fixture.setUp(); self.addCleanup(fixture.doCleanups)
+        fixture.confirm()
+        with patch.dict(sys.modules, {'market_move_research': None}):
+            decision = fixture.analyze()
+        self.assertTrue(decision.ready_for_execution)
+        self.assertEqual(decision.metadata['market_move_research_unavailable']['error_type'], 'ModuleNotFoundError')
+
     def test_research_never_overrides_native_rejection_or_entry(self):
         fixture = entry_fixtures.CurrentLatchTests(); fixture.setUp(); self.addCleanup(fixture.doCleanups)
         with patch('market_move_research.read_packet', return_value={'scope':'RESEARCH_ONLY_NOT_TRADE_SIGNAL', 'claim':'UP8_FIRST'}):
@@ -296,6 +323,12 @@ class BotBoundaryTests(unittest.TestCase):
             self.assertIn('ينتظر', controller.handle('/move_research'))
         with patch('market_move_research.read_packet', side_effect=RuntimeError('offline')):
             controller.maybe_send_move_research_report()
+
+    def test_missing_optional_module_does_not_stop_report_polling(self):
+        import sys
+        with patch.dict(sys.modules, {'market_move_research': None}), patch('builtins.print') as output:
+            controller.maybe_send_move_research_report()
+        self.assertIn('ModuleNotFoundError', str(output.call_args))
 
     def test_worker_lifecycle_is_managed_independently(self):
         with patch.object(controller, 'MANAGE_APEX_CHILD', False), patch.object(controller, 'jalwe') as jalwe, \

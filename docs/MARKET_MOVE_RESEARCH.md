@@ -49,6 +49,9 @@ The worker publishes a versioned research-only outbox. JALWE reads packets less
 than one hour old with the exact protocol/feed/scope and logs
 `MARKET_MOVE_BOT_RECEIVED`. A symbol-specific excerpt is attached to decision
 metadata only; no score, risk, stop or entry gate uses it.
+Module import, filesystem permission, and unexpected packet-reader exceptions
+are isolated at the native decision boundary. JALWE continues its own gates and
+records only the unavailable exception type; private exception text is not logged.
 
 The Telegram button **🔬 أبحاث الحركات**, `/move_research`, and `/learning` show the
 latest research. With the existing `AUTO_DAILY_REPORT` switch enabled, the

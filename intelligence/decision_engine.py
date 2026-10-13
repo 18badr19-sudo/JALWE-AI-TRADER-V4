@@ -1081,10 +1081,16 @@ class DecisionEngine:
             "external_research_advisory_only": True,
         }
         # Independent research is evidence metadata only, never gate/score authority.
-        from market_move_research import read_packet
-        move_packet = read_packet(symbol)
-        if move_packet is not None:
-            base_metadata['market_move_research'] = move_packet
+        try:
+            from market_move_research import read_packet
+            move_packet = read_packet(symbol)
+            if move_packet is not None:
+                base_metadata['market_move_research'] = move_packet
+        except Exception as exc:
+            # Import, storage and unexpected reader failures must remain optional.
+            error_type = type(exc).__name__
+            base_metadata['market_move_research_unavailable'] = {'error_type': error_type}
+            logger.warning('Independent market move research unavailable: %s', error_type)
 
 
         # ====================================================

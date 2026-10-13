@@ -36,6 +36,25 @@ failures remain unavailable. News is retained only when both creation and update
 timestamps precede the study cutoff; incomplete news stays explicitly incomplete.
 Keyword tags describe content and do not prove the cause of a price move.
 
+Coverage diagnostics distinguish genuinely absent provider minutes, returned but
+invalid bars, duplicate timestamps, schema failures and request status codes.
+For at most two absent minutes per observation, a GET-only historical SIP trade
+probe checks up to two pages. It distinguishes no returned trades, recognized odd
+lots, regular trades without a bar, unknown conditions and incomplete requests.
+These are samples: they do not explain every gap or synthesize an OHLCV bar.
+Successful samples are reused during retries; unavailable samples may be retried.
+
+Incomplete/unavailable observations can be rechecked after 15 minutes, at most
+three total observation attempts, within 48 hours of session close. A legacy
+unclassified result gets one diagnostic upgrade within that same cap/horizon.
+Completed paths are immutable. Original features, frozen timestamps and cohort
+membership never change on a retry. First observations take priority over retries;
+each worker cycle processes at most twelve observations. HTTP-level retries are
+separately bounded by the transport. Reports include diagnostics and the next
+forward-cohort availability time in Saudi time. Bounded, deduplicated
+`MARKET_MOVE_EVIDENCE` manifests allow operators to review stored coverage and
+cohort timing without exporting credentials, headlines, full prices or raw trades.
+
 The path starts at the first regular-session bar open, with research barriers
 of +8% and −3%. A same-minute crossing remains ambiguous. These are movement
 labels, not strategy targets, executable fills, commissions or realized profit.

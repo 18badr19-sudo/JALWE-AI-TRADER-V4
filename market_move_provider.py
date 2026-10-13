@@ -9,7 +9,9 @@ from market_move_research import NY, utc
 
 
 class ResearchReadError(RuntimeError):
-    pass
+    def __init__(self, message, *, status_code=None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class MoveProvider:
@@ -26,6 +28,7 @@ class MoveProvider:
         allowed = {'https://paper-api.alpaca.markets/v2/assets',
                    'https://paper-api.alpaca.markets/v2/calendar',
                    'https://data.alpaca.markets/v2/stocks/bars',
+                   'https://data.alpaca.markets/v2/stocks/trades',
                    'https://data.alpaca.markets/v1beta1/news'}
         if url not in allowed:
             raise ResearchReadError('ENDPOINT_NOT_ALLOWED')
@@ -38,7 +41,7 @@ class MoveProvider:
                     time.sleep(min(10, 2**attempt))
                     continue
                 if response.status_code != 200:
-                    raise ResearchReadError(f'HTTP_{response.status_code}')
+                    raise ResearchReadError(f'HTTP_{response.status_code}', status_code=response.status_code)
                 return response.json()
             except requests.RequestException:
                 if attempt == 2:
@@ -156,3 +159,10 @@ class MoveProvider:
         return dict(status='AVAILABLE' if complete and not malformed else 'INCOMPLETE',cutoff=cutoff.isoformat(),
                     malformed_articles=malformed,
                     count=len(articles),articles=articles[:5],historical_updated_content_filtered=True)
+
+    def gap_trades(self, symbol, minute, now):
+        from market.gap_evidence import probe_minute
+        if now < minute+timedelta(minutes=17):
+            raise ResearchReadError('WAITING_FOR_HISTORICAL_DELAY')
+        return probe_minute(symbol, minute, 'sip',
+            lambda params: self.get('https://data.alpaca.markets/v2/stocks/trades', params), max_pages=2)

@@ -9,6 +9,7 @@ from core.config import settings
 from market_move_provider import MoveProvider
 from market_move_research import (MoveStore, PROTOCOL, daily_features, choose_pairs, bucket,
                                  utc, observe_session, default_path, stable_key)
+from market_move_diagnostics import VERSION, observation_due, diagnose_gaps, emit_evidence
 
 logger = logging.getLogger(__name__)
 
@@ -99,12 +100,17 @@ class MoveResearchWorker:
                 self.store.state('universe_cache',symbols)
             health = self.prepare(now,sessions,symbols['symbols'],
                                   clock=None if supplied_now else lambda: datetime.now(timezone.utc))
-            due = [r for r in self.store.episodes() if r['status'] == 'PENDING'
-                   and utc(r['session']['close'])+timedelta(minutes=16) <= now]
-            for row in due[:8]:
+            due = [r for r in self.store.episodes() if observation_due(r, now)]
+            # First observations precede retries; bounded work cannot starve a new cohort.
+            due.sort(key=lambda r: (r['status'] != 'PENDING', r['session_day'], r['attempts'], r['episode_key']))
+            for row in due[:12]:
                 try:
                     data = self.provider.intraday(row['symbol'],row['session'],now)
                     result = observe_session(data,row['session'])
+                    if result['status'] == 'PARTIAL_DATA':
+                        cached = {s['minute']:s for s in row['result'].get('data_diagnostics', {}).get('gap_trade_evidence', [])
+                                  if s.get('complete') and s.get('minute')}
+                        diagnose_gaps(self.provider,row['symbol'],result,now,cached=cached)
                     if result['status'] == 'COMPLETE':
                         cutoff = utc(result['up_at']) if result.get('up_at') else utc(row['session']['open'])
                         try:
@@ -112,8 +118,10 @@ class MoveResearchWorker:
                         except Exception as exc:
                             result['pre_move_news'] = {'status':'UNAVAILABLE','error_type':type(exc).__name__}
                 except Exception as exc:
-                    result = dict(status='DATA_UNAVAILABLE',outcome=None,error_type=type(exc).__name__)
-                self.store.settle(row['episode_key'],result,now)
+                    from market.research_diagnostics import error_diagnostics
+                    result = dict(status='DATA_UNAVAILABLE',outcome=None,error_type=type(exc).__name__,
+                                  diagnostic_version=VERSION,data_diagnostics=error_diagnostics(exc))
+                self.store.settle(row['episode_key'],result,now,retry=row['status'] != 'PENDING')
         except Exception as exc:
             # Data errors cannot interrupt JALWE or publish false success labels.
             health = dict(state='DATA_UNAVAILABLE',error_type=type(exc).__name__,
@@ -122,6 +130,10 @@ class MoveResearchWorker:
             health['completed_session_pending'] = sum(r['status'] == 'PENDING'
                 and r['session_day'] <= health['completed_session'] for r in self.store.episodes())
         key, packet = self.store.publish(now if supplied_now else datetime.now(timezone.utc),health)
+        try:
+            emit_evidence(self.store,self.store.episodes(),logger)
+        except Exception as exc:
+            logger.warning('MARKET_MOVE_DIAGNOSTIC_LOG_UNAVAILABLE %s',type(exc).__name__)
         logger.info('MARKET_MOVE_PACKET %s',json.dumps(dict(packet_id=key,health=health,
             counts=packet['counts'],prospective_episodes=packet['prospective_episodes'],
             hot_case_episodes=packet['hot_case_episodes'],comparison=packet['comparison'])))

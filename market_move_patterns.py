@@ -117,6 +117,57 @@ def finalized(rows, now):
              or now > utc(r['session']['close'])+timedelta(hours=48)) for r in rows)
 
 
+def validation_sample(policy, future):
+    """Seal calendar days and membership before reading outcomes; never replace lost rows."""
+    plan = policy.setdefault('validation_plan',[])
+    registered = {entry['day'] for entry in plan}
+    new_days = sorted({r['session_day'] for r in future}-registered)
+    for day in new_days[:max(0,VALIDATION_DAYS-len(plan))]:
+        members = [dict(symbol=r['symbol'],role=r['role'],pair_key=r['pair_key'],
+                        frozen_at=r['frozen_at'],session=r['session'])
+                   for r in future if r['session_day']==day]
+        plan.append(dict(day=day,members=members))
+    available = {}
+    for row in future:
+        identity = (row['session_day'],row['pair_key'],row['role'],row['symbol'],row['frozen_at'])
+        available.setdefault(identity,[]).append(row)
+    sample = []
+    for entry in plan:
+        for member in entry['members']:
+            key=(entry['day'],member['pair_key'],member['role'],member['symbol'],member['frozen_at'])
+            rows=available.get(key,[])
+            if len(rows)==1:
+                sample.append(rows[0])
+            else:
+                sample.append(dict(member,session_day=entry['day'],features={},status='DATA_UNAVAILABLE',
+                    attempts=0,result={'outcome':None,'reason':'REGISTERED_VALIDATION_EVIDENCE_UNAVAILABLE'}))
+    return [entry['day'] for entry in plan],sample
+
+
+def public_policy(policy):
+    # The durable holdout manifest belongs in SQLite, not repeated packet/log payloads.
+    return {k:v for k,v in policy.items() if k!='validation_plan'}
+
+
+def register_frozen_validation(conn, values):
+    """Register holdout membership in the same transaction as the cohort freeze."""
+    saved=conn.execute("SELECT value FROM move_state WHERE key='pattern_policy'").fetchone()
+    if not saved:
+        return
+    policy=json.loads(saved[0])
+    if policy.get('state')!='WAITING_FRESH_VALIDATION' or policy.get('protocol')!=PROTOCOL:
+        return
+    fixed=conn.execute("SELECT value FROM move_state WHERE key='pattern_definition'").fetchone()
+    if not fixed:
+        return
+    rows=[dict(symbol=v[2],role=v[3],pair_key=v[4],prospective=bool(v[5]),frozen_at=v[6],
+        session_day=v[1],features=json.loads(v[7]),session=json.loads(v[8])) for v in values]
+    future=eligible_rows(rows,policy['trained_at'],json.loads(fixed[0])['defined_at'])
+    future=[r for r in future if utc(r['frozen_at'])>utc(policy['trained_at'])]
+    validation_sample(policy,future)
+    conn.execute("UPDATE move_state SET value=? WHERE key='pattern_policy'",(json.dumps(policy),))
+
+
 def update(store, rows, now):
     fixed = definition(store,now)
     policy = store.state('pattern_policy')
@@ -127,7 +178,7 @@ def update(store, rows, now):
         raise ValueError('Pattern policy version mismatch')
     if policy['state'] in {'FAILED_VALIDATION','SUSPENDED','EXPIRED'}:
         if now < utc(policy['retired_at'])+timedelta(days=7):
-            return policy
+            return public_policy(policy)
         policy = dict(protocol=PROTOCOL,spec_hash=SPEC,generation=policy['generation']+1,
             started_at=now.isoformat(),state='COLLECTING_TRAINING',mode=MODE,rule=None)
     candidates = eligible_rows(rows,policy['started_at'],fixed['defined_at'])
@@ -153,8 +204,7 @@ def update(store, rows, now):
                 training=assessments[winner],alpha=.01/(policy['generation']*(policy['generation']+1)))
     elif policy['state']=='WAITING_FRESH_VALIDATION':
         future = [r for r in candidates if utc(r['frozen_at']) > utc(policy['trained_at'])]
-        days = sorted({r['session_day'] for r in future})[:VALIDATION_DAYS]
-        validation = [r for r in future if r['session_day'] in days]
+        days,validation = validation_sample(policy,future)
         policy['validation_sessions_seen'] = len(days)
         if len(days)==VALIDATION_DAYS and finalized(validation,now):
             evidence = assessment(paired(validation),policy['rule'])
@@ -180,7 +230,47 @@ def update(store, rows, now):
             policy.update(state='EXPIRED',retired_at=now.isoformat(),reason='POLICY_AGE_LIMIT')
     policy['updated_at'] = now.isoformat()
     store.state('pattern_policy',policy)
-    return policy
+    return public_policy(policy)
+
+
+def active_proof(model, now):
+    """Reject malformed/nonfinite proof and verify the sealed policy identity."""
+    try:
+        if (model.get('state')!='ACTIVE_PRIORITY' or model.get('protocol')!=PROTOCOL
+            or model.get('spec_hash')!=SPEC or model.get('mode')!=MODE or model.get('rule') not in RULES):
+            return False
+        def finite(value):
+            return type(value) in (int,float) and math.isfinite(value)
+        train,val=model['training'],model['validation']
+        for evidence in (train,val):
+            if any(type(evidence[k]) is not int or evidence[k]<0 for k in ('matched_pairs','matched_days')):
+                return False
+            if any(not finite(evidence[k]) or not 0<=evidence[k]<=1
+                   for k in ('complete_pair_coverage','known_feature_coverage')):
+                return False
+            if not finite(evidence['daily_edge']) or not -1<=evidence['daily_edge']<=1:
+                return False
+        generation=model['generation']
+        if type(generation) is not int or generation<1:
+            return False
+        alpha=.01/(generation*(generation+1))
+        if (not finite(model['alpha']) or model['alpha']!=alpha or val.get('alpha')!=alpha
+            or not finite(val.get('lower_bound')) or val['lower_bound']<=0
+            or not qualified(train,MIN_TRAIN_PAIRS,MIN_TRAIN_DAYS) or train['daily_edge']<.10
+            or not qualified(val,MIN_VALIDATION_PAIRS,MIN_MATCHED_DAYS)):
+            return False
+        days=val['session_days']
+        if not isinstance(days,list) or len(days)!=VALIDATION_DAYS or days!=sorted(set(days)):
+            return False
+        bound=val['daily_edge']-math.sqrt(2*math.log(1/alpha)/val['matched_days'])
+        if abs(bound-val['lower_bound'])>1e-9:
+            return False
+        expected=hashlib.sha256(f"{PROTOCOL}|{generation}|{model['rule']}|{model['activated_at']}".encode()).hexdigest()
+        return (model.get('policy_id')==expected
+            and utc(model['trained_at']) < utc(model['activated_at']) <= now < utc(model['expires_at'])
+            and utc(model['updated_at']) <= now)
+    except (KeyError,TypeError,ValueError,OverflowError):
+        return False
 
 
 def _prioritize(items, *, now, symbol_of, paper, allow_live, path=None):
@@ -193,19 +283,14 @@ def _prioritize(items, *, now, symbol_of, paper, allow_live, path=None):
     if not packet or packet['health'].get('state') != 'READY':
         return baseline,audit
     model = packet.get('patterns') or {}
-    validation = model.get('validation') or {}
-    if (model.get('state') != 'ACTIVE_PRIORITY' or model.get('protocol') != PROTOCOL
-        or model.get('spec_hash') != SPEC or model.get('mode') != MODE or model.get('rule') not in RULES
-        or not qualified(validation,MIN_VALIDATION_PAIRS,MIN_MATCHED_DAYS)
-        or validation.get('lower_bound',-1) <= 0
-        or not utc(model['activated_at']) <= now < utc(model['expires_at'])):
+    if not active_proof(model,now):
         return baseline,audit
     target = default_path() if path is None else path
     conn = sqlite3.connect(Path(target).resolve().as_uri()+'?mode=ro',uri=True,timeout=.2)
     try:
         row = conn.execute("SELECT value FROM move_state WHERE key='pattern_policy'").fetchone()
         current = json.loads(row[0]) if row else {}
-        if current.get('state') != 'ACTIVE_PRIORITY' or current.get('policy_id') != model.get('policy_id'):
+        if not active_proof(current,now) or current.get('policy_id') != model.get('policy_id'):
             return baseline,audit
         symbols = sorted({str(symbol_of(item)).upper() for item in baseline})
         if not symbols:

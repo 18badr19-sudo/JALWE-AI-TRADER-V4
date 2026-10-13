@@ -98,6 +98,43 @@ class PatternTests(unittest.TestCase):
         self.assertEqual(result['rule'],sealed['rule'])
         self.assertNotIn('activated_at',result)
 
+    def test_holdout_days_do_not_shift_when_an_original_cohort_disappears(self):
+        self.train()
+        days = pd.bdate_range('2026-09-16',periods=21).strftime('%Y-%m-%d').tolist()
+        original = self.cohorts(days[:20])
+        original[0]['status']='PENDING'
+        now = utc(days[19]+'T21:00:00Z')
+        self.assertEqual(patterns.update(self.store,self.rows+original,now)['state'],'WAITING_FRESH_VALIDATION')
+        remaining = [r for r in original if r['session_day'] != days[0]]
+        later = self.cohorts([days[20]])
+        model = patterns.update(self.store,self.rows+remaining+later,utc(days[20]+'T21:00:00Z'))
+        self.assertEqual(model['validation']['session_days'],days[:20])
+        self.assertAlmostEqual(model['validation']['complete_pair_coverage'],.95)
+
+    def test_holdout_registration_commits_and_rolls_back_with_the_cohort(self):
+        self.train()
+        day='2026-09-16'; rows=self.cohorts([day]); pair=[r['features'] for r in rows[:2]]
+        stamp=utc(day+'T12:00:00Z'); opening=utc(day+'T13:30:00Z')
+        clock=Mock(side_effect=[opening-timedelta(seconds=1),opening])
+        self.assertFalse(self.store.freeze_cohort([pair],fixtures.session(day),stamp,clock=clock))
+        self.assertEqual(self.store.state('pattern_policy').get('validation_plan',[]),[])
+        self.assertTrue(self.store.freeze_cohort([pair],fixtures.session(day),stamp))
+        plan=self.store.state('pattern_policy')['validation_plan']
+        self.assertEqual(len(plan),1); self.assertEqual(plan[0]['day'],day)
+        self.assertEqual(len(plan[0]['members']),2)
+        self.assertTrue(all(r['status']=='PENDING' for r in self.store.episodes()))
+
+    def test_tampered_proof_or_current_policy_cannot_apply_priority(self):
+        model=self.activate(); now=self.active_at+timedelta(hours=1)
+        self.assertTrue(patterns.active_proof(model,now))
+        changes=({'alpha':float('inf')},{'generation':True},{'policy_id':'wrong'},
+                 {'training':{}},{'activated_at':'2027-01-01T00:00:00Z'})
+        for change in changes:
+            self.assertFalse(patterns.active_proof(dict(model,**change),now))
+        for value in (float('nan'),float('inf'),None,True,1.):
+            bad=copy.deepcopy(model); bad['validation']['lower_bound']=value
+            self.assertFalse(patterns.active_proof(bad,now))
+
     def test_pending_missing_and_ambiguous_evidence_cannot_activate(self):
         self.train()
         days = pd.bdate_range('2026-09-16',periods=20).strftime('%Y-%m-%d').tolist()
@@ -186,6 +223,22 @@ class PatternTests(unittest.TestCase):
             self.assertEqual(patterns.prioritize(items,**dict(kwargs,**override))[0],items)
         model['state']='SUSPENDED'; self.store.state('pattern_policy',model)
         self.assertEqual(patterns.prioritize(items,**kwargs)[0],items)
+
+    def test_nonfinite_validation_proof_cannot_apply_paper_priority(self):
+        model = self.activate()
+        day='2026-10-14'; now=utc(day+'T14:00:00Z')
+        self.store.save_pattern_features([r['features'] for r in self.cohorts([day])],
+            fixtures.session(day),utc(day+'T12:00:00Z'))
+        self.store.publish(now,{'state':'READY'},patterns=model)
+        with self.store.connect() as conn:
+            row=conn.execute('SELECT payload_json FROM move_packets').fetchone()
+            encoded=json.loads(row[0]); encoded['patterns']['validation']['lower_bound']=float('nan')
+            conn.execute('UPDATE move_packets SET payload_json=?',(json.dumps(encoded),))
+        items=[NS(symbol='CONTROL0'),NS(symbol='ACTIVITY0')]
+        ordered,audit=patterns.prioritize(items,now=now,path=self.path,symbol_of=lambda r:r.symbol,
+                                         paper=True,allow_live=False)
+        self.assertEqual(ordered,items)
+        self.assertEqual(audit['mode'],'BASELINE')
 
     def test_pattern_inputs_are_immutable_and_cannot_be_prepared_after_open(self):
         day = '2026-10-14'; rows = self.cohorts([day]); features=[r['features'] for r in rows]

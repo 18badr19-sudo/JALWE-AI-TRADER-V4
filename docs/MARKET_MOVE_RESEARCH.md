@@ -146,12 +146,21 @@ coverage. Validation requires forty matched pairs on ten matched days, recent
 evidence, and a positive day-level Hoeffding lower bound. Generation k spends
 alpha .01/(k*(k+1)); these bounds assume independent days, which is not proven.
 This measures UP8_FIRST frequency, not simulated or realized profitability.
+Holdout days and member identities are registered durably before their outcomes
+are assessed, in the same transaction that freezes each new cohort. Retention,
+missing rows or altered membership cannot replace an
+original validation day with a later cohort. Lost members remain unavailable in
+coverage denominators and wait until the bounded retry horizon before assessment.
+The full manifest stays in SQLite rather than repeated log/Telegram packets.
 
 A passing model can automatically give matching fresh APEX reports earlier
 analysis priority in PAPER during the regular session. Prior-day inputs for the
 whole active catalog are stored once before open; only the training price and
 liquidity domain is eligible. The priority adapter checks a fresh research packet,
 current active policy version, frozen input timing, source, session and expiry.
+It checks finite evidence values, sample/coverage requirements, the recomputed
+uncertainty bound, generation alpha and policy identity in both the fresh packet
+and current durable policy. Invalid or nonfinite proof preserves baseline order.
 It makes a stable permutation of the same reports, never adds symbols, changes
 native gates/scores, modifies sizing/stops, submits orders or changes exit priority.
 Optional failures preserve the original analysis order. Native JALWE can execute

@@ -325,6 +325,8 @@ class MoveStore:
                  features_json, session_json) VALUES (?,?,?,?,?,?,?,?,?)''', values)
             conn.execute('INSERT INTO move_state VALUES (?,?)', (mark,json.dumps(dict(
                 created_at=now.isoformat(),prior_day=pairs[0][0]['evidence_day']))))
+            from market_move_patterns import register_frozen_validation
+            register_frozen_validation(conn,values)
             if clock is not None and clock() >= utc(session['open']):
                 conn.rollback()
                 return False

@@ -1,5 +1,32 @@
 # Independent market-move research
 
+## Historical jump paths
+
+The historical-jump-path-v1 queue scans all available active-catalog symbols over
+the last 30 calendar days, independent of portfolio ownership or company age.
+Candidates have a daily high at least 8% above the daily low or prior close,
+including moves that faded before close. This is an extrema screening bound,
+not evidence of low-before-high order. Prior-session price 0.50–100 and dollar
+volume at least 100,000 remain the study domain; unavailable prior bars and
+delisted assets outside the current catalog are not claimed as covered.
+
+JUMP_CASE episodes are retrospective and cannot enter frozen forward comparison
+or activate a pattern policy. Their full one-minute path identifies the maximum
+observed rise from a prior minute's low (or a segment opening price) to a later
+high. This is a hindsight onset estimate, not a precise causal beginning. The
+same minute's low is never used to explain its high. Missing, invalid or disputed
+minutes break the path into separate contiguous segments; partial segments do
+not establish the session's overall peak. Stored paths include timestamps,
+prices, phase volume and the twenty contiguous minutes before the estimated
+onset when available. News reads for complete jump studies end at that onset.
+
+All candidates are durably queued, with no top-five cap. At most twelve episodes
+are observed per worker cycle, prospective cohorts first and then newer history.
+Historical retries use three attempts within 48 hours of discovery; existing
+prospective cohorts retain their original session-based retry horizon. Queue
+growth is reported rather than represented as completed work. Old pending history
+does not hold the latest session's automatic report indefinitely.
+
 `market_move_research_loop.py` is a separate controller-managed subprocess in the
 existing JALWE Railway service. It uses its own persistent SQLite file,
 `/app/data/market_move_research.db`, and polls every 15 minutes. It reads Alpaca

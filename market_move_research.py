@@ -291,6 +291,25 @@ class MoveStore:
                 values).rowcount
         return bool(inserted)
 
+    def enqueue_jumps(self, studies, mark, now, lookback_days):
+        """Commit a historical manifest in one write, with its crash-safe marker."""
+        if self.state(mark) is not None:
+            return self.state(mark)
+        values = [self._episode_values(feat,session,'JUMP_CASE',
+            stable_key(feat['symbol']+'|'+feat['jump_protocol'],session['date']),now,prospective=False)
+            for feat,session in studies]
+        manifest = dict(created_at=now.isoformat(),selected=len(values),lookback_days=lookback_days)
+        with self.connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            saved = conn.execute('SELECT value FROM move_state WHERE key=?',(mark,)).fetchone()
+            if saved:
+                return json.loads(saved['value'])
+            conn.executemany('''INSERT OR IGNORE INTO move_episodes
+                (episode_key,session_day,symbol,role,pair_key,prospective,frozen_at,features_json,session_json)
+                VALUES (?,?,?,?,?,?,?,?,?)''',values)
+            conn.execute('INSERT INTO move_state VALUES (?,?)',(mark,json.dumps(manifest)))
+        return manifest
+
     def freeze_cohort(self, pairs, session, now, *, clock=None):
         """Commit a complete cohort and its restart marker in one transaction."""
         def cohort_values(at):
@@ -402,7 +421,8 @@ class MoveStore:
         day = health.get('completed_session')
         examples = [r for r in rows if r['session_day'] <= day] if day else [r for r in rows if r['status'] != 'PENDING']
         cases = sorted(examples, key=lambda r: (r['session_day'], {'JUMP_CASE':2,'HOT_CASE':1}.get(r['role'],0),
-                                               r['status'] == 'COMPLETE', r['episode_key']), reverse=True)[:12]
+            {'COMPLETE':3,'PARTIAL_DATA':2,'DATA_UNAVAILABLE':1,'PENDING':0}.get(r['status'],0),
+            r['episode_key']), reverse=True)[:12]
         packet = dict(protocol=PROTOCOL, scope='RESEARCH_ONLY_NOT_TRADE_SIGNAL',
             published_at=now.isoformat(), source_feed='sip', automatic_application=False,
             health=health, counts=dict(counts), prospective_episodes=sum(r['prospective'] for r in rows),

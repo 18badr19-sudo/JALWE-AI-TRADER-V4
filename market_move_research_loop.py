@@ -19,6 +19,8 @@ class MoveResearchWorker:
         self.store, self.provider = store, provider
 
     def prepare(self, now, sessions, symbols, *, clock=None):
+        from market_move_patterns import definition, PROTOCOL as PATTERN_PROTOCOL, SPEC
+        pattern_definition = definition(self.store,now)
         closed = [s for s in sessions if utc(s['close'])+timedelta(minutes=16) <= now]
         if len(closed) < 3:
             raise ValueError('INSUFFICIENT_COMPLETED_SESSIONS')
@@ -65,6 +67,8 @@ class MoveResearchWorker:
         # Prepare the next session's cohorts before its open. No same-day retrofit.
         future = next((s for s in sessions if utc(s['open']) > now), None)
         preceding = sessions[sessions.index(future)-1] if future is not None and sessions.index(future) else None
+        if future is not None and preceding is not None and preceding['date']==latest['date']:
+            self.store.save_pattern_features(features_latest,future,now,clock=clock)
         if (future is not None and preceding is not None and preceding['date'] == latest['date']
                 and self.store.state('frozen:'+future['date']) is None):
             prepared_pairs = []
@@ -72,6 +76,8 @@ class MoveResearchWorker:
                 prepared = []
                 for features, role in ((case,'ACTIVITY'),(control,'CONTROL')):
                     features = dict(features)
+                    features.update(pattern_protocol=PATTERN_PROTOCOL,pattern_spec_hash=SPEC,
+                                    pattern_defined_at=pattern_definition['defined_at'])
                     try:
                         features['pre_session_news'] = self.provider.news_before(features['symbol'],now-timedelta(minutes=16))
                         features['news_evidence_available'] = features['pre_session_news']['status'] == 'AVAILABLE'
@@ -138,7 +144,14 @@ class MoveResearchWorker:
         if health.get('state') == 'READY':
             health['completed_session_pending'] = sum(r['status'] == 'PENDING'
                 and r['session_day'] <= health['completed_session'] for r in self.store.episodes())
-        key, packet = self.store.publish(now if supplied_now else datetime.now(timezone.utc),health)
+        published_at = now if supplied_now else datetime.now(timezone.utc)
+        try:
+            from market_move_patterns import update
+            patterns = update(self.store,self.store.episodes(),published_at)
+        except Exception as exc:
+            patterns = {'state':'UNAVAILABLE','error_type':type(exc).__name__}
+            logger.warning('MARKET_MOVE_PATTERNS_UNAVAILABLE %s',type(exc).__name__)
+        key, packet = self.store.publish(published_at,health,patterns=patterns)
         try:
             emit_evidence(self.store,self.store.episodes(),logger)
         except Exception as exc:
@@ -146,7 +159,7 @@ class MoveResearchWorker:
         logger.info('MARKET_MOVE_PACKET %s',json.dumps(dict(packet_id=key,health=health,
             counts=packet['counts'],prospective_episodes=packet['prospective_episodes'],
             hot_case_episodes=packet['hot_case_episodes'],comparison=packet['comparison'],
-            diagnostics=packet['diagnostics'])))
+            diagnostics=packet['diagnostics'],patterns=packet['patterns'])))
         return packet
 
 

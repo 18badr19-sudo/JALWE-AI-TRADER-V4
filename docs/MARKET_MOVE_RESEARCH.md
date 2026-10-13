@@ -124,6 +124,46 @@ assumes independent days, which is not proven; overlapping market regimes and
 repeated symbols limit interpretation. It never activates a trading preference.
 Even constant success over a tiny holdout does not mean zero uncertainty.
 
+## Pattern learning and guarded PAPER application
+
+`market_move_patterns.py` defines three fixed prior-day hypotheses: volume ratio
+at least 2 and range at least 5%; range at least 8% and daily gain at least 3%;
+volume ratio at least 3 and daily gain at least 2%. These use completed prior-day
+SIP inputs, not intraday RVOL. Completed retrospective UP8_FIRST examples supply
+descriptive hypothesis support; news and pre-move context remain descriptions,
+not proven causes or automatic entry rules.
+
+The definition and thresholds are versioned and stored before collecting learning
+cohorts. The original sixteen cohorts retain their original protocol and cannot
+be relabeled to train this new model. Training requires at least forty matched
+prospective pairs across ten days, 90% complete pair and known-feature coverage,
+and support from three completed retrospective examples on three days. The best
+training daily association is selected once and sealed, with a minimum edge .10.
+Exactly the first twenty later frozen cohort session days test that fixed winner;
+they cannot alter it or select another candidate after failure. Pending/retryable
+observations delay assessment. Missing and ambiguous outcomes count against
+coverage. Validation requires forty matched pairs on ten matched days, recent
+evidence, and a positive day-level Hoeffding lower bound. Generation k spends
+alpha .01/(k*(k+1)); these bounds assume independent days, which is not proven.
+This measures UP8_FIRST frequency, not simulated or realized profitability.
+
+A passing model can automatically give matching fresh APEX reports earlier
+analysis priority in PAPER during the regular session. Prior-day inputs for the
+whole active catalog are stored once before open; only the training price and
+liquidity domain is eligible. The priority adapter checks a fresh research packet,
+current active policy version, frozen input timing, source, session and expiry.
+It makes a stable permutation of the same reports, never adds symbols, changes
+native gates/scores, modifies sizing/stops, submits orders or changes exit priority.
+Optional failures preserve the original analysis order. Native JALWE can execute
+only after all its existing gates pass. LIVE cannot use this adapter.
+
+The model retires after fourteen calendar days or suspends after at least twenty
+matched pairs over five later days show a nonpositive forward association with
+adequate coverage. After seven days a new generation begins using only newly
+frozen evidence, with a fresh holdout and smaller alpha. Definitions, sealed
+training, validation, generation and applied priority audit are durable. Bot
+reports show whether learning is collecting, validating, active or suspended.
+
 Storage retains 90 days of episodes and 30 packet versions. Daily and universe
 caches prevent repeated full-catalog reads in the same session. Individual bad
 symbols are excluded; request failures cannot interrupt trading. A current

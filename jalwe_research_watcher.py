@@ -3930,6 +3930,21 @@ def scan_bridge(
 
     research_items = fresh_items
 
+    # Learned movement associations may reorder fresh analyses on PAPER only.
+    # Eligibility and position management below keep their existing authority.
+    try:
+        from market_move_patterns import prioritize
+        research_items, priority = prioritize(research_items,now=datetime.now(timezone.utc),
+            symbol_of=lambda item:getattr(item,'symbol',''),
+            paper=settings.PAPER_TRADING,allow_live=settings.ALLOW_LIVE_TRADING)
+        if priority.get('mode')=='PAPER_SCAN_PRIORITY_ONLY':
+            digest = hashlib.sha256(json.dumps(priority,sort_keys=True).encode()).hexdigest()
+            if state.get('last_move_priority_audit') != digest:
+                logger.info('MARKET_MOVE_PATTERN_APPLIED %s',json.dumps(priority,sort_keys=True))
+                state['last_move_priority_audit'] = digest
+    except Exception as exc:
+        logger.warning('MARKET_MOVE_PRIORITY_UNAVAILABLE %s',type(exc).__name__)
+
     discovered = len(
         research_items
     )

@@ -60,6 +60,26 @@ class RetryTests(unittest.TestCase):
 
 
 class GapDiagnosticsTests(unittest.TestCase):
+    def test_outside_session_duplicates_do_not_invalidate_regular_coverage(self):
+        session = fixtures.session(); raw = fixtures.frame(session)
+        for stamp in (utc(session['open'])-timedelta(minutes=1),utc(session['close'])):
+            extra = raw.iloc[:1].copy(); extra.index = pd.DatetimeIndex([stamp])
+            result = observe_session(pd.concat([raw,extra,extra]),session)
+            self.assertEqual(result['status'],'COMPLETE')
+            self.assertEqual(result['observed_minutes'],390)
+            self.assertEqual(result['duplicates'],0)
+            self.assertEqual(result['data_diagnostics']['duplicate_rows'],0)
+
+    def test_closing_duplicates_do_not_discard_valid_pre_gap_context(self):
+        session = fixtures.session(); raw = fixtures.frame(session)
+        raw.iloc[25,1] = 11.; raw = raw.drop(raw.index[60])
+        extra = raw.iloc[:1].copy(); extra.index = pd.DatetimeIndex([utc(session['close'])])
+        baseline = observe_session(raw,session)
+        result = observe_session(pd.concat([raw,extra,extra]),session)
+        self.assertEqual(result['status'],'PARTIAL_DATA')
+        self.assertEqual(result['missing_minutes'],1)
+        self.assertEqual(result['prefix_context'],baseline['prefix_context'])
+
     def test_completed_prefix_can_describe_a_move_without_promoting_the_session(self):
         raw = fixtures.frame(); raw.iloc[25,1] = 11.; raw = raw.drop(raw.index[60])
         result = observe_session(raw,fixtures.session())

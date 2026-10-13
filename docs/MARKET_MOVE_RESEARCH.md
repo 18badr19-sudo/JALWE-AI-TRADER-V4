@@ -31,6 +31,10 @@ they are not represented as exclusively regular-session statistics.
 Historical bars are queried only after a 16-minute delay beyond the session close.
 Every regular-session minute must be present, valid, timezone-aware and unique
 for a conclusive path (390 normally; early-close sessions follow the calendar).
+Duplicate detection applies only inside the actual session's half-open window.
+Extra rows at the inclusive provider end boundary or before session open are
+excluded, including their duplicates; they cannot invalidate otherwise complete
+regular-session coverage or a valid opening-prefix description.
 Missing bars are never filled with a previous price. Provider and pagination
 failures remain unavailable. News is retained only when both creation and update
 timestamps precede the study cutoff; incomplete news stays explicitly incomplete.

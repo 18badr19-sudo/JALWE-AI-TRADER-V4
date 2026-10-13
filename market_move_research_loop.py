@@ -15,6 +15,15 @@ from market_jump_paths import VERSION as JUMP_VERSION, LOOKBACK_DAYS, candidates
 logger = logging.getLogger(__name__)
 
 
+def session_backlog(rows, day):
+    current = [r for r in rows if r['session_day'] == day]
+    forward = [r for r in current if r['prospective'] and r['role'] in {'ACTIVITY', 'CONTROL'}]
+    return dict(completed_session_pending=sum(r['status'] == 'PENDING' for r in current),
+        completed_session_forward_total=len(forward),
+        completed_session_forward_pending=sum(r['status'] == 'PENDING' for r in forward),
+        completed_session_historical_pending=sum(r['status'] == 'PENDING' and not r['prospective'] for r in current))
+
+
 class MoveResearchWorker:
     def __init__(self, store, provider):
         self.store, self.provider = store, provider
@@ -161,8 +170,7 @@ class MoveResearchWorker:
             health = dict(state='DATA_UNAVAILABLE',error_type=type(exc).__name__,
                           reason=str(exc) if str(exc).startswith(('HTTP_','WAITING_')) else 'RESEARCH_READ_FAILED')
         if health.get('state') == 'READY':
-            health['completed_session_pending'] = sum(r['status'] == 'PENDING'
-                and r['session_day'] == health['completed_session'] for r in self.store.episodes())
+            health.update(session_backlog(self.store.episodes(), health['completed_session']))
         published_at = now if supplied_now else datetime.now(timezone.utc)
         try:
             from market_move_patterns import update

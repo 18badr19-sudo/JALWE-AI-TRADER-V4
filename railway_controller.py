@@ -540,6 +540,23 @@ def save_state(state: dict[str, Any]) -> None:
 
 
 controller_state = load_state()
+_code_review_ui = None
+
+
+def code_review_ui():
+    global _code_review_ui
+    if _code_review_ui is None:
+        from self_update.telegram_review import ReviewUI
+        _code_review_ui = ReviewUI(DATA_DIR/'code_owner_reviews.db',TELEGRAM_CHAT_ID)
+    return _code_review_ui
+
+
+def poll_code_review_requests():
+    try:
+        code_review_ui().poll(send_message)
+    except Exception as exc:
+        # Only exception type; URLs/headers may carry service credentials.
+        logging.getLogger(__name__).warning('CODE_OWNER_REVIEW_POLL_UNAVAILABLE %s',type(exc).__name__)
 
 
 # ============================================================
@@ -1617,7 +1634,11 @@ def poll_filled_order_alerts() -> None:
 # ============================================================
 
 def maybe_send_move_research_report() -> None:
-    """Receive the advisory outbox and send one settled research report per session."""
+    """Report the cohort's first evaluation pass without waiting for historical backlog.
+
+Partial/failed observations remain explicit in the report; this is not proof of
+full coverage or a completed statistical comparison. Older packets stay gated.
+"""
     try:
         from market_move_research import read_packet, report_text
         packet = read_packet()
@@ -1630,7 +1651,7 @@ def maybe_send_move_research_report() -> None:
         health = packet['health']
         day = health.get('completed_session')
         if (AUTO_DAILY_REPORT and day and health.get('state') == 'READY'
-                and health.get('completed_session_pending') == 0
+                and health.get('completed_session_forward_pending', health.get('completed_session_pending')) == 0
                 and controller_state.get('last_move_report_session') != day):
             send_message(report_text(packet))
             controller_state['last_move_report_session'] = day
@@ -2642,6 +2663,8 @@ def help_text() -> str:
         "/trades - آخر الأوامر المنفذة\n"
         "/target_audit CANE - فحص وصول الأهداف في يوم الشراء بدون تداول\n"
         "/learning - حالة التعلم الذاتي\n"
+        "/ai_status - حالة محلل الذكاء الاصطناعي المستقل\n"
+        "/ai_review SNAP - أحدث تفسير محفوظ للسهم\n"
         "/move_research - نتائج مسار أبحاث الحركات المستقل\n"
         "/learn_now - تشغيل دورة تعلم الآن\n"
         "/sell - بيع صفقة PAPER محددة مع تأكيد\n"
@@ -2668,6 +2691,10 @@ def help_text() -> str:
 def handle(text: str, requested_by=None) -> Any:
     cmd = str(text or "").strip()
     low = cmd.lower()
+
+    if low == '/ai_status' or low.split(' ', 1)[0] == '/ai_review':
+        from intelligence.shadow_advisor import advisor_status_text
+        return advisor_status_text(cmd.split(' ', 1)[1].strip() if ' ' in cmd else None)
 
     if low.split(' ', 1)[0] == '/target_audit':
         return target_audit_text(cmd.split(' ', 1)[1] if ' ' in cmd else '')
@@ -2781,12 +2808,19 @@ def process_telegram_update(update):
     owner = str(((callback or message).get('from') or {}).get('id') or TELEGRAM_CHAT_ID)
     if callback:
         data = str(callback.get('data') or '')
-        if not data.startswith(('sell-preview:', 'sell-confirm:', 'sell-cancel:')):
+        if not data.startswith(('sell-preview:', 'sell-confirm:', 'sell-cancel:', 'code-approve:', 'code-reject:')):
             return False
         try:
-            reply = manual_sell_callback(database, data, owner)
+            reply = (code_review_ui().callback(data,str(callback.get('from',{}).get('id','')))
+                     if data.startswith(('code-approve:','code-reject:'))
+                     else manual_sell_callback(database, data, owner))
         except ValueError as exc:
             reply = str(exc)
+        except Exception as exc:
+            if not data.startswith(('code-approve:', 'code-reject:')):
+                raise
+            logging.getLogger(__name__).warning('Owner code review callback unavailable: %s', type(exc).__name__)
+            reply = 'تعذر تأكيد قرار التعديل الآن. لم يؤكد البوت التطبيق؛ أعد المحاولة أو راجع الطلب في GitHub.'
         # Clear Telegram's spinner only after durable handling; retries remain idempotent.
         tg_call('answerCallbackQuery', {'callback_query_id': callback['id']}, timeout=10)
         send_message(reply)
@@ -2966,6 +3000,7 @@ def main() -> None:
         poll_filled_order_alerts()
         maybe_send_scheduled_reports()
         maybe_run_learning_cycle()
+        poll_code_review_requests()
 
         try:
             polling_updates = True
@@ -2975,7 +3010,7 @@ def main() -> None:
                     "offset": offset,
                     "timeout": 15,
                     "allowed_updates": json.dumps(
-                        ["message"]
+                        ["message", "callback_query"]
                     ),
                 },
                 timeout=25,

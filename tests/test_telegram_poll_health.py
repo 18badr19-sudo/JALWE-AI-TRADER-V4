@@ -31,6 +31,7 @@ class TelegramPollHealthTests(unittest.TestCase):
              patch.object(controller, 'poll_filled_order_alerts'), \
              patch.object(controller, 'maybe_send_scheduled_reports'), \
              patch.object(controller, 'maybe_run_learning_cycle'), \
+             patch.object(controller, 'poll_code_review_requests'), \
              patch.object(controller, 'notify_error') as alert, \
              patch.object(controller.time, 'sleep', side_effect=EndLoop):
             with self.assertRaises(EndLoop):

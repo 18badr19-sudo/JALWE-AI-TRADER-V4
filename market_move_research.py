@@ -513,6 +513,9 @@ def report_text(packet):
         f"مكتملة: {counts.get('COMPLETE', 0)} | تنتظر: {counts.get('PENDING', 0)} | ناقصة/غير متاحة: {counts.get('PARTIAL_DATA',0)+counts.get('DATA_UNAVAILABLE',0)}",
         f"مقارنات مستقبلية مكتملة: {comp['complete_pairs']} على {comp['unique_days']} أيام | {comparisons.get(comp['state'], 'غير متاح')}"]
     jumps = packet.get('historical_jumps',{})
+    if 'completed_session_forward_total' in health:
+        lines.append(f"عينات الجلسة الأخيرة: {health['completed_session_forward_total']} | تنتظر أول تقييم {health['completed_session_forward_pending']} | دراسات تاريخية تنتظر {health['completed_session_historical_pending']}")
+        lines.append('تقرير حالة العينات؛ نقص البيانات يبقى غير محسوم. قائمة الدراسات التاريخية لا تحجز إرسال تقرير المقارنة.')
     if jumps:
         jc = jumps.get('counts',{})
         lines.append(f"📚 مسارات القفزات — آخر {jumps['lookback_days']} يومًا: مرشحة {jumps['episodes']} | قفزات مؤكدة {jumps['confirmed']} | تنتظر {jc.get('PENDING',0)}")

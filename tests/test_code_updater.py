@@ -278,20 +278,22 @@ class CodeUpdaterTests(unittest.TestCase):
     def test_repository_requirements_leave_the_tested_pr_open(self):
         self.bundle()
         api = FakeGitHub(block=True)
-        self.assertEqual(self.publication(api)["state"], "PR_AWAITING_GITHUB_REQUIREMENTS")
+        self.assertEqual(self.publication(api)["state"], "PR_AWAITING_OWNER_APPROVAL")
+        self.assertEqual(api.child_calls, [])
         self.assertEqual(api.current, BASE)
 
-    def test_successful_publication_changes_only_allowed_file_and_retains_parent(self):
+    def test_successful_tests_stage_only_allowed_file_and_never_apply_without_owner(self):
         self.bundle()
         api = FakeGitHub()
         result = self.publication(api)
-        self.assertEqual(result["state"], "PUBLISHED_FOR_PAPER")
+        self.assertEqual(result["state"], "PR_AWAITING_OWNER_APPROVAL")
         self.assertEqual(result["previous_sha"], BASE)
         tree = next(data for _, path, data in api.calls if path == "/git/trees")
         self.assertEqual([entry["path"] for entry in tree["tree"]], [TARGET])
         commit = next(data for _, path, data in api.calls if path == "/git/commits")
         self.assertEqual(commit["parents"], [BASE])
-        self.assertEqual(api.child_calls, [("18badr19-sudo/JALWE-AI-TRADER-V4", BASE, HEAD)])
+        self.assertEqual(api.child_calls, [])
+        self.assertEqual(api.current, BASE)
 
     def test_git_publication_requires_exact_single_parent_and_explicit_lease(self):
         api = GitHub("18badr19-sudo/JALWE-AI-TRADER-V4", "test-token")

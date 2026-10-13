@@ -199,8 +199,11 @@ code come from the trusted base, and numeric checks run without credentials.
 Test logs, proposal and hashes are retained as an artifact for 30 days.
 
 A separate write job rechecks the artifact, run identity, numeric contract and
-exact tested bytes, creates a single-file commit and opens a pull request. It
-publishes only a direct child of the tested `main` commit with an explicit
+exact tested bytes, creates a single-file commit and opens a pull request. Tests
+alone never authorize application: the proposal waits for the owner's explicit
+approval of its exact head. The owner-review workflow checks the latest review
+by `18badr19-sudo`, retests the candidate with the unchanged full PAPER suite,
+then publishes only a direct child of the tested `main` commit with an explicit
 expected-base Git lease. Any advance or reset of `main` rejects the write; no
 history rewrite or branch-rule bypass is allowed. Repository protections can
 leave the tested PR open for required checks/review. Publication using the
@@ -209,6 +212,18 @@ suite has already passed in the independent validation job. Railway's existing
 GitHub deployment integration observes the updated `main` branch. Deployment
 success is not monitored by this updater, and automatic code rollback is not
 implemented; the previous Git commit and repair PR remain available.
+
+The Telegram controller checks tested open proposals every five minutes and
+stores approval requests durably. Only the configured private-chat owner can
+use the approval/rejection buttons. Requests expire after 24 hours; any change
+to the proposal or its base invalidates consent. Repeated callbacks reuse the
+stored decision. With no runtime GitHub review token, approval gives the owner
+a link to approve in GitHub and does **not** apply the change. For direct button
+reviews, configure `JALWE_CODE_REVIEW_GITHUB_TOKEN` in Railway: a fine-grained
+token owned by `18badr19-sudo`, scoped only to this repository with Pull Requests
+read/write and Contents read. Runtime code never receives Contents write.
+Do not share that token in chat. Existing numerical scope and repository rules
+still apply after approval; this is not unrestricted self-modification.
 
 Activation setup:
 

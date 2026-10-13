@@ -122,11 +122,8 @@ def publish(folder, api=None, *, repository=None, base_sha=None, source=None, ru
     info = api.request("GET", "/pulls/" + str(pr["number"]))
     if info["head"]["sha"] != head or info["base"]["sha"] != base_sha:
         raise Rejected("PR_CHANGED_BEFORE_MERGE")
-    # An exact child plus an explicit expected-old-ID lease yields a guarded
-    # fast-forward. It fails if main advances OR is reset during publication.
-    # No branch protections or required checks are modified or bypassed.
-    if not api.publish_child(repository, base_sha, head):
-        return {"state": "PR_AWAITING_GITHUB_REQUIREMENTS", "pr": pr["number"]}
-    if api.request("GET", "/git/ref/heads/main")["object"]["sha"] != head:
-        raise Rejected("PUBLICATION_REF_MISMATCH")
-    return {"state": "PUBLISHED_FOR_PAPER", "pr": pr["number"], "sha": head, "previous_sha": base_sha}
+    # Successful tests authorize a proposal, never application. A separate
+    # owner-review workflow must recheck the exact reviewed head and test it.
+    return {"state": "PR_AWAITING_OWNER_APPROVAL", "pr": pr["number"],
+            "url": f"https://github.com/{repository}/pull/{pr['number']}",
+            "sha": head, "previous_sha": base_sha}

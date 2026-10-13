@@ -688,6 +688,8 @@ class AIEngine:
             metadata={
                 "engine": "JALWE_V4_AI",
                 "mode": "DETERMINISTIC",
+                "probability_kind": "SCORE_PROXY_NOT_CALIBRATED",
+                "confidence_kind": "FEATURE_COVERAGE",
                 "evidence_count": (
                     evidence_count
                 ),

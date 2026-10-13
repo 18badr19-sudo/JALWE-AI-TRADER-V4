@@ -390,6 +390,21 @@ class BotBoundaryTests(unittest.TestCase):
         with patch('market_move_research.read_packet', side_effect=RuntimeError('offline')):
             controller.maybe_send_move_research_report()
 
+    def test_historical_backlog_cannot_suppress_forward_report_or_count_as_complete(self):
+        from market_move_research_loop import session_backlog
+        rows = [dict(session_day='2026-10-13', prospective=False, role='JUMP_CASE', status='PENDING')]
+        rows += [dict(session_day='2026-10-13', prospective=True, role=r, status='PARTIAL_DATA', pair_key='pair') for r in ('ACTIVITY','CONTROL')]
+        health = dict(state='READY', completed_session='2026-10-13', **session_backlog(rows, '2026-10-13'))
+        self.assertEqual(health['completed_session_forward_pending'], 0)
+        self.assertEqual(health['completed_session_historical_pending'], 1)
+        self.assertEqual(research.comparison(rows)['complete_pairs'], 0)
+        packet = dict(packet_id='new', health=health)
+        with patch('market_move_research.read_packet', return_value=packet), \
+             patch('market_move_research.report_text', return_value='partial research'), \
+             patch.object(controller, 'controller_state', {}), patch.object(controller, 'AUTO_DAILY_REPORT', True), \
+             patch.object(controller, 'save_state'), patch.object(controller, 'send_message') as send:
+            controller.maybe_send_move_research_report(); send.assert_called_once_with('partial research')
+
     def test_missing_optional_module_does_not_stop_report_polling(self):
         import sys
         with patch.dict(sys.modules, {'market_move_research': None}), patch('builtins.print') as output:

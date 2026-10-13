@@ -17,8 +17,11 @@ score proxy and confidence as feature coverage.
 Only finite numeric/boolean whitelisted market features, known feed, feature
 timestamp, symbol and existing native price levels are forwarded. Free-form
 news, prompts, errors, credentials, account balances and metadata are excluded.
-Bad/stale evidence, missing/naive/future timestamps and bars older than five
-minutes are ineligible. A news score is not evidence of a specific catalyst.
+Bad/stale evidence and missing/naive/future timestamps are ineligible. Timestamp
+semantics explicitly account for completed interval starts: 1m bars must be no
+older than five minutes; 5m bars use the native fifteen-minute ceiling. Unknown
+timeframes are ineligible. The native stale flag always blocks a review. A news
+score is not evidence of a specific catalyst.
 
 Submission writes a small durable SQLite queue in `/app/data`; a separate daemon
 thread performs model HTTP requests. There is no network call in submission.

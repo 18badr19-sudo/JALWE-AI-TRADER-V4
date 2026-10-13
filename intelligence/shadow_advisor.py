@@ -88,21 +88,25 @@ def frozen_evidence(payload, now):
     decision = payload.get('jalwe') or {}
     metadata = decision.get('metadata') or {}
     features = metadata.get('decision_features') or {}
+    timeframe = str((metadata.get('quality_inputs') or {}).get('timeframe', ''))
+    # Provider timestamps mark the START of a completed interval. A 5m bar
+    # normally starts more than five minutes ago; use its native 15m ceiling.
+    max_age = {'1m': 300, '5m': 900}.get(timeframe)
     state = str(decision.get('state', ''))
-    if state not in {'WATCHING', 'READY_FOR_PAPER_EXECUTION'}:
+    if state not in {'WATCHING', 'READY_FOR_PAPER_EXECUTION'} or max_age is None:
         return None
     if features.get('data_quality_ok') is not True or features.get('data_is_stale') is not False:
         return None
     try:
         stamp = datetime.fromisoformat(str(features['timestamp']).replace('Z', '+00:00'))
-        if stamp.tzinfo is None or not 0 <= now - stamp.timestamp() <= 300:
+        if stamp.tzinfo is None or not 0 <= now - stamp.timestamp() <= max_age:
             return None
     except (ValueError, KeyError, TypeError):
         return None
     symbol = str(payload.get('symbol', '')).upper()
     if not re.fullmatch(r'[A-Z0-9.^/-]{1,20}', symbol):
         return None
-    facts = {'native_state': state, 'feature_timestamp': stamp.isoformat(),
+    facts = {'native_state': state, 'feature_timestamp': stamp.isoformat(), 'feature_timeframe': timeframe,
              'data_quality_ok': True, 'data_is_stale': False}
     for name in FEATURES:
         value = features.get(name)

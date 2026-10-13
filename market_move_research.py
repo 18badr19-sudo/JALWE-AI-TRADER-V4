@@ -155,7 +155,9 @@ def observe_session(frame, session):
     data.index = pd.to_datetime(data.index, utc=True, errors='coerce')
     for col in required:
         data[col] = pd.to_numeric(data[col], errors='coerce')
-    duplicates = int(data.index.duplicated().sum())
+    # Provider end bounds can be inclusive; outside-session rows do not describe this path.
+    in_window = data.index[(data.index >= start) & (data.index < end)]
+    duplicates = int(in_window.duplicated().sum())
     finite = data[required].map(lambda x: pd.notna(x) and math.isfinite(x)).all(axis=1)
     valid = (finite & (data[required] > 0).all(axis=1)
         & (data['high'] >= data[['open', 'low', 'close']].max(axis=1))

@@ -9,7 +9,7 @@ from core.config import settings
 from market_move_provider import MoveProvider
 from market_move_research import (MoveStore, PROTOCOL, daily_features, choose_pairs, bucket,
                                  utc, observe_session, default_path, stable_key)
-from market_move_diagnostics import VERSION, observation_due, diagnose_gaps, emit_evidence
+from market_move_diagnostics import VERSION, observation_due, diagnose_gaps, emit_evidence, recheck_absent_bars
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +107,11 @@ class MoveResearchWorker:
                 try:
                     frame_key = (row['symbol'],row['session']['open'],row['session']['close'])
                     if frame_key not in frames:
-                        frames[frame_key] = self.provider.intraday(row['symbol'],row['session'],now)
+                        raw = self.provider.intraday(row['symbol'],row['session'],now)
+                        initial = observe_session(raw,row['session'])
+                        if row['status'] != 'PENDING' and initial['status'] == 'PARTIAL_DATA':
+                            raw = recheck_absent_bars(self.provider,row['symbol'],raw,row['session'],initial,now)
+                        frames[frame_key] = raw
                     data = frames[frame_key]
                     result = observe_session(data,row['session'])
                     if result['status'] == 'PARTIAL_DATA':
@@ -141,7 +145,8 @@ class MoveResearchWorker:
             logger.warning('MARKET_MOVE_DIAGNOSTIC_LOG_UNAVAILABLE %s',type(exc).__name__)
         logger.info('MARKET_MOVE_PACKET %s',json.dumps(dict(packet_id=key,health=health,
             counts=packet['counts'],prospective_episodes=packet['prospective_episodes'],
-            hot_case_episodes=packet['hot_case_episodes'],comparison=packet['comparison'])))
+            hot_case_episodes=packet['hot_case_episodes'],comparison=packet['comparison'],
+            diagnostics=packet['diagnostics'])))
         return packet
 
 

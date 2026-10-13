@@ -76,6 +76,16 @@ separately bounded by the transport. Reports include diagnostics and the next
 forward-cohort availability time in Saudi time. Bounded, deduplicated
 `MARKET_MOVE_EVIDENCE` manifests allow operators to review stored coverage and
 cohort timing without exporting credentials, headlines, full price series or raw trades.
+During an existing incomplete-observation retry, at most two genuinely absent
+minutes are also requested individually from the same delayed historical SIP
+endpoint. Only complete, valid, unique returned minute bars are merged; empty,
+invalid, duplicate, or unavailable replies cannot synthesize or replace a price.
+The full session is then validated again. Inclusive end rows are excluded and
+shared symbol/session reads are reused within the cycle. These bounded requests
+do not reset the three-observation attempt limit or the 48-hour retry horizon.
+Report reason counts are labeled as episode counts, separate from missing-minute
+totals across distinct symbol/session windows. Conflicting window counts are
+excluded from those minute totals and reported explicitly.
 
 The path starts at the first regular-session bar open, with research barriers
 of +8% and −3%. A same-minute crossing remains ambiguous. These are movement

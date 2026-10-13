@@ -169,6 +169,8 @@ def observe_session(frame, session):
                   observed_minutes=len(data), missing_minutes=missing, duplicates=duplicates,
                   outcome=None, scope='OBSERVED_MOVEMENT_NOT_TRADE_PNL')
     diagnostics = coverage_diagnostics(frame, data, start, end)
+    if 'targeted_bar_recheck' in frame.attrs:
+        diagnostics['targeted_bar_recheck'] = frame.attrs['targeted_bar_recheck']
     stamps = pd.to_datetime(frame.index, utc=True, errors='coerce').dropna()
     absent = expected.difference(stamps.floor('min').unique())
     diagnostics['first_absent_minutes'] = [stamp.isoformat() for stamp in absent[:2]]
@@ -458,9 +460,14 @@ def report_text(packet):
     diagnostics = packet.get('diagnostics', {})
     if diagnostics:
         from market.research_diagnostics import diagnostic_text
-        lines.append('تشخيص النقص: '+diagnostic_text(diagnostics.get('reasons', {})))
+        lines.append('أسباب نقص سجلات التقييم (الأعداد سجلات، وليست دقائق): '+diagnostic_text(diagnostics.get('reasons', {})))
         if 'unique_incomplete_symbol_days' in diagnostics:
             lines.append(f"السجلات الناقصة تخص {diagnostics['unique_incomplete_symbol_days']} سهم/جلسة مختلفة.")
+        coverage = diagnostics.get('coverage_totals', {})
+        if coverage.get('measured_symbol_days'):
+            lines.append(f"الدقائق غير المرجعة: {coverage['absent_provider_minutes']} | مرجعة ومرفوضة: {coverage['rejected_minutes']} | صفوف مكررة: {coverage['duplicate_rows']}؛ عبر {coverage['measured_symbol_days']} سهم/جلسة، مع حذف تكرار السجلات.")
+        if coverage.get('conflicting_symbol_days'):
+            lines.append(f"تغطية متعارضة: {coverage['conflicting_symbol_days']} سهم/جلسة؛ مستبعدة من إجمالي الدقائق.")
         lines.append(f"إعادة فحص مؤهلة الآن: {diagnostics.get('retry_eligible', 0)} | حد المحاولات: 3 خلال 48 ساعة")
         labels = {'NO_TRADES_IN_FEED':'بلا صفقات في المصدر',
                   'ONLY_NON_PRICE_UPDATING_TRADES':'صفقات لا تحدد سعر الشمعة',

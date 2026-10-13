@@ -16,7 +16,7 @@ NOW = 1781000000.
 def payload():
     return {'symbol': 'SNAP', 'timestamp': 'ignored transport time', 'jalwe': {
         'state': 'WATCHING', 'reason': 'untrusted text', 'metadata': {
-            'decision_data_feed': 'iex', 'decision_features': {
+            'decision_data_feed': 'iex', 'quality_inputs': {'timeframe': '5m'}, 'decision_features': {
                 'timestamp': datetime.fromtimestamp(NOW-60, timezone.utc).isoformat(),
                 'data_quality_ok': True, 'data_is_stale': False,
                 'price': 6.2, 'rvol': 2.1, 'atr_pct': float('nan'),
@@ -71,6 +71,22 @@ class ShadowAdvisorTests(unittest.TestCase):
         self.assertIsNone(evidence['facts']['news_score'])
         self.assertIsNone(evidence['facts']['atr_pct'])
         self.assertFalse(evidence['execution_authority'])
+
+    def test_completed_five_minute_bar_uses_interval_start_without_relaxing_stale_flag(self):
+        p = payload(); metadata = p['jalwe']['metadata']
+        f = metadata['decision_features']
+        f['timestamp'] = datetime.fromtimestamp(NOW-7*60, timezone.utc).isoformat()
+        self.assertIsNotNone(frozen_evidence(p, NOW))
+        metadata['quality_inputs']['timeframe'] = '1m'
+        self.assertIsNone(frozen_evidence(p, NOW))
+        metadata['quality_inputs']['timeframe'] = '5m'
+        f['timestamp'] = datetime.fromtimestamp(NOW-16*60, timezone.utc).isoformat()
+        self.assertIsNone(frozen_evidence(p, NOW))
+        f['timestamp'] = datetime.fromtimestamp(NOW-7*60, timezone.utc).isoformat()
+        f['data_is_stale'] = True
+        self.assertIsNone(frozen_evidence(p, NOW))
+        f['data_is_stale'] = False; metadata['quality_inputs']['timeframe'] = 'unknown'
+        self.assertIsNone(frozen_evidence(p, NOW))
 
     def test_durable_dedup_daily_ceiling_and_failed_requests_consume_budget(self):
         self.assertEqual(self.advisor.submit(payload()), 'QUEUED')

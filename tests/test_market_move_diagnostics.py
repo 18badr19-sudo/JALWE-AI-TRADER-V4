@@ -5,6 +5,8 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
+import pandas as pd
+
 from market_move_diagnostics import VERSION, observation_due, diagnose_gaps, aggregate, emit_evidence
 from market_move_provider import MoveProvider, ResearchReadError
 from market_move_research import MoveStore, observe_session, utc, read_packet, report_text
@@ -58,6 +60,37 @@ class RetryTests(unittest.TestCase):
 
 
 class GapDiagnosticsTests(unittest.TestCase):
+    def test_completed_prefix_can_describe_a_move_without_promoting_the_session(self):
+        raw = fixtures.frame(); raw.iloc[25,1] = 11.; raw = raw.drop(raw.index[60])
+        result = observe_session(raw,fixtures.session())
+        prefix = result['prefix_context']
+        self.assertEqual(result['status'],'PARTIAL_DATA'); self.assertIsNone(result['outcome'])
+        self.assertEqual(prefix['bars'],60)
+        self.assertEqual(prefix['observed_barrier_order'],'UP8_FIRST')
+        self.assertEqual(prefix['pre_move_context']['bars'],20)
+        self.assertIn('PREFIX_ONLY',prefix['scope'])
+
+    def test_prices_after_first_gap_cannot_change_prefix_evidence(self):
+        raw = fixtures.frame(); raw.iloc[25,1] = 11.; raw = raw.drop(raw.index[60])
+        first = observe_session(raw,fixtures.session())['prefix_context']
+        raw.loc[raw.index>fixtures.frame().index[60],'high'] = 100
+        self.assertEqual(first,observe_session(raw,fixtures.session())['prefix_context'])
+
+    def test_missing_open_or_duplicate_evidence_cannot_prove_a_prefix(self):
+        samples = [fixtures.frame().iloc[1:], pd.concat([fixtures.frame(),fixtures.frame().iloc[:1]])]
+        for raw in samples:
+            self.assertEqual(observe_session(raw,fixtures.session())['prefix_context']['status'],'UNAVAILABLE')
+
+    def test_same_bar_prefix_crossing_remains_ambiguous(self):
+        raw = fixtures.frame(); raw.iloc[25,1] = 11.; raw.iloc[25,2] = 9.6; raw = raw.drop(raw.index[60])
+        self.assertEqual(observe_session(raw,fixtures.session())['prefix_context']['observed_barrier_order'],'AMBIGUOUS')
+
+    def test_no_barrier_in_prefix_does_not_mean_no_barrier_in_the_day(self):
+        raw = fixtures.frame(); raw.iloc[70,1] = 11.; raw = raw.drop(raw.index[60])
+        result = observe_session(raw,fixtures.session())
+        self.assertEqual(result['prefix_context']['observed_barrier_order'],'NO_BARRIER_OBSERVED_IN_PREFIX')
+        self.assertIsNone(result['outcome'])
+
     def test_absent_and_rejected_minutes_have_separate_counts(self):
         raw = fixtures.frame(); raw.iloc[2,4] = 0; raw = raw.drop(raw.index[1])
         result = observe_session(raw, fixtures.session())
@@ -146,6 +179,35 @@ class WorkerDiagnosticTests(unittest.TestCase):
         self.assertEqual(len(packet['forward_cohort']), 1)
         self.assertEqual(packet['forward_cohort'][0]['evaluate_after'], '2026-10-13T20:16:00+00:00')
         self.assertIn('23:16 السعودية',report_text(packet))
+
+    def test_aggregate_counts_distinct_symbol_minutes_and_flags_conflicts(self):
+        self.store.settle(self.row['episode_key'],observe_session(fixtures.frame().iloc[1:],fixtures.session()),self.now)
+        row = self.store.episodes()[0]
+        stamp = row['result']['data_diagnostics']['first_absent_minutes'][0]
+        row['result']['data_diagnostics']['gap_trade_evidence'] = [dict(minute=stamp,classification='NO_TRADES_IN_FEED')]
+        result = aggregate([row,row],self.now)
+        self.assertEqual(result['incomplete_episodes'],2)
+        self.assertEqual(result['unique_incomplete_symbol_days'],1)
+        self.assertEqual(result['sampled_minutes']['NO_TRADES_IN_FEED'],1)
+        import copy
+        other = copy.deepcopy(row)
+        other['result']['data_diagnostics']['gap_trade_evidence'][0]['classification'] = 'UNKNOWN_TRADE_CONDITIONS'
+        self.assertEqual(aggregate([row,other],self.now)['sampled_minutes'],{'CONFLICTING_TRADE_SAMPLES':1})
+
+    def test_duplicate_retrospective_controls_reuse_reads_within_cycle(self):
+        self.store.add(fixtures.feature(),fixtures.session(),'CONTROL','second',self.now,prospective=False)
+        for row in self.store.episodes():
+            self.store.settle(row['episode_key'],{'status':'PARTIAL_DATA','outcome':None},self.now)
+        provider = Mock()
+        provider.calendar.return_value = [fixtures.session(day) for day in ('2026-10-08','2026-10-09','2026-10-12','2026-10-13')]
+        provider.assets.return_value = ['CASE']; provider.daily.return_value = {}
+        provider.intraday.side_effect = lambda symbol,s,now:fixtures.frame(s).iloc[1:]
+        provider.gap_trades.side_effect = lambda symbol,minute,now:dict(
+            minute=minute.isoformat(),complete=True,classification='NO_TRADES_IN_FEED')
+        packet = MoveResearchWorker(self.store,provider).cycle(self.now)
+        self.assertEqual(provider.intraday.call_count,1)
+        self.assertEqual(provider.gap_trades.call_count,1)
+        self.assertEqual(packet['diagnostics']['unique_sampled_minutes'],1)
 
 
 if __name__ == '__main__':

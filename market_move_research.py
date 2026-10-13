@@ -256,6 +256,9 @@ class MoveStore:
                 CREATE TABLE IF NOT EXISTS move_packets (
                     packet_id TEXT PRIMARY KEY, published_at TEXT NOT NULL, payload_json TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS move_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS move_pattern_features (
+                    session_day TEXT NOT NULL, symbol TEXT NOT NULL, payload_json TEXT NOT NULL,
+                    PRIMARY KEY(session_day,symbol));
                 CREATE INDEX IF NOT EXISTS idx_move_due ON move_episodes(status, session_day);''')
 
     @contextmanager
@@ -336,6 +339,27 @@ class MoveStore:
             row['result'] = json.loads(row['result_json'] or '{}')
         return rows
 
+    def save_pattern_features(self, features, session, now, *, clock=None):
+        """Persist prior-day inputs once, before open, for all analysis candidates."""
+        mark = 'pattern_features:'+session['date']
+        with self.connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            if conn.execute('SELECT 1 FROM move_state WHERE key=?',(mark,)).fetchone():
+                return False
+            stamp = clock() if clock else now
+            if stamp >= utc(session['open']):
+                return False
+            values = [(session['date'],f['symbol'],json.dumps(dict(features=f,session=session,
+                prepared_at=stamp.isoformat()),allow_nan=False)) for f in features
+                if utc(f['available_after']) <= stamp]
+            conn.executemany('INSERT INTO move_pattern_features VALUES (?,?,?)',values)
+            conn.execute('INSERT INTO move_state VALUES (?,?)',(mark,json.dumps(dict(prepared_at=stamp.isoformat()))))
+            if clock and clock() >= utc(session['open']):
+                conn.rollback()
+                return False
+            conn.execute('DELETE FROM move_pattern_features WHERE session_day < ?',(session['date'],))
+        return True
+
     def settle(self, key, result, now, *, retry=False):
         if result['status'] not in {'COMPLETE', 'PARTIAL_DATA', 'DATA_UNAVAILABLE'}:
             raise ValueError('Invalid observation status')
@@ -364,7 +388,7 @@ class MoveStore:
             row = conn.execute('SELECT value FROM move_state WHERE key=?', (key,)).fetchone()
         return json.loads(row['value']) if row else None
 
-    def publish(self, now, health):
+    def publish(self, now, health, *, patterns=None):
         cutoff = (now.astimezone(NY).date()-timedelta(days=90)).isoformat()
         with self.connect() as conn:
             conn.execute('DELETE FROM move_episodes WHERE session_day < ?', (cutoff,))
@@ -383,6 +407,7 @@ class MoveStore:
                 role=r['role'], prospective=bool(r['prospective']), status=r['status'],
                 frozen_features=r['features'], result=r['result']) for r in cases],
             diagnostics=aggregate(rows, now),
+            patterns=patterns or {'state':'UNAVAILABLE'},
             forward_cohort=[dict(symbol=r['symbol'], role=r['role'], session_day=r['session_day'],
                 frozen_at=r['frozen_at'], evidence_day=r['features'].get('evidence_day'),
                 evaluate_after=(utc(r['session']['close'])+timedelta(minutes=16)).isoformat())
@@ -433,6 +458,7 @@ def read_packet(symbol=None, *, now=None, path=None):
             return None
         result['cases'] = [c for c in packet['latest_cases'] if symbol is None or c['symbol'] == symbol]
         result['diagnostics'] = packet.get('diagnostics', {})
+        result['patterns'] = packet.get('patterns', {})
         result['forward_cohort'] = [c for c in packet.get('forward_cohort', []) if symbol is None or c['symbol'] == symbol]
         return result
     except (sqlite3.Error, OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError):
@@ -483,6 +509,20 @@ def report_text(packet):
     if cohort:
         at = utc(min(c['evaluate_after'] for c in cohort)).astimezone(ZoneInfo('Asia/Riyadh'))
         lines.append('أقرب تقييم للعينة بعد إتاحة البيانات: '+at.strftime('%Y-%m-%d %H:%M')+' السعودية')
+    patterns = packet.get('patterns', {})
+    if patterns.get('protocol') == 'prior-day-move-patterns-v1':
+        from market_move_patterns import LABELS
+        labels = {'COLLECTING_TRAINING':'يجمع بيانات تدريب مستقبلية',
+            'WAITING_FRESH_VALIDATION':'اختار نمطًا على التدريب وينتظر 20 جلسة لاحقة مستقلة',
+            'ACTIVE_PRIORITY':'أولوية فحص PAPER مفعلة بعد التحقق',
+            'FAILED_VALIDATION':'لم يجتز التقييم؛ التطبيق متوقف',
+            'SUSPENDED':'أوقفت الأولوية بعد ضعف النتائج اللاحقة', 'EXPIRED':'انتهت صلاحية النمط'}
+        lines.append('🧠 تعلم الأنماط: '+labels.get(patterns.get('state'),'غير متاح'))
+        if patterns.get('rule'):
+            lines.append('النمط: '+LABELS.get(patterns['rule'],patterns['rule']))
+        else:
+            lines.append('قواعد مرشحة ثابتة: 3؛ نشاط الحجم، نطاق السعر والزخم من اليوم السابق.')
+        lines.append('تعلم ارتباطات وصفية، وليس إثباتًا لأسباب الصعود. التطبيق يرتب الفحص فقط؛ الشراء يمر بالشروط الأصلية.')
     for c in packet.get('cases', [])[:5]:
         result = c['result']
         lines.append(f"• {c['symbol']} {c['session_day']} | {roles.get(c['role'], c['role'])} | {outcomes.get(result.get('outcome'), 'غير محسوم')}")

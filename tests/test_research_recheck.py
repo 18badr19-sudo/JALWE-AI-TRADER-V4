@@ -1,5 +1,6 @@
 import ast
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -59,6 +60,8 @@ class RecheckTests(unittest.TestCase):
         bridge.list_recent_research.return_value = [old, fresh]
         bridge.get_age_minutes.side_effect = lambda r: r.age
         ns = {"Any": object, "MAX_REPORTS_PER_SCAN": 50, "MAX_RESEARCH_AGE_MINUTES": 30,
+              "datetime": datetime, "timezone": timezone, "logger": Mock(),
+              "settings": SimpleNamespace(PAPER_TRADING=False,ALLOW_LIVE_TRADING=False),
               "should_process": lambda r, s: (True, "retry"),
               "process_emergency_paper_close": lambda: events.append("emergency"),
               "manage_active_paper_trades": lambda s: events.append("protect"),

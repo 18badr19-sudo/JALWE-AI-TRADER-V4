@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 
 import pandas as pd
 
-from market_move_diagnostics import VERSION, observation_due, diagnose_gaps, aggregate, emit_evidence
+from market_move_diagnostics import VERSION, observation_due, diagnose_gaps, aggregate, emit_evidence, recheck_absent_bars
 from market_move_provider import MoveProvider, ResearchReadError
 from market_move_research import MoveStore, observe_session, utc, read_packet, report_text
 from market_move_research_loop import MoveResearchWorker
@@ -180,7 +180,7 @@ class WorkerDiagnosticTests(unittest.TestCase):
             minute=minute.isoformat(), complete=True, classification='NO_TRADES_IN_FEED')
         before = {r['episode_key']:r['features_json'] for r in self.store.episodes()}
         packet = MoveResearchWorker(self.store,provider).cycle(self.now)
-        self.assertEqual(provider.intraday.call_count, 9)
+        self.assertEqual(provider.intraday.call_count, 18)  # Full read + one absent-minute read per symbol.
         self.assertEqual(packet['counts']['PARTIAL_DATA'], 9)
         self.assertEqual(packet['diagnostics']['incomplete_episodes'], 9)
         self.assertEqual(before, {r['episode_key']:r['features_json'] for r in self.store.episodes()})
@@ -209,10 +209,16 @@ class WorkerDiagnosticTests(unittest.TestCase):
         self.assertEqual(result['incomplete_episodes'],2)
         self.assertEqual(result['unique_incomplete_symbol_days'],1)
         self.assertEqual(result['sampled_minutes']['NO_TRADES_IN_FEED'],1)
+        self.assertEqual(result['coverage_totals']['measured_symbol_days'],1)
+        self.assertEqual(result['coverage_totals']['absent_provider_minutes'],1)
         import copy
         other = copy.deepcopy(row)
         other['result']['data_diagnostics']['gap_trade_evidence'][0]['classification'] = 'UNKNOWN_TRADE_CONDITIONS'
         self.assertEqual(aggregate([row,other],self.now)['sampled_minutes'],{'CONFLICTING_TRADE_SAMPLES':1})
+        other['result']['data_diagnostics']['absent_provider_minutes'] = 2
+        totals = aggregate([row,other],self.now)['coverage_totals']
+        self.assertEqual(totals['conflicting_symbol_days'],1)
+        self.assertEqual(totals['measured_symbol_days'],0)
 
     def test_duplicate_retrospective_controls_reuse_reads_within_cycle(self):
         self.store.add(fixtures.feature(),fixtures.session(),'CONTROL','second',self.now,prospective=False)
@@ -225,9 +231,89 @@ class WorkerDiagnosticTests(unittest.TestCase):
         provider.gap_trades.side_effect = lambda symbol,minute,now:dict(
             minute=minute.isoformat(),complete=True,classification='NO_TRADES_IN_FEED')
         packet = MoveResearchWorker(self.store,provider).cycle(self.now)
-        self.assertEqual(provider.intraday.call_count,1)
+        self.assertEqual(provider.intraday.call_count,2)  # Shared full read + shared targeted read.
         self.assertEqual(provider.gap_trades.call_count,1)
         self.assertEqual(packet['diagnostics']['unique_sampled_minutes'],1)
+
+    def test_real_targeted_bar_recovers_retry_without_changing_frozen_features(self):
+        first = observe_session(fixtures.frame().iloc[1:],fixtures.session())
+        self.store.settle(self.row['episode_key'],first,self.now)
+        provider = Mock()
+        provider.calendar.return_value = [fixtures.session(day) for day in ('2026-10-08','2026-10-09','2026-10-12','2026-10-13')]
+        provider.assets.return_value = ['CASE']; provider.daily.return_value = {}
+        provider.news_before.return_value = {'status':'AVAILABLE','articles':[]}
+        provider.intraday.side_effect = lambda symbol,s,now: (fixtures.frame(s).iloc[1:]
+            if s['open']==fixtures.session()['open'] and s['close']==fixtures.session()['close']
+            else fixtures.frame(s))
+        packet = MoveResearchWorker(self.store,provider).cycle(self.now+timedelta(minutes=15))
+        row = self.store.episodes()[0]
+        self.assertEqual(packet['counts']['COMPLETE'],1)
+        self.assertEqual(row['attempts'],2)
+        self.assertEqual(row['features_json'],self.row['features_json'])
+        self.assertEqual(row['result']['observed_minutes'],390)
+        self.assertEqual(len(row['result']['data_diagnostics']['targeted_bar_recheck']['recovered_minutes']),1)
+        provider.gap_trades.assert_not_called()
+
+
+class TargetedBarTests(unittest.TestCase):
+    def setUp(self):
+        self.session = fixtures.session()
+        self.full = fixtures.frame()
+        self.now = utc('2026-10-12T21:00:00Z')
+
+    def repair(self, raw, response):
+        provider = Mock(); provider.intraday.side_effect = response
+        result = observe_session(raw,self.session)
+        merged = recheck_absent_bars(provider,'CASE',raw,self.session,result,self.now)
+        return provider,merged,observe_session(merged,self.session)
+
+    def test_only_two_absent_minutes_are_requested_and_later_gap_stays_inconclusive(self):
+        raw = self.full.drop(self.full.index[[5,6,7]])
+        provider,merged,result = self.repair(raw,lambda symbol,s,now:fixtures.frame(s))
+        self.assertEqual(provider.intraday.call_count,2)
+        self.assertEqual(result['observed_minutes'],389)
+        self.assertIsNone(result['outcome'])
+        pd.testing.assert_frame_equal(merged.loc[raw.index],raw)
+
+    def test_end_boundary_cannot_overwrite_an_existing_price(self):
+        raw = self.full.drop(self.full.index[5])
+        def response(symbol,s,now):
+            candidate = self.full.loc[self.full.index[5:7]].copy()
+            candidate.iloc[1] = [90.,100.,80.,90.,100.]
+            return candidate
+        _,merged,result = self.repair(raw,response)
+        self.assertEqual(result['status'],'COMPLETE')
+        pd.testing.assert_frame_equal(merged.loc[raw.index],raw)
+        self.assertAlmostEqual(result['observed_mfe_pct'],1.)
+
+    def test_empty_invalid_duplicate_and_failed_requests_do_not_heal_or_leak(self):
+        raw = self.full.drop(self.full.index[5])
+        good = self.full.iloc[5:6].copy()
+        invalid = good.copy(); invalid.iloc[0,4] = 0
+        samples = (good.iloc[:0],invalid,pd.concat([good,good]))
+        for sample in samples:
+            _,merged,result = self.repair(raw,lambda *args:sample)
+            pd.testing.assert_frame_equal(merged,raw)
+            self.assertEqual(result['status'],'PARTIAL_DATA')
+            self.assertEqual(result['data_diagnostics']['targeted_bar_recheck']['recovered_minutes'],[])
+        def unavailable(*args):
+            raise ResearchReadError('private headers',status_code=503)
+        _,merged,result = self.repair(raw,unavailable)
+        self.assertEqual(result['data_diagnostics']['targeted_bar_recheck']['failures'][0]['http_status'],503)
+        self.assertNotIn('private',json.dumps(result))
+
+    def test_rejected_returned_bars_are_not_replaced_by_a_targeted_read(self):
+        raw = self.full.copy(); raw.iloc[5,4] = 0
+        provider,merged,result = self.repair(raw,lambda *args:self.full)
+        provider.intraday.assert_not_called()
+        self.assertEqual(result['status'],'PARTIAL_DATA')
+        pd.testing.assert_frame_equal(merged,raw)
+
+    def test_report_explains_reason_counts_are_episodes_not_minutes(self):
+        packet = dict(health={'state':'READY'},counts={'PARTIAL_DATA':9},comparison=dict(
+            complete_pairs=0,unique_days=0,state='WAITING_FORWARD_DATA'),prospective_episodes=16,
+            hot_case_episodes=5,diagnostics={'reasons':{'MISSING_PROVIDER_MINUTES':9}})
+        self.assertIn('الأعداد سجلات، وليست دقائق',report_text(packet))
 
 
 if __name__ == '__main__':

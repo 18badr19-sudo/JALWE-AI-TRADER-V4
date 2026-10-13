@@ -38,6 +38,8 @@ class MoveResearchWorker:
             self.store.state('daily_cache',cache)
         else:
             daily = cache['rows']
+        logger.info('MARKET_JUMP_HISTORY_LOADED %s',json.dumps(dict(
+            latest_session=latest['date'],daily_symbols=len(daily),lookback_days=LOOKBACK_DAYS)))
         features_before, features_latest, gains = [], [], []
         for symbol in symbols:
             bars = daily.get(symbol, [])
@@ -94,14 +96,9 @@ class MoveResearchWorker:
         # Queue every screened historical symbol/day, independent of ownership.
         # Separate role and keys preserve all existing frozen forward cohorts.
         jump_mark = 'jump_scan:'+JUMP_VERSION+':'+latest['date']
-        if self.store.state(jump_mark) is None:
-            selected = 0
-            for feat, session in candidates(symbols,daily,closed,now):
-                pair = stable_key(feat['symbol']+'|'+JUMP_VERSION,session['date'])
-                self.store.add(feat,session,'JUMP_CASE',pair,now,prospective=False)
-                selected += 1
-            self.store.state(jump_mark,dict(created_at=now.isoformat(),selected=selected,
-                                          lookback_days=LOOKBACK_DAYS))
+        manifest = self.store.enqueue_jumps(candidates(symbols,daily,closed,now),
+                                           jump_mark,now,LOOKBACK_DAYS)
+        logger.info('MARKET_JUMP_HISTORY_QUEUED %s',json.dumps(manifest))
         return dict(state='READY',universe_count=len(symbols),daily_symbols=len(daily),
                     completed_session=latest['date'],eligible_prior_features=len(features_latest),
                     historical_bars_delayed=True,selection_scope='ALPACA_ACTIVE_US_EQUITY_CATALOG',
@@ -181,6 +178,7 @@ class MoveResearchWorker:
         logger.info('MARKET_MOVE_PACKET %s',json.dumps(dict(packet_id=key,health=health,
             counts=packet['counts'],prospective_episodes=packet['prospective_episodes'],
             hot_case_episodes=packet['hot_case_episodes'],comparison=packet['comparison'],
+            historical_jumps=packet['historical_jumps'],
             diagnostics=packet['diagnostics'],patterns=packet['patterns'])))
         return packet
 

@@ -111,7 +111,8 @@ def aggregate(rows, now):
 def emit_evidence(store, rows, logger):
     """One bounded manifest per evidence revision; never export credentials or news text."""
     records = []
-    for r in rows[-64:]:
+    recent = sorted(rows,key=lambda r:(r['session_day'],r['status']!='PENDING'),reverse=True)[:64]
+    for r in recent:
         if r['status'] == 'PENDING':
             records.append(dict(kind='COHORT', symbol=r['symbol'], role=r['role'],
                 prospective=bool(r['prospective']), session_day=r['session_day'], frozen_at=r['frozen_at'],
@@ -126,7 +127,10 @@ def emit_evidence(store, rows, logger):
                 observed_minutes=r['result'].get('observed_minutes'),
                 duplicates=r['result'].get('duplicates'),
                 prefix_context=r['result'].get('prefix_context', {}),
-                data_diagnostics=r['result'].get('data_diagnostics', {})))
+                data_diagnostics=r['result'].get('data_diagnostics', {}),
+                jump_path={k:v for k,v in r['result'].get('jump_path',{}).items() if k in {
+                    'status','strong_jump','start_at','start_price','peak_at','peak_price',
+                    'observed_rise_pct','duration_minutes','phase_volume'}}))
     digest = hashlib.sha256(json.dumps(records, sort_keys=True).encode()).hexdigest()
     if store.state('diagnostic_manifest') == digest:
         return

@@ -120,6 +120,41 @@ class JumpPathTests(unittest.TestCase):
             self.assertTrue(observation_due(row,now+timedelta(minutes=15)))
             self.assertFalse(observation_due(row,now+timedelta(hours=49)))
 
+    def test_batch_manifest_rolls_back_on_error_and_survives_restart(self):
+        import sqlite3
+        now = utc('2026-10-13T18:00:00Z')
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MoveStore(Path(tmp)/'moves.db')
+            studies = [(dict(fixtures.feature(s),jump_protocol='test-v1'),fixtures.session())
+                       for s in ('ONE','TWO')]
+            with store.connect() as conn:
+                conn.execute("CREATE TRIGGER fail_jump BEFORE INSERT ON move_episodes WHEN NEW.symbol='TWO' BEGIN SELECT RAISE(ABORT,'failure'); END")
+            with self.assertRaises(sqlite3.IntegrityError):
+                store.enqueue_jumps(studies,'jump_scan:test',now,30)
+            self.assertEqual(store.episodes(),[])
+            self.assertIsNone(store.state('jump_scan:test'))
+            with store.connect() as conn:
+                conn.execute('DROP TRIGGER fail_jump')
+            manifest = store.enqueue_jumps(studies,'jump_scan:test',now,30)
+            self.assertEqual(manifest['selected'],2)
+            restarted = MoveStore(store.path)
+            self.assertEqual(restarted.enqueue_jumps([], 'jump_scan:test',now,30),manifest)
+            self.assertEqual(len(restarted.episodes()),2)
+
+    def test_observed_paths_are_not_hidden_by_the_pending_history_backlog(self):
+        now = utc('2026-10-13T18:00:00Z')
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MoveStore(Path(tmp)/'moves.db')
+            for n in range(80):
+                store.add(fixtures.feature('STUDY'+str(n)),fixtures.session(),
+                          'JUMP_CASE','jump',now,prospective=False)
+            first = store.episodes()[0]
+            result = observe_session(fixtures.frame().iloc[1:],fixtures.session())
+            result['jump_path'] = jump_path(fixtures.frame().iloc[1:],fixtures.session())
+            store.settle(first['episode_key'],result,now)
+            _,packet = store.publish(now,dict(state='READY',completed_session='2026-10-12'))
+            self.assertEqual(packet['latest_cases'][0]['symbol'],first['symbol'])
+
 
 if __name__ == '__main__':
     unittest.main()

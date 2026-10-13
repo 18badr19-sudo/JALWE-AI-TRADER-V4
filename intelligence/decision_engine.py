@@ -1080,6 +1080,12 @@ class DecisionEngine:
             "external_research": external_research,
             "external_research_advisory_only": True,
         }
+        # Independent research is evidence metadata only, never gate/score authority.
+        from market_move_research import read_packet
+        move_packet = read_packet(symbol)
+        if move_packet is not None:
+            base_metadata['market_move_research'] = move_packet
+
 
         # ====================================================
         # 1. MARKET DATA

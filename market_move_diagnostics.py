@@ -18,8 +18,9 @@ def observation_due(row, now):
         return False
     if row['status'] == 'PENDING':
         return True
+    anchor = utc(row['frozen_at']) if row['role'] == 'JUMP_CASE' else close
     if (row['status'] not in {'PARTIAL_DATA', 'DATA_UNAVAILABLE'}
-            or row['attempts'] >= MAX_ATTEMPTS or now > close+RETRY_HORIZON):
+            or row['attempts'] >= MAX_ATTEMPTS or now > anchor+RETRY_HORIZON):
         return False
     # Upgrade previously unclassified observations once, without changing cohorts.
     if row['result'].get('diagnostic_version') != VERSION:

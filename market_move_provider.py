@@ -66,7 +66,7 @@ class MoveProvider:
     def calendar(self, now):
         day = now.astimezone(NY).date()
         rows = self.get('https://paper-api.alpaca.markets/v2/calendar',
-                        {'start':(day-timedelta(days=14)).isoformat(),'end':(day+timedelta(days=10)).isoformat()})
+                        {'start':(day-timedelta(days=45)).isoformat(),'end':(day+timedelta(days=10)).isoformat()})
         if not isinstance(rows, list) or not rows:
             raise ResearchReadError('CALENDAR_UNAVAILABLE')
         sessions = []

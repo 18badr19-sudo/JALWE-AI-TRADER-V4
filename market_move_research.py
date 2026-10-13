@@ -276,7 +276,7 @@ class MoveStore:
     def _episode_values(features, session, role, pair_key, now, *, prospective):
         if prospective and not (utc(features['available_after']) <= now < utc(session['open'])):
             raise ValueError('Prospective evidence was unavailable or cohort froze after open')
-        if role not in {'ACTIVITY', 'CONTROL', 'HOT_CASE'} or (role == 'HOT_CASE' and prospective):
+        if role not in {'ACTIVITY', 'CONTROL', 'HOT_CASE', 'JUMP_CASE'} or (role in {'HOT_CASE','JUMP_CASE'} and prospective):
             raise ValueError('Invalid study role')
         key = stable_key(features['symbol']+'|'+role+'|'+pair_key, session['date'])
         return (key, session['date'], features['symbol'], role, pair_key, int(prospective), now.isoformat(),
@@ -397,14 +397,19 @@ class MoveStore:
         rows = self.episodes()
         from market_move_diagnostics import aggregate
         counts = Counter(r['status'] for r in rows)
+        jump_cutoff = (now.astimezone(NY).date()-timedelta(days=30)).isoformat()
+        jumps = [r for r in rows if r['role']=='JUMP_CASE' and r['session_day'] >= jump_cutoff]
         day = health.get('completed_session')
         examples = [r for r in rows if r['session_day'] <= day] if day else [r for r in rows if r['status'] != 'PENDING']
-        cases = sorted(examples, key=lambda r: (r['session_day'], r['role'] == 'HOT_CASE',
+        cases = sorted(examples, key=lambda r: (r['session_day'], {'JUMP_CASE':2,'HOT_CASE':1}.get(r['role'],0),
                                                r['status'] == 'COMPLETE', r['episode_key']), reverse=True)[:12]
         packet = dict(protocol=PROTOCOL, scope='RESEARCH_ONLY_NOT_TRADE_SIGNAL',
             published_at=now.isoformat(), source_feed='sip', automatic_application=False,
             health=health, counts=dict(counts), prospective_episodes=sum(r['prospective'] for r in rows),
             hot_case_episodes=sum(r['role'] == 'HOT_CASE' for r in rows),
+            historical_jumps=dict(episodes=len(jumps),counts=dict(Counter(r['status'] for r in jumps)),
+                confirmed=sum(r['status']=='COMPLETE' and r['result'].get('jump_path',{}).get('strong_jump') is True for r in jumps),
+                lookback_days=health.get('jump_lookback_days',30)),
             comparison=comparison(rows), latest_cases=[dict(symbol=r['symbol'], session_day=r['session_day'],
                 role=r['role'], prospective=bool(r['prospective']), status=r['status'],
                 frozen_features=r['features'], result=r['result']) for r in cases],
@@ -461,6 +466,7 @@ def read_packet(symbol=None, *, now=None, path=None):
         result['cases'] = [c for c in packet['latest_cases'] if symbol is None or c['symbol'] == symbol]
         result['diagnostics'] = packet.get('diagnostics', {})
         result['patterns'] = packet.get('patterns', {})
+        result['historical_jumps'] = packet.get('historical_jumps', {})
         result['forward_cohort'] = [c for c in packet.get('forward_cohort', []) if symbol is None or c['symbol'] == symbol]
         return result
     except (sqlite3.Error, OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError):
@@ -473,7 +479,8 @@ def report_text(packet):
     counts, comp = packet['counts'], packet['comparison']
     health = packet['health']
     states = {'READY':'يعمل', 'DATA_UNAVAILABLE':'تعذر جلب البيانات', 'STARTING':'يبدأ'}
-    roles = {'HOT_CASE':'دراسة صعود لاحقة', 'ACTIVITY':'عينة نشاط مسبقة', 'CONTROL':'عينة مقارنة'}
+    roles = {'HOT_CASE':'دراسة صعود لاحقة', 'JUMP_CASE':'دراسة مسار قفزة تاريخية',
+             'ACTIVITY':'عينة نشاط مسبقة', 'CONTROL':'عينة مقارنة'}
     outcomes = {'UP8_FIRST':'صعود 8% أولًا', 'DOWN3_FIRST':'هبوط 3% أولًا',
                 'NO_BARRIER':'لم يبلغ العتبتين', 'AMBIGUOUS':'ترتيب غير محسوم'}
     comparisons = {'WAITING_FORWARD_DATA':'ينتظر عينة كافية', 'NO_VALIDATED_EDGE':'لم تثبت أفضلية',
@@ -485,6 +492,11 @@ def report_text(packet):
         f"عينات مجمدة قبل الجلسة: {packet['prospective_episodes']} | دراسات صعود لاحقة: {packet['hot_case_episodes']}",
         f"مكتملة: {counts.get('COMPLETE', 0)} | تنتظر: {counts.get('PENDING', 0)} | ناقصة/غير متاحة: {counts.get('PARTIAL_DATA',0)+counts.get('DATA_UNAVAILABLE',0)}",
         f"مقارنات مستقبلية مكتملة: {comp['complete_pairs']} على {comp['unique_days']} أيام | {comparisons.get(comp['state'], 'غير متاح')}"]
+    jumps = packet.get('historical_jumps',{})
+    if jumps:
+        jc = jumps.get('counts',{})
+        lines.append(f"📚 مسارات القفزات — آخر {jumps['lookback_days']} يومًا: مرشحة {jumps['episodes']} | قفزات مؤكدة {jumps['confirmed']} | تنتظر {jc.get('PENDING',0)}")
+        lines.append('كل مرشح بقفزة/نطاق يومي 8% أو أكثر ضمن نطاق السعر والسيولة؛ ليس أعلى 5 فقط، ولا يشترط شراء البوت. ترتيب القاع والقمة يُفحص بالدقيقة.')
     diagnostics = packet.get('diagnostics', {})
     if diagnostics:
         from market.research_diagnostics import diagnostic_text
@@ -528,6 +540,14 @@ def report_text(packet):
     for c in packet.get('cases', [])[:5]:
         result = c['result']
         lines.append(f"• {c['symbol']} {c['session_day']} | {roles.get(c['role'], c['role'])} | {outcomes.get(result.get('outcome'), 'غير محسوم')}")
+        path = result.get('jump_path',{})
+        if path.get('status') in {'COMPLETE','OBSERVED_SEGMENT'}:
+            zone = ZoneInfo('Asia/Riyadh')
+            start = utc(path['start_at']).astimezone(zone).strftime('%H:%M')
+            peak = utc(path['peak_at']).astimezone(zone).strftime('%H:%M')
+            label = 'جلسة مكتملة' if path['status']=='COMPLETE' else 'جزء متصل فقط؛ القمة العامة غير محسومة'
+            lines.append(f"  بداية مرصودة ${path['start_price']:.4f} عند {start} → قمة ${path['peak_price']:.4f} عند {peak} السعودية | {path['observed_rise_pct']:+.2f}% خلال {path['duration_minutes']} دقيقة | {label}")
+            lines.append(f"  حجم المرحلة {path['phase_volume']:,.0f} سهم؛ مسار {len(path['trajectory'])} شمعة دقيقة محفوظ. البداية تقديرية وترتيب الحركة داخل الدقيقة غير معلوم.")
         if result.get('status') == 'COMPLETE':
             lines.append(f"  أعلى حركة من الافتتاح {result['observed_mfe_pct']:+.2f}% | أدنى حركة {result['observed_mae_pct']:+.2f}%")
         context = result.get('pre_move_context', {})

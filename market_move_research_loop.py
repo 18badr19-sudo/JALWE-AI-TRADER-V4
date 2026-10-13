@@ -10,6 +10,7 @@ from market_move_provider import MoveProvider
 from market_move_research import (MoveStore, PROTOCOL, daily_features, choose_pairs, bucket,
                                  utc, observe_session, default_path, stable_key)
 from market_move_diagnostics import VERSION, observation_due, diagnose_gaps, emit_evidence, recheck_absent_bars
+from market_jump_paths import VERSION as JUMP_VERSION, LOOKBACK_DAYS, candidates, jump_path
 
 logger = logging.getLogger(__name__)
 
@@ -26,12 +27,14 @@ class MoveResearchWorker:
             raise ValueError('INSUFFICIENT_COMPLETED_SESSIONS')
         latest, prior, older = closed[-3:][::-1]
         # Request enough frozen prior-day information to study the latest session.
-        recent = closed[-5:]
+        recent = [s for s in closed if utc(s['close']) >= now-timedelta(days=LOOKBACK_DAYS+3)]
+        if len(recent) < 5:
+            recent = closed[-5:]
         cache_key = latest['date']
         cache = self.store.state('daily_cache')
-        if cache is None or cache.get('date') != cache_key:
+        if cache is None or cache.get('date') != cache_key or cache.get('jump_version') != JUMP_VERSION:
             daily = self.provider.daily(symbols,recent,now)
-            cache = dict(date=cache_key, rows=daily, universe_count=len(symbols))
+            cache = dict(date=cache_key, rows=daily, universe_count=len(symbols), jump_version=JUMP_VERSION)
             self.store.state('daily_cache',cache)
         else:
             daily = cache['rows']
@@ -88,9 +91,21 @@ class MoveResearchWorker:
             frozen_at = clock() if clock else now
             if frozen_at < utc(future['open']):
                 self.store.freeze_cohort(prepared_pairs,future,frozen_at,clock=clock)
+        # Queue every screened historical symbol/day, independent of ownership.
+        # Separate role and keys preserve all existing frozen forward cohorts.
+        jump_mark = 'jump_scan:'+JUMP_VERSION+':'+latest['date']
+        if self.store.state(jump_mark) is None:
+            selected = 0
+            for feat, session in candidates(symbols,daily,closed,now):
+                pair = stable_key(feat['symbol']+'|'+JUMP_VERSION,session['date'])
+                self.store.add(feat,session,'JUMP_CASE',pair,now,prospective=False)
+                selected += 1
+            self.store.state(jump_mark,dict(created_at=now.isoformat(),selected=selected,
+                                          lookback_days=LOOKBACK_DAYS))
         return dict(state='READY',universe_count=len(symbols),daily_symbols=len(daily),
                     completed_session=latest['date'],eligible_prior_features=len(features_latest),
-                    historical_bars_delayed=True,selection_scope='ALPACA_ACTIVE_US_EQUITY_CATALOG')
+                    historical_bars_delayed=True,selection_scope='ALPACA_ACTIVE_US_EQUITY_CATALOG',
+                    jump_lookback_days=LOOKBACK_DAYS,jump_selection='ALL_DAILY_RANGE_OR_GAP_CANDIDATES')
 
     def cycle(self, now=None):
         supplied_now = now is not None
@@ -107,7 +122,9 @@ class MoveResearchWorker:
                                   clock=None if supplied_now else lambda: datetime.now(timezone.utc))
             due = [r for r in self.store.episodes() if observation_due(r, now)]
             # First observations precede retries; bounded work cannot starve a new cohort.
-            due.sort(key=lambda r: (r['status'] != 'PENDING', r['session_day'], r['attempts'], r['episode_key']))
+            # Historical backlog cannot starve newly matured prospective cohorts.
+            due.sort(key=lambda r: (not r['prospective'], r['status'] != 'PENDING',
+                -datetime.fromisoformat(r['session_day']).toordinal(),r['attempts'],r['episode_key']))
             frames, samples = {}, {}
             for row in due[:12]:
                 try:
@@ -120,6 +137,9 @@ class MoveResearchWorker:
                         frames[frame_key] = raw
                     data = frames[frame_key]
                     result = observe_session(data,row['session'])
+                    if row['role'] == 'JUMP_CASE':
+                        result['jump_path'] = jump_path(data,row['session'],
+                                                       full_session_complete=result['status']=='COMPLETE')
                     if result['status'] == 'PARTIAL_DATA':
                         cached = {s['minute']:s for s in row['result'].get('data_diagnostics', {}).get('gap_trade_evidence', [])
                                   if s.get('complete') and s.get('minute')}
@@ -127,7 +147,9 @@ class MoveResearchWorker:
                         probed = diagnose_gaps(self.provider,row['symbol'],result,now,cached=cached)
                         samples.update({(row['symbol'],s['minute']):s for s in probed if s.get('complete') and s.get('minute')})
                     if result['status'] == 'COMPLETE':
-                        cutoff = utc(result['up_at']) if result.get('up_at') else utc(row['session']['open'])
+                        path = result.get('jump_path',{})
+                        cutoff = utc(path['start_at']) if path.get('start_at') else (
+                            utc(result['up_at']) if result.get('up_at') else utc(row['session']['open']))
                         try:
                             result['pre_move_news'] = self.provider.news_before(row['symbol'],cutoff)
                         except Exception as exc:
@@ -143,7 +165,7 @@ class MoveResearchWorker:
                           reason=str(exc) if str(exc).startswith(('HTTP_','WAITING_')) else 'RESEARCH_READ_FAILED')
         if health.get('state') == 'READY':
             health['completed_session_pending'] = sum(r['status'] == 'PENDING'
-                and r['session_day'] <= health['completed_session'] for r in self.store.episodes())
+                and r['session_day'] == health['completed_session'] for r in self.store.episodes())
         published_at = now if supplied_now else datetime.now(timezone.utc)
         try:
             from market_move_patterns import update

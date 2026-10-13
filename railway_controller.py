@@ -40,6 +40,7 @@ PERSISTENCE_PROBE_FILE = DATA_DIR / "persistence_probe.json"
 
 APEX_SCRIPT = BASE_DIR / "apex_research_loop.py"
 JALWE_SCRIPT = BASE_DIR / "jalwe_research_watcher.py"
+MOVE_SCRIPT = BASE_DIR / "market_move_research_loop.py"
 
 TELEGRAM_TOKEN = (
     os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -393,6 +394,7 @@ BTN_STORAGE = "💾 فحص التخزين"
 BTN_NO_TRADE = "🔎 لماذا ما فيه صفقة؟"
 BTN_REJECTIONS = "🔎 أسباب قلة الدخول"
 BTN_HELP = "ℹ️ الأوامر"
+BTN_MOVE_RESEARCH = "🔬 أبحاث الحركات"
 
 KEYBOARD = {
     "keyboard": [
@@ -402,6 +404,7 @@ KEYBOARD = {
         [{"text": BTN_WEEK}, {"text": BTN_TRADES}],
         [{"text": BTN_MANUAL_SELL}],
         [{"text": BTN_LEARNING}, {"text": BTN_LEARN_NOW}],
+        [{"text": BTN_MOVE_RESEARCH}],
         [{"text": BTN_PAUSE_ENTRIES}, {"text": BTN_RESUME_ENTRIES}],
         [{"text": BTN_EMERGENCY_CLOSE}, {"text": BTN_CONFIRM_EMERGENCY_CLOSE}],
         [{"text": BTN_APEX_ON}, {"text": BTN_APEX_OFF}],
@@ -1613,7 +1616,32 @@ def poll_filled_order_alerts() -> None:
 # AUTOMATIC DAILY / WEEKLY REPORTS
 # ============================================================
 
+def maybe_send_move_research_report() -> None:
+    """Receive the advisory outbox and send one settled research report per session."""
+    from market_move_research import read_packet, report_text
+    try:
+        packet = read_packet()
+        if packet is None:
+            return
+        if controller_state.get('last_move_packet_id') != packet['packet_id']:
+            print(f"MARKET_MOVE_BOT_RECEIVED packet_id={packet['packet_id']} scope=RESEARCH_ONLY_NOT_TRADE_SIGNAL", flush=True)
+            controller_state['last_move_packet_id'] = packet['packet_id']
+            save_state(controller_state)
+        health = packet['health']
+        day = health.get('completed_session')
+        if (AUTO_DAILY_REPORT and day and health.get('state') == 'READY'
+                and health.get('completed_session_pending') == 0
+                and controller_state.get('last_move_report_session') != day):
+            send_message(report_text(packet))
+            controller_state['last_move_report_session'] = day
+            save_state(controller_state)
+            print(f"MARKET_MOVE_BOT_REPORT_SENT session={day}", flush=True)
+    except Exception as exc:
+        print(f"Market move report unavailable: {type(exc).__name__}", flush=True)
+
+
 def maybe_send_scheduled_reports() -> None:
+    maybe_send_move_research_report()
     now_ny = datetime.now(NY_TZ)
 
     # Daily report: weekdays after 16:10 New York.
@@ -1747,6 +1775,8 @@ def learning_status_text() -> str:
     except Exception:
         lines.extend(["", "تعذر قراءة ذاكرة نتائج القرارات."])
 
+    from market_move_research import read_packet, report_text
+    lines.extend(["", report_text(read_packet())])
     return "\n".join(lines)
 
 
@@ -1931,6 +1961,7 @@ class ManagedProcess:
 
 apex = ManagedProcess("APEX", APEX_SCRIPT)
 jalwe = ManagedProcess("JALWE Watcher", JALWE_SCRIPT)
+move_research = ManagedProcess("Market Move Research", MOVE_SCRIPT)
 
 
 def start_all() -> str:
@@ -1942,7 +1973,8 @@ def start_all() -> str:
         a = "APEX: خارجي (Railway service مستقل)"
 
     j = jalwe.start()
-    return f"🟢 تشغيل النظام\n\n{a}\n{j}"
+    m = move_research.start()
+    return f"🟢 تشغيل النظام\n\n{a}\n{j}\n{m}"
 
 
 def stop_all() -> str:
@@ -1953,7 +1985,8 @@ def stop_all() -> str:
         a = "APEX: خارجي — لم يتم إيقافه من JALWE"
 
     j = jalwe.stop()
-    return f"🛑 إيقاف النظام\n\n{a}\n{j}"
+    m = move_research.stop()
+    return f"🛑 إيقاف النظام\n\n{a}\n{j}\n{m}"
 
 
 def restart_all() -> str:
@@ -2090,7 +2123,8 @@ def status_text() -> str:
     return (
         "📊 حالة JALWE + APEX\n\n"
         f"{apex_status}\n"
-        f"{jalwe.status()}\n\n"
+        f"{jalwe.status()}\n"
+        f"{move_research.status()}\n\n"
         f"🔔 تنبيهات تنفيذ الصفقات: "
         f"{'مفعلة' if ORDER_ALERTS_ENABLED else 'معطلة'}\n"
         f"⚠️ تنبيهات أخطاء النظام: "
@@ -2608,6 +2642,7 @@ def help_text() -> str:
         "/trades - آخر الأوامر المنفذة\n"
         "/target_audit CANE - فحص وصول الأهداف في يوم الشراء بدون تداول\n"
         "/learning - حالة التعلم الذاتي\n"
+        "/move_research - نتائج مسار أبحاث الحركات المستقل\n"
         "/learn_now - تشغيل دورة تعلم الآن\n"
         "/sell - بيع صفقة PAPER محددة مع تأكيد\n"
         "/pause_entries - منع صفقات جديدة مع استمرار إدارة المفتوحة\n"
@@ -2663,6 +2698,10 @@ def handle(text: str, requested_by=None) -> Any:
 
     if cmd == BTN_TRADES or low == "/trades":
         return recent_trades_text()
+
+    if cmd == BTN_MOVE_RESEARCH or low == "/move_research":
+        from market_move_research import read_packet, report_text
+        return report_text(read_packet())
 
     if cmd == BTN_LEARNING or low == "/learning":
         return learning_status_text()
@@ -2758,9 +2797,9 @@ def process_telegram_update(update):
 
 def monitor_children() -> None:
     managed_children = (
-        (apex, jalwe)
+        (apex, jalwe, move_research)
         if MANAGE_APEX_CHILD
-        else (jalwe,)
+        else (jalwe, move_research)
     )
 
     for managed in managed_children:
@@ -2801,6 +2840,7 @@ def shutdown(*_: Any) -> None:
         apex.stop()
 
     jalwe.stop()
+    move_research.stop()
     raise SystemExit(0)
 
 

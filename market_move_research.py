@@ -418,6 +418,12 @@ class MoveStore:
         counts = Counter(r['status'] for r in rows)
         jump_cutoff = (now.astimezone(NY).date()-timedelta(days=30)).isoformat()
         jumps = [r for r in rows if r['role']=='JUMP_CASE' and r['session_day'] >= jump_cutoff]
+        from market_jump_requests import request_summary
+        requested = request_summary(rows,self.state('jump_request'))
+        strongest = sorted((r for r in jumps if r['status']=='COMPLETE'
+            and r['result'].get('jump_path',{}).get('status')=='COMPLETE'
+            and r['result']['jump_path'].get('strong_jump') is True),
+            key=lambda r:(-r['result']['jump_path']['observed_rise_pct'],r['symbol'],r['session_day']))[:6]
         day = health.get('completed_session')
         examples = [r for r in rows if r['session_day'] <= day] if day else [r for r in rows if r['status'] != 'PENDING']
         cases = sorted(examples, key=lambda r: (r['session_day'], {'JUMP_CASE':2,'HOT_CASE':1}.get(r['role'],0),
@@ -430,6 +436,9 @@ class MoveStore:
             historical_jumps=dict(episodes=len(jumps),counts=dict(Counter(r['status'] for r in jumps)),
                 confirmed=sum(r['status']=='COMPLETE' and r['result'].get('jump_path',{}).get('strong_jump') is True for r in jumps),
                 lookback_days=health.get('jump_lookback_days',30)),
+            requested_jumps=requested,
+            strongest_completed_jumps=[dict(symbol=r['symbol'],session_day=r['session_day'],
+                path=r['result']['jump_path']) for r in strongest],
             comparison=comparison(rows), latest_cases=[dict(symbol=r['symbol'], session_day=r['session_day'],
                 role=r['role'], prospective=bool(r['prospective']), status=r['status'],
                 frozen_features=r['features'], result=r['result']) for r in cases],
@@ -439,7 +448,7 @@ class MoveStore:
                 frozen_at=r['frozen_at'], evidence_day=r['features'].get('evidence_day'),
                 evaluate_after=(utc(r['session']['close'])+timedelta(minutes=16)).isoformat())
                 for r in rows if r['prospective'] and r['status'] == 'PENDING'][-16:],
-            limits=['Regular-session completed studies', 'Current Alpaca active universe, not historical delisted universe',
+            limits=['Regular-session completed studies', 'Active US equity research catalog plus explicit symbol/day requests; not a full delisted universe',
                     'Missing minutes remain inconclusive', 'News failures remain unavailable, never neutral scores',
                     'Retrospective SIP context was not necessarily available live',
                     'Research thresholds 8% up/3% down are not trading targets or stops'])
@@ -487,6 +496,9 @@ def read_packet(symbol=None, *, now=None, path=None):
         result['diagnostics'] = packet.get('diagnostics', {})
         result['patterns'] = packet.get('patterns', {})
         result['historical_jumps'] = packet.get('historical_jumps', {})
+        result['requested_jumps'] = packet.get('requested_jumps', {})
+        result['strongest_completed_jumps'] = [c for c in packet.get('strongest_completed_jumps', [])
+                                              if symbol is None or c['symbol']==symbol]
         result['forward_cohort'] = [c for c in packet.get('forward_cohort', []) if symbol is None or c['symbol'] == symbol]
         return result
     except (sqlite3.Error, OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError):
@@ -519,7 +531,20 @@ def report_text(packet):
     if jumps:
         jc = jumps.get('counts',{})
         lines.append(f"📚 مسارات القفزات — آخر {jumps['lookback_days']} يومًا: مرشحة {jumps['episodes']} | قفزات مؤكدة {jumps['confirmed']} | تنتظر {jc.get('PENDING',0)}")
-        lines.append('كل مرشح بقفزة/نطاق يومي 8% أو أكثر ضمن نطاق السعر والسيولة؛ ليس أعلى 5 فقط، ولا يشترط شراء البوت. ترتيب القاع والقمة يُفحص بالدقيقة.')
+        lines.append('مرشحو نطاق/فجوة يومية 8% أو أكثر بسيولة مرصودة قبل الحركة أو يومها؛ الأكبر له أولوية قراءة، والحد اليومي ليس مسارًا مثبتًا. لا يشترط شراء البوت أو قابلية التداول عند الوسيط.')
+    requested = packet.get('requested_jumps',{})
+    if requested:
+        rc = requested.get('counts',{})
+        lines.append(f"📌 طلب دراسة {requested['start']} إلى {requested['end']}: {requested['queued']} سهم/جلسة | مكتملة {rc.get('COMPLETE',0)} | تنتظر {rc.get('PENDING',0)} | ناقصة {rc.get('PARTIAL_DATA',0)} | تعذر الجلب {rc.get('DATA_UNAVAILABLE',0)}")
+        for item in requested.get('symbols_status',[]):
+            c = item['counts']
+            lines.append(f"  {item['symbol']}: مكتملة {c.get('COMPLETE',0)} | تنتظر {c.get('PENDING',0)} | ناقصة/غير متاحة {c.get('PARTIAL_DATA',0)+c.get('DATA_UNAVAILABLE',0)}")
+    strongest = packet.get('strongest_completed_jumps',[])
+    if strongest:
+        lines.append('🏔 أكبر المسارات المثبتة بالدقيقة في الدراسات المكتملة فقط — ليس ترتيب السوق كله:')
+        for c in strongest[:6]:
+            p = c['path']
+            lines.append(f"  {c['symbol']} {c['session_day']}: {p['observed_rise_pct']:+.2f}% | ${p['start_price']:.4f} → ${p['peak_price']:.4f} خلال {p['duration_minutes']} دقيقة")
     diagnostics = packet.get('diagnostics', {})
     if diagnostics:
         from market.research_diagnostics import diagnostic_text

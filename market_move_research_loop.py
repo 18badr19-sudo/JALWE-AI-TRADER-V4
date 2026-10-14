@@ -10,7 +10,8 @@ from market_move_provider import MoveProvider
 from market_move_research import (MoveStore, PROTOCOL, daily_features, choose_pairs, bucket,
                                  utc, observe_session, default_path, stable_key)
 from market_move_diagnostics import VERSION, observation_due, diagnose_gaps, emit_evidence, recheck_absent_bars
-from market_jump_paths import VERSION as JUMP_VERSION, LOOKBACK_DAYS, candidates, jump_path
+from market_jump_paths import VERSION as JUMP_VERSION, SCAN_VERSION, LOOKBACK_DAYS, candidates, jump_path
+from market_jump_requests import queue_requested, requested_keys, schedule_studies
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,8 @@ class MoveResearchWorker:
         from market_move_patterns import definition, PROTOCOL as PATTERN_PROTOCOL, SPEC
         pattern_definition = definition(self.store,now)
         closed = [s for s in sessions if utc(s['close'])+timedelta(minutes=16) <= now]
+        requested = queue_requested(self.store,sessions,now)
+        logger.info('MARKET_JUMP_REQUEST_QUEUED %s',json.dumps(requested))
         if len(closed) < 3:
             raise ValueError('INSUFFICIENT_COMPLETED_SESSIONS')
         latest, prior, older = closed[-3:][::-1]
@@ -41,9 +44,17 @@ class MoveResearchWorker:
             recent = closed[-5:]
         cache_key = latest['date']
         cache = self.store.state('daily_cache')
-        if cache is None or cache.get('date') != cache_key or cache.get('jump_version') != JUMP_VERSION:
-            daily = self.provider.daily(symbols,recent,now)
-            cache = dict(date=cache_key, rows=daily, universe_count=len(symbols), jump_version=JUMP_VERSION)
+        if (cache is None or cache.get('date') != cache_key or cache.get('jump_version') != JUMP_VERSION
+                or cache.get('selection_version') != SCAN_VERSION):
+            try:
+                daily = self.provider.daily(symbols,recent,now)
+            except Exception as exc:
+                # Explicit intraday requests remain independent of a failed
+                # full-universe daily read. No forward cohort is fabricated.
+                return dict(state='DATA_UNAVAILABLE',error_type=type(exc).__name__,
+                            reason='DAILY_READ_FAILED_REQUESTED_STUDIES_CONTINUE')
+            cache = dict(date=cache_key, rows=daily, universe_count=len(symbols), jump_version=JUMP_VERSION,
+                         selection_version=SCAN_VERSION)
             self.store.state('daily_cache',cache)
         else:
             daily = cache['rows']
@@ -104,7 +115,7 @@ class MoveResearchWorker:
                 self.store.freeze_cohort(prepared_pairs,future,frozen_at,clock=clock)
         # Queue every screened historical symbol/day, independent of ownership.
         # Separate role and keys preserve all existing frozen forward cohorts.
-        jump_mark = 'jump_scan:'+JUMP_VERSION+':'+latest['date']
+        jump_mark = 'jump_scan:'+SCAN_VERSION+':'+latest['date']
         manifest = self.store.enqueue_jumps(candidates(symbols,daily,closed,now),
                                            jump_mark,now,LOOKBACK_DAYS)
         logger.info('MARKET_JUMP_HISTORY_QUEUED %s',json.dumps(manifest))
@@ -121,18 +132,21 @@ class MoveResearchWorker:
             # Process-unique worker and durable run markers protect restart deduplication.
             sessions = self.provider.calendar(now)
             symbols = self.store.state('universe_cache')
-            if symbols is None or symbols.get('date') != now.date().isoformat():
-                symbols = dict(date=now.date().isoformat(),symbols=self.provider.assets())
+            if (symbols is None or symbols.get('date') != now.date().isoformat()
+                    or symbols.get('selection_version') != SCAN_VERSION):
+                symbols = dict(date=now.date().isoformat(),symbols=self.provider.assets(),selection_version=SCAN_VERSION)
                 self.store.state('universe_cache',symbols)
             health = self.prepare(now,sessions,symbols['symbols'],
                                   clock=None if supplied_now else lambda: datetime.now(timezone.utc))
             due = [r for r in self.store.episodes() if observation_due(r, now)]
             # First observations precede retries; bounded work cannot starve a new cohort.
             # Historical backlog cannot starve newly matured prospective cohorts.
-            due.sort(key=lambda r: (not r['prospective'], r['status'] != 'PENDING',
-                -datetime.fromisoformat(r['session_day']).toordinal(),r['attempts'],r['episode_key']))
+            selected = schedule_studies(due,requested_keys(sessions,now))
+            logger.info('MARKET_JUMP_STUDY_BATCH %s',json.dumps(dict(
+                selected=[dict(symbol=r['symbol'],session_day=r['session_day'],role=r['role'],
+                               prospective=bool(r['prospective'])) for r in selected],limit=12)))
             frames, samples = {}, {}
-            for row in due[:12]:
+            for row in selected:
                 try:
                     frame_key = (row['symbol'],row['session']['open'],row['session']['close'])
                     if frame_key not in frames:
@@ -165,6 +179,15 @@ class MoveResearchWorker:
                     result = dict(status='DATA_UNAVAILABLE',outcome=None,error_type=type(exc).__name__,
                                   diagnostic_version=VERSION,data_diagnostics=error_diagnostics(exc))
                 self.store.settle(row['episode_key'],result,now,retry=row['status'] != 'PENDING')
+                if row['role']=='JUMP_CASE':
+                    path = result.get('jump_path',{})
+                    logger.info('MARKET_JUMP_STUDY_RESULT %s',json.dumps(dict(
+                        episode_key=row['episode_key'],symbol=row['symbol'],session_day=row['session_day'],
+                        requested=(row['symbol'],row['session_day']) in requested_keys(sessions,now),
+                        status=result['status'],missing_minutes=result.get('missing_minutes'),
+                        error_type=result.get('error_type'),jump_path={k:v for k,v in path.items() if k in {
+                            'status','strong_jump','start_at','start_price','peak_at','peak_price',
+                            'observed_rise_pct','duration_minutes','phase_volume'}})))
         except Exception as exc:
             # Data errors cannot interrupt JALWE or publish false success labels.
             health = dict(state='DATA_UNAVAILABLE',error_type=type(exc).__name__,
@@ -187,6 +210,9 @@ class MoveResearchWorker:
             counts=packet['counts'],prospective_episodes=packet['prospective_episodes'],
             hot_case_episodes=packet['hot_case_episodes'],comparison=packet['comparison'],
             historical_jumps=packet['historical_jumps'],
+            requested_jumps=packet['requested_jumps'],
+            strongest_completed_jumps=[dict(symbol=c['symbol'],session_day=c['session_day'],
+                observed_rise_pct=c['path']['observed_rise_pct']) for c in packet['strongest_completed_jumps']],
             diagnostics=packet['diagnostics'],patterns=packet['patterns'])))
         return packet
 

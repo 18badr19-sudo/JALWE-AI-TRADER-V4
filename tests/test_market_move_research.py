@@ -223,10 +223,10 @@ class ProviderTests(unittest.TestCase):
             self.provider.get('https://paper-api.alpaca.markets/v2/orders')
         self.provider.session.get.assert_not_called()
 
-    def test_raw_asset_class_and_tradability(self):
+    def test_research_catalog_includes_active_nontradable_equities(self):
         asset = dict(symbol='TEST', status='active', **{'class':'us_equity'}, tradable=True)
         with patch.object(self.provider, 'get', return_value=[asset, {**asset, 'symbol':'NO', 'tradable':False}]):
-            self.assertEqual(self.provider.assets(), ['TEST'])
+            self.assertEqual(self.provider.assets(), ['NO','TEST'])
 
     def test_pagination_is_complete_or_fails_closed(self):
         now = research.utc('2026-10-12T21:00:00Z')

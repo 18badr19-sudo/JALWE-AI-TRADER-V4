@@ -8,6 +8,7 @@ from market_move_research import NY, UP_PCT, utc, valid_bar, daily_features, _be
 
 VERSION = 'historical-jump-path-v1'
 LOOKBACK_DAYS = 30
+SCAN_VERSION = 'historical-jump-selection-v2'
 
 
 def candidates(symbols, daily, sessions, now):
@@ -44,14 +45,17 @@ def candidates(symbols, daily, sessions, now):
                 before = daily_features(symbol, [prior_bar, current], session, prior)
                 price = float(prior_bar['c'])
                 dollars = price * float(prior_bar['v'])
+                current_dollars = float(current['c']) * float(current['v'])
                 screen = 100 * (float(current['h']) / min(float(current['l']), price) - 1)
-                if (before is None or not .5 <= price <= 100 or dollars < 100000
+                if (before is None or max(dollars,current_dollars) < 100000
+                        or not math.isfinite(current_dollars)
                         or not math.isfinite(screen) or screen < UP_PCT):
                     continue
                 # Inputs are explicitly retrospective; never frozen forward features.
                 yield dict(symbol=symbol, evidence_day=prior['date'], close=price,
                     dollar_volume=dollars, available_after=(utc(prior['close'])+timedelta(minutes=16)).isoformat(),
                     source_feed='sip', jump_protocol=VERSION, selection='DAILY_RANGE_OR_GAP_BOUND_NOT_ORDER',
+                    selection_version=SCAN_VERSION, current_dollar_volume=current_dollars,
                     daily_screen_bound_pct=screen, daily_open=float(current['o']),
                     daily_high=float(current['h']), prior_close=price), session
             except (ValueError, TypeError, KeyError, OverflowError):

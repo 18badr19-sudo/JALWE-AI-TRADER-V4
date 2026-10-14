@@ -166,7 +166,12 @@ class GapDiagnosticsTests(unittest.TestCase):
 
 
 class WorkerDiagnosticTests(unittest.TestCase):
-    setUp = RetryTests.setUp
+    def setUp(self):
+        RetryTests.setUp(self)
+        # Isolate legacy retry/read-sharing checks from user-requested backfills.
+        # Their integration with real requested studies is tested separately.
+        request_patch = patch('market_move_research_loop.queue_requested',return_value={})
+        request_patch.start(); self.addCleanup(request_patch.stop)
     def test_nine_legacy_cases_are_rechecked_without_new_cohort_selection(self):
         for i in range(8):
             self.store.add(fixtures.feature('TEST'+str(i)), fixtures.session(), 'HOT_CASE',str(i),self.now,prospective=False)

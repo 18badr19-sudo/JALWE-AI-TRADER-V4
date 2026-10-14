@@ -409,6 +409,24 @@ class MoveStore:
             row = conn.execute('SELECT value FROM move_state WHERE key=?', (key,)).fetchone()
         return json.loads(row['value']) if row else None
 
+    def enrich_jump_profile(self,key,expected_result,profile,now):
+        """Add descriptive evidence only; never reopen or replace an outcome."""
+        import copy
+        updated = copy.deepcopy(expected_result)
+        if not isinstance(updated.get('jump_path'),dict):
+            return False
+        updated['jump_path']['profile'] = profile
+        encoded = json.dumps(updated,allow_nan=False)
+        with self.connect() as conn:
+            row = conn.execute('SELECT role,prospective,status,result_json,session_json FROM move_episodes WHERE episode_key=?',(key,)).fetchone()
+            if (row is None or row['role']!='JUMP_CASE' or row['prospective'] or
+                    row['status'] not in {'COMPLETE','PARTIAL_DATA'} or
+                    utc(json.loads(row['session_json'])['close'])+timedelta(minutes=16)>now or
+                    json.loads(row['result_json'] or '{}')!=expected_result):
+                return False
+            return bool(conn.execute('UPDATE move_episodes SET result_json=? WHERE episode_key=? AND result_json=?',
+                                     (encoded,key,row['result_json'])).rowcount)
+
     def publish(self, now, health, *, patterns=None):
         cutoff = (now.astimezone(NY).date()-timedelta(days=90)).isoformat()
         with self.connect() as conn:
@@ -420,6 +438,8 @@ class MoveStore:
         jumps = [r for r in rows if r['role']=='JUMP_CASE' and r['session_day'] >= jump_cutoff]
         from market_jump_requests import request_summary
         requested = request_summary(rows,self.state('jump_request'))
+        from market_jump_profiles import summarize_profiles
+        profiles = summarize_profiles(jumps)
         strongest = sorted((r for r in jumps if r['status']=='COMPLETE'
             and r['result'].get('jump_path',{}).get('status')=='COMPLETE'
             and r['result']['jump_path'].get('strong_jump') is True),
@@ -437,6 +457,7 @@ class MoveStore:
                 confirmed=sum(r['status']=='COMPLETE' and r['result'].get('jump_path',{}).get('strong_jump') is True for r in jumps),
                 lookback_days=health.get('jump_lookback_days',30)),
             requested_jumps=requested,
+            historical_jump_profiles=profiles,
             strongest_completed_jumps=[dict(symbol=r['symbol'],session_day=r['session_day'],
                 path=r['result']['jump_path']) for r in strongest],
             comparison=comparison(rows), latest_cases=[dict(symbol=r['symbol'], session_day=r['session_day'],
@@ -497,6 +518,7 @@ def read_packet(symbol=None, *, now=None, path=None):
         result['patterns'] = packet.get('patterns', {})
         result['historical_jumps'] = packet.get('historical_jumps', {})
         result['requested_jumps'] = packet.get('requested_jumps', {})
+        result['historical_jump_profiles'] = packet.get('historical_jump_profiles', {})
         result['strongest_completed_jumps'] = [c for c in packet.get('strongest_completed_jumps', [])
                                               if symbol is None or c['symbol']==symbol]
         result['forward_cohort'] = [c for c in packet.get('forward_cohort', []) if symbol is None or c['symbol'] == symbol]
@@ -540,11 +562,29 @@ def report_text(packet):
             c = item['counts']
             lines.append(f"  {item['symbol']}: مكتملة {c.get('COMPLETE',0)} | تنتظر {c.get('PENDING',0)} | ناقصة/غير متاحة {c.get('PARTIAL_DATA',0)+c.get('DATA_UNAVAILABLE',0)}")
     strongest = packet.get('strongest_completed_jumps',[])
+    profiles = packet.get('historical_jump_profiles',{})
+    if profiles:
+        from market_jump_profiles import FACTORS
+        lines.append(f"🧠 ذاكرة عوامل القفزات: {profiles['completed_profiles']} مكتملة | {profiles['partial_profiles']} جزئية منفصلة")
+        for factor in profiles.get('factors',[]):
+            lines.append(f"  {FACTORS[factor['code']]}: ظهر في {factor['present']} من {factor['known']} بسياق معروف | مجهول {factor['unknown']}")
+        lines.append('وصف لعينات مختارة بعد الحركة؛ لا توجد مجموعة ضابطة أو أفضلية تنبؤية مثبتة، ولا تطبيق تلقائي على التداول.')
     if strongest:
         lines.append('🏔 أكبر المسارات المثبتة بالدقيقة في الدراسات المكتملة فقط — ليس ترتيب السوق كله:')
         for c in strongest[:6]:
             p = c['path']
             lines.append(f"  {c['symbol']} {c['session_day']}: {p['observed_rise_pct']:+.2f}% | ${p['start_price']:.4f} → ${p['peak_price']:.4f} خلال {p['duration_minutes']} دقيقة")
+            profile = p.get('profile',{})
+            if profile.get('status')=='AVAILABLE':
+                phases = profile.get('volume_phases',[])
+                shares = '/'.join(f"{phase['volume_share_pct']:.0f}%" for phase in phases) or 'غير كافٍ'
+                lines.append(f"    توزيع حجم مبكر/وسط/متأخر: {shares} | تراجع بين دقائق المسار {profile['max_prior_minute_peak_to_later_low_decline_pct']:.2f}%")
+                first = next((m for m in profile.get('milestones',[]) if m['threshold_pct']==8),{})
+                after = next((w for w in profile.get('after_peak',[]) if w['minutes']==15),{})
+                speed = str(first['elapsed_minutes'])+' دقيقة تقديرية' if first.get('elapsed_minutes') is not None else 'غير متاح'
+                follow = (f"{after['close_vs_peak_pct']:+.2f}%" if after.get('status')=='COMPLETE_WINDOW'
+                          and isinstance(after.get('close_vs_peak_pct'),(float,int)) else 'غير متاح')
+                lines.append(f"    وصول +8% داخل المسار: {speed} | إغلاق بعد القمة بـ15 دقيقة: {follow}")
     diagnostics = packet.get('diagnostics', {})
     if diagnostics:
         from market.research_diagnostics import diagnostic_text

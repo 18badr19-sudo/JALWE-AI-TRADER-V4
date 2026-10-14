@@ -203,6 +203,11 @@ class MoveResearchWorker:
             health.update(session_backlog(self.store.episodes(), health['completed_session']))
         published_at = now if supplied_now else datetime.now(timezone.utc)
         try:
+            from market_jump_profiles import upgrade_saved_profiles
+            logger.info('MARKET_JUMP_PROFILE_UPGRADE %s',json.dumps(upgrade_saved_profiles(self.store,published_at)))
+        except Exception as exc:
+            logger.warning('MARKET_JUMP_PROFILE_UNAVAILABLE %s',type(exc).__name__)
+        try:
             from market_move_patterns import update
             patterns = update(self.store,self.store.episodes(),published_at)
         except Exception as exc:
@@ -218,6 +223,7 @@ class MoveResearchWorker:
             hot_case_episodes=packet['hot_case_episodes'],comparison=packet['comparison'],
             historical_jumps=packet['historical_jumps'],
             requested_jumps=packet['requested_jumps'],
+            historical_jump_profiles=packet['historical_jump_profiles'],
             strongest_completed_jumps=[dict(symbol=c['symbol'],session_day=c['session_day'],
                 observed_rise_pct=c['path']['observed_rise_pct']) for c in packet['strongest_completed_jumps']],
             diagnostics=packet['diagnostics'],patterns=packet['patterns'])))

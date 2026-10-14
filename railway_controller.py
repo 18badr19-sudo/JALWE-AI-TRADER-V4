@@ -15,6 +15,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from core.storage import data_directory
+from core.telegram_text import telegram_report_parts
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
@@ -674,27 +675,26 @@ class TelegramPollHealth:
         return max(0.0, now - self.failed_since)
 
 
-def send_message(text: Any) -> None:
+def send_message(text: Any) -> bool:
     reply_markup = KEYBOARD
     if isinstance(text, dict):
         reply_markup = text.get('reply_markup', KEYBOARD)
         text = text.get('text', '')
     if not TELEGRAM_CHAT_ID:
-        return
+        return False
 
-    tg_call(
-        "sendMessage",
-        {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": text[:4000],
-            "reply_markup": json.dumps(
-                reply_markup,
-                ensure_ascii=False,
-            ),
-            "disable_web_page_preview": "true",
-        },
-        timeout=20,
-    )
+    for part in telegram_report_parts(text):
+        tg_call(
+            "sendMessage",
+            {
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": part,
+                "reply_markup": json.dumps(reply_markup, ensure_ascii=False),
+                "disable_web_page_preview": "true",
+            },
+            timeout=20,
+        )
+    return True
 
 
 def notify_error(
@@ -1653,10 +1653,12 @@ full coverage or a completed statistical comparison. Older packets stay gated.
         if (AUTO_DAILY_REPORT and day and health.get('state') == 'READY'
                 and health.get('completed_session_forward_pending', health.get('completed_session_pending')) == 0
                 and controller_state.get('last_move_report_session') != day):
-            send_message(report_text(packet))
+            message = report_text(packet)
+            if send_message(message) is False:
+                return
             controller_state['last_move_report_session'] = day
             save_state(controller_state)
-            print(f"MARKET_MOVE_BOT_REPORT_SENT session={day}", flush=True)
+            print(f"MARKET_MOVE_BOT_REPORT_SENT session={day} parts={len(telegram_report_parts(message))}", flush=True)
     except Exception as exc:
         print(f"Market move report unavailable: {type(exc).__name__}", flush=True)
 

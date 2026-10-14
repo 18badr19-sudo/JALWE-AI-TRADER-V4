@@ -1,5 +1,6 @@
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, MagicMock, patch
+import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -7,6 +8,21 @@ import railway_controller as controller
 
 
 class ExternalDiagnosticsTests(unittest.TestCase):
+    def test_saved_decision_diagnostic_renders_router_evidence_and_saudi_time(self):
+        payload={'symbol':'TV','jalwe':{'state':'REJECTED','ai_score':76,'opportunity_score':75,
+            'reason':'Market regime / strategy router rejected the setup.','market_regime':'SIDEWAYS',
+            'metadata':{'strategy_router_evidence':{'score':75.,'minimum_score':82.,'approved':False}}}}
+        context=MagicMock()
+        context.__enter__.return_value.execute.return_value.fetchall.return_value=[
+            {'message':'decision','metadata_json':json.dumps(payload),'created_at':'2026-10-14 18:21:50'}]
+        with patch.object(controller,'MANAGE_APEX_CHILD',False), \
+             patch.object(controller,'shared_apex_diagnostics_lines',return_value=['shared reports']), \
+             patch.object(controller.database,'connection',return_value=context):
+            text=controller.no_trade_diagnostics_text()
+        self.assertIn('2026-10-14 21:21 السعودية',text)
+        self.assertIn('درجة 75.00 | المطلوب 82',text)
+        self.assertIn('حالة السوق: SIDEWAYS',text)
+
     def test_external_mode_never_reads_old_local_apex_file(self):
         with patch.object(controller, 'MANAGE_APEX_CHILD', False), \
              patch.object(controller, 'APEX_DIAGNOSTICS_FILE') as old_file, \

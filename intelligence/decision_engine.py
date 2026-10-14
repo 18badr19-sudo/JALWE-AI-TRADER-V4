@@ -1396,6 +1396,13 @@ class DecisionEngine:
 
         gates["strategy_router"] = bool(routed.approved)
 
+        base_metadata['strategy_router_evidence'] = {
+            'approved': bool(routed.approved), 'score': routed.routed_score,
+            'minimum_score': getattr(routed,'minimum_score',None),
+            'market_regime': market_name, 'regime_confidence': market.confidence,
+            'warnings': list(routed.warnings),
+        }
+
         # ====================================================
         # EARLY QUALITY REJECTION
         # ====================================================

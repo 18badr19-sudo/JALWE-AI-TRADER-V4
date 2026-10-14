@@ -52,6 +52,8 @@ class RoutedOpportunity:
         default_factory=list
     )
 
+    minimum_score: Optional[float] = None
+
 
 class StrategyRouter:
     """
@@ -938,6 +940,7 @@ class StrategyRouter:
             warnings=warnings,
 
             candidates=routed_candidates,
+            minimum_score=minimum_score,
         )
 
 

@@ -72,6 +72,15 @@ remain failed and consume the local request quota. Responses must be completed,
 contain exactly one model-output text and pass the same local evidence validator.
 No tool, agent, conversation history or background execution is requested.
 
+Both HTTP transports independently enforce explicit enablement, PAPER-only mode,
+the selected provider and a present key before opening a connection; the Gemini
+transport additionally enforces its free-project attestation and model allowlist.
+HTTP failures retain only a validated provider/status code such as GEMINI_HTTP_403
+in storage and logs. `/ai_review SYMBOL` displays this safe code for failed calls.
+Response bodies, URLs and exception messages remain excluded; generic errors
+still retain only their exception type. This does not retry failed calls or
+verify a key's validity without an actual successful provider response.
+
 Provider/model identity is stored with every new review. Legacy rows retain
 OpenAI attribution. Changing provider/model cancels old pending work instead of
 replaying it through the newly selected provider. To move later to OpenAI,

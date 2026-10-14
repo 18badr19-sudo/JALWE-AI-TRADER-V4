@@ -174,13 +174,22 @@ def validate_review(review, evidence):
     return review
 
 
+class ProviderHTTPError(ValueError):
+    """Retain only a validated provider/status pair, never an HTTP body or URL."""
+    def __init__(self, provider, status_code):
+        if provider not in {'openai', 'gemini'} or type(status_code) is not int or not 100 <= status_code <= 599:
+            raise ValueError('INVALID_PROVIDER_HTTP_STATUS')
+        self.kind = provider.upper() + '_HTTP_' + str(status_code)
+        super().__init__(self.kind)
+
+
 class ModelClient:
     def __init__(self, config):
         self.config = config
 
     def review(self, evidence):
-        if self.config.provider != 'openai':
-            raise ValueError('OPENAI_PROVIDER_NOT_SELECTED')
+        if self.config.provider != 'openai' or self.config.state() != 'SHADOW_ONLY':
+            raise ValueError('OPENAI_CONFIGURATION_NOT_APPROVED')
         request = {'model': self.config.model, 'instructions': INSTRUCTIONS,
             'input': json.dumps(evidence, ensure_ascii=False, allow_nan=False), 'store': False,
             'reasoning': {'effort': 'low'}, 'max_output_tokens': 2000,
@@ -191,8 +200,11 @@ class ModelClient:
                 'Authorization': 'Bearer ' + self.config.api_key})
         # No redirects may forward a credential to another host.
         from self_update.publisher import NoRedirect
-        with urllib.request.build_opener(NoRedirect()).open(req, timeout=15) as response:
-            raw = response.read(65537)
+        try:
+            with urllib.request.build_opener(NoRedirect()).open(req, timeout=15) as response:
+                raw = response.read(65537)
+        except urllib.error.HTTPError as exc:
+            raise ProviderHTTPError('openai', exc.code) from None
         if len(raw) > 65536:
             raise ValueError('OVERSIZED_MODEL_RESPONSE')
         body = json.loads(raw)
@@ -231,7 +243,7 @@ class GeminiClient:
         except urllib.error.HTTPError as exc:
             if exc.code == 429:
                 raise GeminiQuotaExhausted('GEMINI_QUOTA_PAUSED') from None
-            raise ValueError('GEMINI_HTTP_' + str(exc.code)) from None
+            raise ProviderHTTPError('gemini', exc.code) from None
         if len(raw) > 65536:
             raise ValueError('OVERSIZED_GEMINI_RESPONSE')
         body = json.loads(raw)
@@ -325,7 +337,8 @@ class ShadowAdvisor:
                     ('gemini_quota_pause_until', self.clock()+86400))
             result, usage, state, error = None, {}, 'QUOTA_EXHAUSTED', 'GeminiQuotaExhausted'
         except Exception as exc:
-            result, usage, state, error = None, {}, 'FAILED', type(exc).__name__
+            error = exc.kind if type(exc) is ProviderHTTPError else type(exc).__name__
+            result, usage, state = None, {}, 'FAILED'
         with self.connect() as conn:
             conn.execute('UPDATE shadow_reviews SET state=?,result=?,usage=?,error_kind=?,finished=? WHERE id=?',
                 (state, json.dumps(result, ensure_ascii=False), json.dumps(usage), error, self.clock(), row['id']))
@@ -405,6 +418,8 @@ def advisor_status_text(symbol=None):
     if row:
         lines += [row['symbol'] + ': ' + row['state'], 'مزود هذا السجل: ' + row['provider'] + ' / ' + row['model'], 'وقت الأدلة: ' +
             json.loads(row['evidence'])['facts']['feature_timestamp']]
+        if row['state'] == 'FAILED' and re.fullmatch(r'(?:GEMINI|OPENAI)_HTTP_[1-5][0-9]{2}', str(row['error_kind'])):
+            lines.append('رمز خطأ الاتصال: ' + row['error_kind'])
         if row['state'] == 'ANALYZED':
             result = json.loads(row['result'])
             lines += [result['agreement'], result['summary_ar']]

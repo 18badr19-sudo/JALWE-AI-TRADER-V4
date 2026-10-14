@@ -137,6 +137,15 @@ class ShadowAdvisorTests(unittest.TestCase):
 
 
 class ModelTransportTests(unittest.TestCase):
+    def test_direct_openai_transport_checks_paper_enablement_and_key_before_http(self):
+        configs = (AdvisorConfig(False, True, 'secret'),
+                   AdvisorConfig(True, False, 'secret'), AdvisorConfig(True, True))
+        with patch('urllib.request.build_opener') as http:
+            for config in configs:
+                with self.assertRaises(ValueError):
+                    ModelClient(config).review({})
+        http.assert_not_called()
+
     def test_incomplete_refused_oversized_and_invalid_json_never_count_as_analysis(self):
         config = AdvisorConfig(True, True, 'secret')
         responses = [{'status': 'incomplete', 'output': []},

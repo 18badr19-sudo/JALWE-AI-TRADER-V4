@@ -145,3 +145,31 @@ class GeminiQueueTests(unittest.TestCase):
         row = migrated.status('SNAP')['latest']
         self.assertEqual(row['provider'], 'openai'); self.assertEqual(row['model'], 'legacy')
         self.assertEqual(row['state'], 'ANALYZED')
+
+    def test_http_failure_retains_only_safe_status_in_storage_logs_and_telegram(self):
+        from intelligence.shadow_advisor import advisor_status_text
+        for provider in ('gemini', 'openai'):
+            for code in (401, 403, 404, 500):
+                with self.subTest(provider=provider, code=code):
+                    cfg = config() if provider == 'gemini' else AdvisorConfig(True, True, 'fake')
+                    path = self.path.parent / (provider + str(code) + '.db')
+                    a = ShadowAdvisor(path, config=cfg, clock=lambda: self.now)
+                    a.submit(payload())
+                    opener = Mock()
+                    opener.open.side_effect = urllib.error.HTTPError(
+                        'https://secret.invalid/key=credential', code, 'private response', None, None)
+                    with patch('urllib.request.build_opener', return_value=opener), \
+                         self.assertLogs('intelligence.shadow_advisor', level='INFO') as logs:
+                        self.assertTrue(a.process_one())
+                    row = a.status('SNAP')['latest']
+                    safe = provider.upper() + '_HTTP_' + str(code)
+                    self.assertEqual(row['state'], 'FAILED')
+                    self.assertEqual(row['error_kind'], safe)
+                    with patch('core.storage.data_directory', return_value=path.parent), \
+                         patch('intelligence.shadow_advisor.ShadowAdvisor', return_value=a):
+                        message = advisor_status_text('SNAP')
+                    combined = json.dumps(row) + str(logs.output) + message
+                    self.assertIn(safe, message)
+                    for private in ('credential', 'secret.invalid', 'private response'):
+                        self.assertNotIn(private, combined)
+                    self.assertEqual(opener.open.call_count, 1)

@@ -11,7 +11,7 @@ from market_move_research import (MoveStore, PROTOCOL, daily_features, choose_pa
                                  utc, observe_session, default_path, stable_key)
 from market_move_diagnostics import VERSION, observation_due, diagnose_gaps, emit_evidence, recheck_absent_bars
 from market_jump_paths import VERSION as JUMP_VERSION, SCAN_VERSION, LOOKBACK_DAYS, candidates, jump_path
-from market_jump_requests import queue_requested, requested_keys, schedule_studies
+from market_jump_requests import queue_requested, requested_keys, requested_bounds, schedule_studies
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +60,12 @@ class MoveResearchWorker:
             daily = cache['rows']
         logger.info('MARKET_JUMP_HISTORY_LOADED %s',json.dumps(dict(
             latest_session=latest['date'],daily_symbols=len(daily),lookback_days=LOOKBACK_DAYS)))
+        # This scheduling-only overlay repairs requests seeded without daily
+        # metadata. It never changes the original episode features/results.
+        request_priority = requested_bounds(daily,closed,now)
+        self.store.state('jump_request_priority',dict(session=latest['date'],bounds=request_priority))
+        logger.info('MARKET_JUMP_REQUEST_PRIORITY %s',json.dumps(dict(
+            session=latest['date'],bounds=request_priority,scope='RETROSPECTIVE_READ_ORDER_ONLY')))
         features_before, features_latest, gains = [], [], []
         for symbol in symbols:
             bars = daily.get(symbol, [])
@@ -141,7 +147,8 @@ class MoveResearchWorker:
             due = [r for r in self.store.episodes() if observation_due(r, now)]
             # First observations precede retries; bounded work cannot starve a new cohort.
             # Historical backlog cannot starve newly matured prospective cohorts.
-            selected = schedule_studies(due,requested_keys(sessions,now))
+            priority = self.store.state('jump_request_priority') or {}
+            selected = schedule_studies(due,requested_keys(sessions,now),bounds=priority.get('bounds',{}))
             logger.info('MARKET_JUMP_STUDY_BATCH %s',json.dumps(dict(
                 selected=[dict(symbol=r['symbol'],session_day=r['session_day'],role=r['role'],
                                prospective=bool(r['prospective'])) for r in selected],limit=12)))

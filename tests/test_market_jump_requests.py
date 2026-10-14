@@ -6,7 +6,7 @@ from unittest.mock import Mock
 
 from market_jump_paths import VERSION, candidates, jump_path
 from market_jump_requests import (REQUEST_SYMBOLS, queue_requested, requested_keys,
-                                  schedule_studies, request_summary)
+                                  requested_bounds, schedule_studies, request_summary, valid_bound)
 from market_move_research import MoveStore, utc, observe_session, read_packet, report_text, stable_key
 from market_move_research_loop import MoveResearchWorker
 import test_market_move_research as fixtures
@@ -73,6 +73,34 @@ class RequestedJumpTests(unittest.TestCase):
         ordered = schedule_studies(rows,set())
         self.assertEqual([r['symbol'] for r in ordered],['OLDER_BIG','NEW_SMALL','NAN','RETRY'])
         self.assertEqual(ordered,schedule_studies(list(reversed(rows)),set()))
+
+    def test_daily_overlay_prioritizes_quiet_requested_jump_without_rewriting_store(self):
+        queue_requested(self.store,self.sessions,self.now)
+        before = self.store.episodes()
+        bars = [dict(fixtures.bar(s['date']),o=2.34,h=2.34,l=2.34,c=2.34,v=597)
+                for s in self.sessions if s['date']<='2026-10-09']
+        event = next(b for b in bars if b['t'].startswith('2026-10-07'))
+        event.update(o=2.34,h=7.02,l=2.22,c=5.07,v=29811117)
+        bounds = requested_bounds({'PFAI':bars},self.sessions,self.now)
+        self.assertGreater(bounds['PFAI|2026-10-07'],200)
+        selected = schedule_studies(before,requested_keys(self.sessions,self.now),bounds=bounds)
+        self.assertEqual((selected[0]['symbol'],selected[0]['session_day']),('PFAI','2026-10-07'))
+        self.assertEqual(self.store.episodes(),before)
+
+    def test_overlay_cannot_affect_forward_or_unrequested_lane(self):
+        forward = self.row('F',prospective=True,bound=5)
+        other = self.row('OTHER',bound=10)
+        requested = self.row('MI',bound=0)
+        bounds = {'F|2026-10-09':100000,'OTHER|2026-10-09':100000,'MI|2026-10-09':500}
+        selected = schedule_studies([other,requested,forward],{('MI','2026-10-09')},bounds=bounds)
+        self.assertEqual(selected,[forward,requested,other])
+        self.assertEqual(other['features']['daily_screen_bound_pct'],10)
+
+    def test_invalid_or_overflowing_priority_values_cannot_interrupt_scheduling(self):
+        for value in (True,'1000',float('nan'),float('inf'),-1,10**1000):
+            self.assertEqual(valid_bound(value),0.)
+        rows = [self.row('HUGE',bound=10**1000),self.row('VALID',bound=20)]
+        self.assertEqual(schedule_studies(rows,set())[0]['symbol'],'VALID')
 
     def test_quiet_before_jump_and_price_outside_trade_range_are_researchable(self):
         days = self.sessions[:2]

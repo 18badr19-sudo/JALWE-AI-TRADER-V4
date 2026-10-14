@@ -36,23 +36,46 @@ def queue_requested(store, sessions, now):
     return manifest
 
 
+def valid_bound(value):
+    if type(value) not in (float,int):
+        return 0.
+    try:
+        value = float(value)
+        return value if math.isfinite(value) and value > 0 else 0.
+    except (ValueError,OverflowError):
+        return 0.
+
+
 def screen_bound(row):
-    value = row.get('features',{}).get('daily_screen_bound_pct')
-    return float(value) if type(value) in (float,int) and math.isfinite(value) and value > 0 else 0.
+    return valid_bound(row.get('features',{}).get('daily_screen_bound_pct'))
 
 
-def schedule_studies(rows, keys, limit=12):
+def requested_bounds(daily, sessions, now):
+    # Requests are inserted before the daily read and may deliberately have no
+    # daily features. Use a separate retrospective scheduling overlay rather
+    # than rewriting persisted features, outcomes or frozen forward evidence.
+    from market_jump_paths import candidates
+    keys = requested_keys(sessions,now)
+    return {f['symbol']+'|'+s['date']:valid_bound(f['daily_screen_bound_pct'])
+            for f,s in candidates(REQUEST_SYMBOLS,daily,sessions,now)
+            if (f['symbol'],s['date']) in keys}
+
+
+def schedule_studies(rows, keys, limit=12, *, bounds=None):
     """Forward observations first; up to 8 requested seats, remaining discovery.
 
     Daily range/gap bounds order reads, never prove an ordered price path.
     First observations precede retries within each lane. No API budget increase.
     """
-    def rank(r):
-        return (r['status'] != 'PENDING', -screen_bound(r),
+    def rank(r, *, requested=False):
+        bound = screen_bound(r)
+        if requested:
+            bound = max(bound,valid_bound((bounds or {}).get(r['symbol']+'|'+r['session_day'])))
+        return (r['status'] != 'PENDING', -bound,
                 -int(r['session_day'].replace('-','')), r['attempts'], r['episode_key'])
     forward = sorted((r for r in rows if r['prospective']),key=rank)
     requested = sorted((r for r in rows if not r['prospective'] and r['role']=='JUMP_CASE'
-                        and (r['symbol'],r['session_day']) in keys),key=rank)
+                        and (r['symbol'],r['session_day']) in keys),key=lambda r:rank(r,requested=True))
     other = sorted((r for r in rows if not r['prospective'] and not
                     (r['role']=='JUMP_CASE' and (r['symbol'],r['session_day']) in keys)),key=rank)
     selected = forward[:limit]

@@ -121,4 +121,6 @@ def jump_path(frame, session, *, full_session_complete=False):
         pre_jump_context=_before_move(segment, onset),
         trajectory=[dict(at=t.isoformat(), **{c:float(row[c]) for c in cols})
                     for t,row in path.iterrows()])
+    from market_jump_profiles import build_profile
+    result['profile'] = build_profile(result,segment=segment)
     return result

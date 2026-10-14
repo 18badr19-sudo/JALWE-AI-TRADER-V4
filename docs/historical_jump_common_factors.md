@@ -22,6 +22,10 @@ opening jumps even when twenty pre-onset regular minutes are unavailable. Missin
 or disputed inputs stay UNKNOWN. Saved raw minute profiles, frozen cohorts,
 original outcomes and retry/audit fields are preserved during bounded enrichment
 of up to 24 saved profiles per cycle. Enrichment adds no provider requests.
+If prior-day evidence was unavailable, later cycles can fill that unknown context
+once valid cached bars arrive. Still-unknown evidence produces no repeated writes,
+and known context is never replaced. Daily cache decoding occurs once per batch;
+an auxiliary enrichment failure preserves the measured minute path and outcome.
 
 The packet counts individual factors and all 21 two-factor co-occurrences, using
 only complete, conflict-free, deduplicated symbol/session profiles. Co-occurrences

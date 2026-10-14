@@ -174,19 +174,34 @@ def upgrade_saved_profiles(store, now, limit=24):
     rows = [r for r in store.episodes() if r['role']=='JUMP_CASE' and not r['prospective']
             and utc(r['session']['close'])+timedelta(minutes=16)<=now
             and r['status'] in {'COMPLETE','PARTIAL_DATA'}
-            and r['result'].get('jump_path',{}).get('status') in {'COMPLETE','OBSERVED_SEGMENT'}
-            and (r['result']['jump_path'].get('profile',{}).get('protocol')!=PROTOCOL
-                 or r['result']['jump_path'].get('profile',{}).get('common_protocol')!=COMMON_PROTOCOL)]
-    rows.sort(key=lambda r:(r['status']!='COMPLETE',-r['result']['jump_path'].get('observed_rise_pct',0),r['episode_key']))
+            and r['result'].get('jump_path',{}).get('status') in {'COMPLETE','OBSERVED_SEGMENT'}]
+    rows.sort(key=lambda r:(r['status']!='COMPLETE',-(number(r['result']['jump_path'].get('observed_rise_pct')) or 0),r['episode_key']))
     done = 0
     daily = (store.state('daily_cache') or {}).get('rows',{})
     sessions = (store.state('jump_session_calendar') or {}).get('sessions',[])
-    for row in rows[:limit]:
+    ready = []
+    for row in rows:
         existing = row['result']['jump_path'].get('profile',{})
-        profile = existing if existing.get('protocol')==PROTOCOL else build_profile(row['result']['jump_path'])
-        profile = enrich_profile(profile,row,daily,sessions)
+        versioned = existing.get('protocol')==PROTOCOL and existing.get('common_protocol')==COMMON_PROTOCOL
+        if versioned and (existing.get('status')!='AVAILABLE'
+                          or existing.get('prior_day_context',{}).get('status')=='AVAILABLE'):
+            continue
+        # A temporary missing daily read is not a permanent negative. Recover
+        # only UNKNOWN evidence that can now become AVAILABLE, preserving all
+        # previously known context. Repeated missing reads cause no DB writes.
+        profile = None
+        if versioned:
+            profile = enrich_profile(existing,row,daily,sessions)
+            if profile.get('prior_day_context',{}).get('status')!='AVAILABLE':
+                continue
+        ready.append((row,profile))
+    for row,profile in ready[:limit]:
+        if profile is None:
+            existing = row['result']['jump_path'].get('profile',{})
+            profile = existing if existing.get('protocol')==PROTOCOL else build_profile(row['result']['jump_path'])
+            profile = enrich_profile(profile,row,daily,sessions)
         done += store.enrich_jump_profile(row['episode_key'],row['result'],profile,now)
-    return dict(upgraded=done,pending=max(0,len(rows)-done),provider_reads=0)
+    return dict(upgraded=done,pending=max(0,len(ready)-done),provider_reads=0)
 
 
 def summarize_profiles(rows):

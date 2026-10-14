@@ -55,7 +55,9 @@ class MoveProvider:
         symbols = set()
         for row in rows:
             if (isinstance(row, dict) and row.get('status') == 'active'
-                    and row.get('class',row.get('asset_class')) == 'us_equity' and row.get('tradable') is True):
+                    and row.get('class',row.get('asset_class')) == 'us_equity'):
+                # Catalog research does not submit orders. A historical move
+                # remains worth studying when this broker cannot trade it.
                 symbol = str(row.get('symbol') or '').strip().upper()
                 if symbol and all(c.isalpha() or c in '.-' for c in symbol) and len(symbol) <= 12:
                     symbols.add(symbol)

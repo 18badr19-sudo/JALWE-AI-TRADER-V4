@@ -170,17 +170,23 @@ def build_profile(path, *, segment=None):
 
 
 def upgrade_saved_profiles(store, now, limit=24):
+    from market_jump_common import enrich_profile, PROTOCOL as COMMON_PROTOCOL
     rows = [r for r in store.episodes() if r['role']=='JUMP_CASE' and not r['prospective']
             and utc(r['session']['close'])+timedelta(minutes=16)<=now
             and r['status'] in {'COMPLETE','PARTIAL_DATA'}
             and r['result'].get('jump_path',{}).get('status') in {'COMPLETE','OBSERVED_SEGMENT'}
-            and r['result']['jump_path'].get('profile',{}).get('protocol')!=PROTOCOL]
+            and (r['result']['jump_path'].get('profile',{}).get('protocol')!=PROTOCOL
+                 or r['result']['jump_path'].get('profile',{}).get('common_protocol')!=COMMON_PROTOCOL)]
     rows.sort(key=lambda r:(r['status']!='COMPLETE',-r['result']['jump_path'].get('observed_rise_pct',0),r['episode_key']))
     done = 0
+    daily = (store.state('daily_cache') or {}).get('rows',{})
+    sessions = (store.state('jump_session_calendar') or {}).get('sessions',[])
     for row in rows[:limit]:
-        profile = build_profile(row['result']['jump_path'])
+        existing = row['result']['jump_path'].get('profile',{})
+        profile = existing if existing.get('protocol')==PROTOCOL else build_profile(row['result']['jump_path'])
+        profile = enrich_profile(profile,row,daily,sessions)
         done += store.enrich_jump_profile(row['episode_key'],row['result'],profile,now)
-    return dict(upgraded=done,pending=max(0,len(rows)-limit),provider_reads=0)
+    return dict(upgraded=done,pending=max(0,len(rows)-done),provider_reads=0)
 
 
 def summarize_profiles(rows):
@@ -205,8 +211,9 @@ def summarize_profiles(rows):
         factors.append(dict(code=code,known=counts['PRESENT']+counts['ABSENT'],present=counts['PRESENT'],
                             absent=counts['ABSENT'],unknown=counts['UNKNOWN'],
                             examples=sorted({r['symbol'] for r,state in eligible if state=='PRESENT'})[:3]))
+    from market_jump_common import summarize_common
     return dict(protocol=PROTOCOL,scope='RETROSPECTIVE_SELECTED_CASES_NO_PREDICTIVE_EDGE',
         completed_profiles=len(completed),partial_profiles=sum(p.get('coverage')!='COMPLETE_SESSION' for _,p in observed),
-        conflicting_symbol_sessions=conflicts,factors=factors,
+        conflicting_symbol_sessions=conflicts,factors=factors,common_factors=summarize_common(completed,FACTORS),
         automatic_application=False,execution_authority=False,control_group_count=0,
         trading_changes_require_separate_validation_and_approval=True)

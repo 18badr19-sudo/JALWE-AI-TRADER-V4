@@ -61,7 +61,7 @@ def requested_bounds(daily, sessions, now):
             if (f['symbol'],s['date']) in keys}
 
 
-def schedule_studies(rows, keys, limit=12, *, bounds=None):
+def schedule_studies(rows, keys, limit=12, *, bounds=None, discovery_bounds=None):
     """Forward observations first; up to 8 requested seats, remaining discovery.
 
     Daily range/gap bounds order reads, never prove an ordered price path.
@@ -76,8 +76,13 @@ def schedule_studies(rows, keys, limit=12, *, bounds=None):
     forward = sorted((r for r in rows if r['prospective']),key=rank)
     requested = sorted((r for r in rows if not r['prospective'] and r['role']=='JUMP_CASE'
                         and (r['symbol'],r['session_day']) in keys),key=lambda r:rank(r,requested=True))
+    def discovery_rank(r):
+        # A falling day's high/low range must not outrank an upward bound solely
+        # because its low collapsed. No chronology is inferred from daily bars.
+        upward = valid_bound((discovery_bounds or {}).get(r['symbol']+'|'+r['session_day'])) if r['role']=='JUMP_CASE' else 0.
+        return (r['status']!='PENDING',upward<25,-upward if upward>=25 else 0,*rank(r)[1:])
     other = sorted((r for r in rows if not r['prospective'] and not
-                    (r['role']=='JUMP_CASE' and (r['symbol'],r['session_day']) in keys)),key=rank)
+                    (r['role']=='JUMP_CASE' and (r['symbol'],r['session_day']) in keys)),key=discovery_rank)
     selected = forward[:limit]
     take = min(8,max(0,limit-len(selected)))
     selected += requested[:take]

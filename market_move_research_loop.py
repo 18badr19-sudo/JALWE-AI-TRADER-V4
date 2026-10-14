@@ -30,6 +30,7 @@ class MoveResearchWorker:
         self.store, self.provider = store, provider
 
     def prepare(self, now, sessions, symbols, *, clock=None):
+        self.store.state('jump_session_calendar',dict(sessions=sessions))
         from market_move_patterns import definition, PROTOCOL as PATTERN_PROTOCOL, SPEC
         pattern_definition = definition(self.store,now)
         closed = [s for s in sessions if utc(s['close'])+timedelta(minutes=16) <= now]
@@ -122,7 +123,13 @@ class MoveResearchWorker:
         # Queue every screened historical symbol/day, independent of ownership.
         # Separate role and keys preserve all existing frozen forward cohorts.
         jump_mark = 'jump_scan:'+SCAN_VERSION+':'+latest['date']
-        manifest = self.store.enqueue_jumps(candidates(symbols,daily,closed,now),
+        jump_candidates = list(candidates(symbols,daily,closed,now))
+        discovery_bounds = {f['symbol']+'|'+s['date']:f['daily_up_bound_pct'] for f,s in jump_candidates}
+        self.store.state('jump_discovery_priority',dict(session=latest['date'],bounds=discovery_bounds))
+        logger.info('MARKET_JUMP_DISCOVERY_PRIORITY %s',json.dumps(dict(session=latest['date'],
+            candidates=len(discovery_bounds),large_upward_bounds=sum(v>=25 for v in discovery_bounds.values()),
+            scope='DAILY_UPWARD_BOUND_READ_ORDER_NOT_CONFIRMED_JUMP',limit=12)))
+        manifest = self.store.enqueue_jumps(jump_candidates,
                                            jump_mark,now,LOOKBACK_DAYS)
         logger.info('MARKET_JUMP_HISTORY_QUEUED %s',json.dumps(manifest))
         return dict(state='READY',universe_count=len(symbols),daily_symbols=len(daily),
@@ -148,7 +155,9 @@ class MoveResearchWorker:
             # First observations precede retries; bounded work cannot starve a new cohort.
             # Historical backlog cannot starve newly matured prospective cohorts.
             priority = self.store.state('jump_request_priority') or {}
-            selected = schedule_studies(due,requested_keys(sessions,now),bounds=priority.get('bounds',{}))
+            discovery = self.store.state('jump_discovery_priority') or {}
+            selected = schedule_studies(due,requested_keys(sessions,now),bounds=priority.get('bounds',{}),
+                discovery_bounds=discovery.get('bounds',{}))
             logger.info('MARKET_JUMP_STUDY_BATCH %s',json.dumps(dict(
                 selected=[dict(symbol=r['symbol'],session_day=r['session_day'],role=r['role'],
                                prospective=bool(r['prospective'])) for r in selected],limit=12)))
@@ -181,6 +190,12 @@ class MoveResearchWorker:
                             result['pre_move_news'] = self.provider.news_before(row['symbol'],cutoff)
                         except Exception as exc:
                             result['pre_move_news'] = {'status':'UNAVAILABLE','error_type':type(exc).__name__}
+                    if row['role']=='JUMP_CASE' and result.get('jump_path',{}).get('profile',{}).get('status')=='AVAILABLE':
+                        from market_jump_common import enrich_profile
+                        cache = self.store.state('daily_cache') or {}
+                        evidence_row = dict(row,result=result)
+                        result['jump_path']['profile'] = enrich_profile(result['jump_path']['profile'],
+                            evidence_row,cache.get('rows',{}),sessions)
                 except Exception as exc:
                     from market.research_diagnostics import error_diagnostics
                     result = dict(status='DATA_UNAVAILABLE',outcome=None,error_type=type(exc).__name__,

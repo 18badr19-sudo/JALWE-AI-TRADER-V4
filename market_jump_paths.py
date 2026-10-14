@@ -8,7 +8,7 @@ from market_move_research import NY, UP_PCT, utc, valid_bar, daily_features, _be
 
 VERSION = 'historical-jump-path-v1'
 LOOKBACK_DAYS = 30
-SCAN_VERSION = 'historical-jump-selection-v2'
+SCAN_VERSION = 'historical-jump-selection-v3'
 
 
 def candidates(symbols, daily, sessions, now):
@@ -56,7 +56,9 @@ def candidates(symbols, daily, sessions, now):
                     dollar_volume=dollars, available_after=(utc(prior['close'])+timedelta(minutes=16)).isoformat(),
                     source_feed='sip', jump_protocol=VERSION, selection='DAILY_RANGE_OR_GAP_BOUND_NOT_ORDER',
                     selection_version=SCAN_VERSION, current_dollar_volume=current_dollars,
-                    daily_screen_bound_pct=screen, daily_open=float(current['o']),
+                    daily_screen_bound_pct=screen,
+                    daily_up_bound_pct=max(0.,100*(float(current['h'])/min(float(current['o']),price)-1)),
+                    daily_open=float(current['o']),
                     daily_high=float(current['h']), prior_close=price), session
             except (ValueError, TypeError, KeyError, OverflowError):
                 continue

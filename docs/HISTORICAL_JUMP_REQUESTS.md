@@ -20,6 +20,13 @@ or event day. Research has no trading price-range filter. This includes quiet
 stocks that become active on the event day. A daily bound screens a read and
 never establishes the time-ordered jump or its cause.
 
+Explicit episodes are initially seeded without daily prices. After a successful
+daily read, a separate requested-symbol/day bound overlay supplies their current
+retrospective read priority. It does not rewrite stored episode features/results
+or apply post-session data to forward cohorts. Invalid or overflowing priority
+values cannot interrupt scheduling. The overlay is audited in
+`MARKET_JUMP_REQUEST_PRIORITY`.
+
 The worker retains its 12 observations per cycle and 15-minute interval. Due
 forward observations come first. Up to eight remaining seats serve explicit
 requests, with the rest available for general discovery; unused discovery seats

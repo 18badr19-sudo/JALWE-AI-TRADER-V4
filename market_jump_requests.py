@@ -65,7 +65,9 @@ def schedule_studies(rows, keys, limit=12, *, bounds=None, discovery_bounds=None
     """Forward observations first; up to 8 requested seats, remaining discovery.
 
     Daily range/gap bounds order reads, never prove an ordered price path.
-    First observations precede retries within each lane. No API budget increase.
+    Inputs must already pass observation_due. Reserve up to two discovery seats
+    for eligible retries when new work fills that lane, earliest expiry first.
+    Forward and explicit-request priorities and the total budget stay unchanged.
     """
     def rank(r, *, requested=False):
         bound = screen_bound(r)
@@ -86,7 +88,22 @@ def schedule_studies(rows, keys, limit=12, *, bounds=None, discovery_bounds=None
     selected = forward[:limit]
     take = min(8,max(0,limit-len(selected)))
     selected += requested[:take]
-    selected += other[:max(0,limit-len(selected))]
+    remaining = max(0,limit-len(selected))
+    retries = [r for r in other if r['status'] != 'PENDING']
+    if len(other) > remaining and retries and remaining:
+        def expiry_rank(r):
+            # Retry windows use freeze time for historical jumps and session
+            # close for other studies. Their common 48h offset preserves order.
+            anchor = (r.get('frozen_at') if r['role']=='JUMP_CASE'
+                      else r.get('session',{}).get('close'))
+            return (utc(anchor).timestamp() if anchor else float('inf'),
+                    r['attempts'], r['episode_key'])
+        reserved = sorted(retries,key=expiry_rank)[:min(2,max(1,remaining//2))]
+        reserved_keys = {r['episode_key'] for r in reserved}
+        selected += [r for r in other if r['episode_key'] not in reserved_keys][:remaining-len(reserved)]
+        selected += reserved
+    else:
+        selected += other[:remaining]
     selected += requested[take:take+max(0,limit-len(selected))]
     return selected
 

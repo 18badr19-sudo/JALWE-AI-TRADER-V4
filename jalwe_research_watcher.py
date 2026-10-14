@@ -11,6 +11,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from core.storage import data_directory
+from core.telegram_text import telegram_report_parts
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 from research_recheck import update_recheck, recheck_due
@@ -1669,23 +1670,6 @@ def build_telegram_message(
 # ============================================================
 # TELEGRAM SEND
 # ============================================================
-
-def telegram_report_parts(message: str, limit: int = 3800) -> list[str]:
-    """Telegram measures text limits in UTF-16 units; preserve all report content."""
-    parts = []
-    current = ""
-    units = 0
-    for char in message:
-        size = 2 if ord(char) > 0xFFFF else 1
-        if units + size > limit:
-            parts.append(current)
-            current, units = "", 0
-        current += char
-        units += size
-    if current:
-        parts.append(current)
-    return parts or [""]
-
 
 def send_telegram(
     message: str,

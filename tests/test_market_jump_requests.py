@@ -74,6 +74,50 @@ class RequestedJumpTests(unittest.TestCase):
         self.assertEqual([r['symbol'] for r in ordered],['OLDER_BIG','NEW_SMALL','NAN','RETRY'])
         self.assertEqual(ordered,schedule_studies(list(reversed(rows)),set()))
 
+    def test_large_pending_backlog_cannot_starve_earliest_expiring_retries(self):
+        import copy
+        pending = [self.row('NEW'+str(i),bound=1000+i) for i in range(200)]
+        retries = [dict(self.row('RETRY'+str(i),bound=2000+i,status='PARTIAL_DATA'),
+                        frozen_at=f'2026-10-1{i+1}T01:00:00Z',attempts=1) for i in range(3)]
+        rows = pending+retries
+        before = copy.deepcopy(rows)
+        selected = schedule_studies(rows,set())
+        self.assertEqual(len(selected),12)
+        self.assertEqual([r['symbol'] for r in selected[-2:]],['RETRY0','RETRY1'])
+        self.assertTrue(all(r['status']=='PENDING' for r in selected[:-2]))
+        self.assertEqual(selected,schedule_studies(list(reversed(rows)),set()))
+        self.assertEqual(rows,before)
+
+    def test_retry_reservation_preserves_forward_requests_and_total_budget(self):
+        forward = self.row('FORWARD',prospective=True)
+        requests = [self.row('REQ'+str(i)) for i in range(10)]
+        keys = {(r['symbol'],r['session_day']) for r in requests}
+        other = [self.row('NEW'+str(i)) for i in range(20)]
+        retries = [self.row('RETRY'+str(i),status='DATA_UNAVAILABLE') for i in range(3)]
+        selected = schedule_studies([forward]+requests+other+retries,keys)
+        self.assertIs(selected[0],forward)
+        self.assertEqual(sum((r['symbol'],r['session_day']) in keys for r in selected),8)
+        self.assertEqual(sum(r['status']=='DATA_UNAVAILABLE' for r in selected),1)
+        self.assertEqual(sum(r['symbol'].startswith('NEW') for r in selected),2)
+        self.assertEqual(len({r['episode_key'] for r in selected}),12)
+        self.assertEqual(schedule_studies(other+retries,set(),limit=0),[])
+
+    def test_retry_seats_cannot_bypass_due_time_expiry_or_attempt_limits(self):
+        from market_move_diagnostics import observation_due, VERSION as DIAGNOSTIC_VERSION
+        pending = [self.row('NEW'+str(i)) for i in range(20)]
+        base = dict(self.row('RETRY',status='PARTIAL_DATA'),session=fixtures.session(),
+                    frozen_at=(self.now-timedelta(hours=1)).isoformat(),
+                    checked_at=(self.now-timedelta(minutes=16)).isoformat(),attempts=1,
+                    result={'diagnostic_version':DIAGNOSTIC_VERSION})
+        invalid = [dict(base,symbol='EXPIRED',episode_key='expired',
+                        frozen_at=(self.now-timedelta(hours=49)).isoformat()),
+                   dict(base,symbol='LIMIT',episode_key='limit',attempts=3),
+                   dict(base,symbol='EARLY',episode_key='early',checked_at=self.now.isoformat())]
+        due = pending+[r for r in [base]+invalid if observation_due(r,self.now)]
+        selected = schedule_studies(due,set())
+        self.assertIn(base,selected)
+        self.assertFalse(any(r in selected for r in invalid))
+
     def test_daily_overlay_prioritizes_quiet_requested_jump_without_rewriting_store(self):
         queue_requested(self.store,self.sessions,self.now)
         before = self.store.episodes()

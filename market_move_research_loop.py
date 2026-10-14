@@ -152,15 +152,18 @@ class MoveResearchWorker:
             health = self.prepare(now,sessions,symbols['symbols'],
                                   clock=None if supplied_now else lambda: datetime.now(timezone.utc))
             due = [r for r in self.store.episodes() if observation_due(r, now)]
-            # First observations precede retries; bounded work cannot starve a new cohort.
-            # Historical backlog cannot starve newly matured prospective cohorts.
+            # Prospective cohorts remain first; bounded historical retry seats
+            # prevent an endless new-case backlog consuming their retry window.
             priority = self.store.state('jump_request_priority') or {}
             discovery = self.store.state('jump_discovery_priority') or {}
             selected = schedule_studies(due,requested_keys(sessions,now),bounds=priority.get('bounds',{}),
                 discovery_bounds=discovery.get('bounds',{}))
             logger.info('MARKET_JUMP_STUDY_BATCH %s',json.dumps(dict(
                 selected=[dict(symbol=r['symbol'],session_day=r['session_day'],role=r['role'],
-                               prospective=bool(r['prospective'])) for r in selected],limit=12)))
+                               prospective=bool(r['prospective']),status=r['status'],
+                               attempts=r['attempts']) for r in selected],limit=12,
+                eligible_retries=sum(r['status']!='PENDING' for r in due),
+                selected_retries=sum(r['status']!='PENDING' for r in selected))))
             # Decode the full-universe cache once per batch. Optional daily
             # enrichment cannot invalidate an already measured minute path.
             try:

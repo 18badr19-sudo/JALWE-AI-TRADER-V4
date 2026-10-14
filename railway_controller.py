@@ -2506,6 +2506,7 @@ def no_trade_diagnostics_text() -> str:
             )
 
         for row in rows:
+            from core.decision_diagnostics import saudi_time, decision_details
             payload = {}
 
             try:
@@ -2589,7 +2590,7 @@ def no_trade_diagnostics_text() -> str:
 
             lines.append(
                 f"• {symbol} | {state} | "
-                f"{score_text} | {row['created_at']}"
+                f"{score_text} | {saudi_time(row['created_at'])}"
             )
 
             if reason:
@@ -2602,6 +2603,8 @@ def no_trade_diagnostics_text() -> str:
                 lines.append(
                     f"  السبب: {reason}"
                 )
+
+            lines.extend(decision_details(jalwe_data))
 
     except Exception as exc:
         lines.extend(

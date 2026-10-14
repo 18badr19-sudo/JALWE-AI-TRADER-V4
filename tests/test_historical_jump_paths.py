@@ -65,6 +65,50 @@ class JumpPathTests(unittest.TestCase):
         self.assertFalse(result['strong_jump'])
         self.assertEqual(result['start_price_source'],'SEGMENT_OPEN')
 
+    def test_jump_report_context_precedes_onset_not_later_opening_barrier(self):
+        import copy
+        now = utc('2026-10-13T18:00:00Z')
+        s = fixtures.session()
+        data = fixtures.frame()
+        data.iloc[35:40,4] = 500.
+        data.iloc[40] = [10.,10.,8.,9.,200.]
+        data.iloc[70] = [10.,15.,9.9,12.,900.]
+        result = observe_session(data,s)
+        result['jump_path'] = jump_path(data,s,full_session_complete=True)
+        onset = result['jump_path']['start_at']
+        self.assertLess(utc(onset),utc(result['up_at']))
+        self.assertEqual(result['jump_path']['pre_jump_context']['volume_acceleration'],5.)
+        self.assertEqual(result['pre_move_context']['volume_acceleration'],1.)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MoveStore(Path(tmp)/'moves.db')
+            store.add(fixtures.feature(),s,'JUMP_CASE','jump',now,prospective=False)
+            store.settle(store.episodes()[0]['episode_key'],result,now)
+            store.publish(now,dict(state='READY',completed_session=s['date']))
+            packet = read_packet(path=store.path,now=now)
+            text = report_text(packet)
+            label = 'قبل بداية القفزة المرصودة 20 دقيقة'
+            context_line = next(line for line in text.splitlines() if label in line)
+            self.assertIn('5.00x',context_line)
+            # An unavailable onset context must never fall back to post-onset bars.
+            missing = copy.deepcopy(packet)
+            missing['cases'][0]['result']['jump_path']['pre_jump_context'] = {
+                'status':'UNAVAILABLE_LESS_THAN_20M','bars':10}
+            self.assertNotIn(label,report_text(missing))
+            self.assertNotIn('قبل الحركة 20 دقيقة',report_text(missing))
+            partial = copy.deepcopy(packet)
+            partial['cases'][0]['result']['jump_path']['status'] = 'OBSERVED_SEGMENT'
+            partial['cases'][0]['result'].update(status='PARTIAL_DATA',outcome=None,missing_minutes=1)
+            partial_text = report_text(partial)
+            self.assertIn(label,partial_text)
+            self.assertIn('جزء متصل فقط',partial_text)
+            self.assertEqual(partial['comparison']['complete_pairs'],0)
+            # Non-jump studies retain their original opening-barrier context.
+            original = copy.deepcopy(packet)
+            original['cases'][0]['role'] = 'HOT_CASE'
+            original['cases'][0]['result'].pop('jump_path')
+            old_line = next(line for line in report_text(original).splitlines() if 'قبل الحركة 20 دقيقة' in line)
+            self.assertIn('1.00x',old_line)
+
     def test_nonfinite_aggregate_cannot_be_published_as_valid_path(self):
         data = fixtures.frame()
         data.iloc[20,1] = 15.

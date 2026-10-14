@@ -573,9 +573,13 @@ def report_text(packet):
             lines.append(f"  حجم المرحلة {path['phase_volume']:,.0f} سهم؛ مسار {len(path['trajectory'])} شمعة دقيقة محفوظ. البداية تقديرية وترتيب الحركة داخل الدقيقة غير معلوم.")
         if result.get('status') == 'COMPLETE':
             lines.append(f"  أعلى حركة من الافتتاح {result['observed_mfe_pct']:+.2f}% | أدنى حركة {result['observed_mae_pct']:+.2f}%")
-        context = result.get('pre_move_context', {})
+        historical_jump = c['role'] == 'JUMP_CASE'
+        # The opening +8% crossing can occur after a retrospective jump began.
+        # Never present that later context as evidence before the jump's onset.
+        context = path.get('pre_jump_context', {}) if historical_jump else result.get('pre_move_context', {})
         if context.get('status') == 'COMPLETE':
-            lines.append(f"  قبل الحركة 20 دقيقة: تغير {context['return_pct']:+.2f}% | تسارع حجم {context['volume_acceleration']:.2f}x | فوق VWAP: {'نعم' if context['close_above_vwap'] else 'لا'}")
+            context_label = 'قبل بداية القفزة المرصودة 20 دقيقة' if historical_jump else 'قبل الحركة 20 دقيقة'
+            lines.append(f"  {context_label}: تغير {context['return_pct']:+.2f}% | تسارع حجم {context['volume_acceleration']:.2f}x | فوق VWAP: {'نعم' if context['close_above_vwap'] else 'لا'}")
         news = result.get('pre_move_news', {})
         if news.get('status') == 'AVAILABLE':
             keywords = sorted({k for a in news.get('articles', []) for k in a.get('keywords', [])})

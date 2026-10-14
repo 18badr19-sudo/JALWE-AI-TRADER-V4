@@ -19,6 +19,10 @@ minutes break the path into separate contiguous segments; partial segments do
 not establish the session's overall peak. Stored paths include timestamps,
 prices, phase volume and the twenty contiguous minutes before the estimated
 onset when available. News reads for complete jump studies end at that onset.
+The historical jump report uses this onset context, not the separate twenty
+minutes before the opening-price +8% barrier. That barrier may be reached after
+the jump began. If onset context is unavailable, the report never substitutes
+later barrier context; observed-segment context remains a partial description.
 
 All candidates are durably queued, with no top-five cap. At most twelve episodes
 are observed per worker cycle, prospective cohorts first and then newer history.

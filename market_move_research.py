@@ -568,6 +568,22 @@ def report_text(packet):
         lines.append(f"🧠 ذاكرة عوامل القفزات: {profiles['completed_profiles']} مكتملة | {profiles['partial_profiles']} جزئية منفصلة")
         for factor in profiles.get('factors',[]):
             lines.append(f"  {FACTORS[factor['code']]}: ظهر في {factor['present']} من {factor['known']} بسياق معروف | مجهول {factor['unknown']}")
+        common = profiles.get('common_factors',{})
+        if common:
+            from market_jump_common import FACTORS as DAILY_FACTORS
+            labels = dict(FACTORS,**DAILY_FACTORS)
+            for f in common['all_jumps']['factors']:
+                if f['codes'][0] in DAILY_FACTORS:
+                    lines.append(f"  {labels[f['codes'][0]]}: {f['present']}/{f['known']} معروف | مجهول {f['unknown']}")
+            groups = common['large_jump_groups']
+            lines.append('قفزات مكتملة ≥25/50/100%: '+'/'.join(str(g['cases']) for g in groups)+'؛ مجموعات متداخلة، وعتبات بحثية.')
+            large = groups[0]
+            shared = large['prominent_cooccurrences']
+            for f in shared:
+                lines.append('  اجتماع '+ ' + '.join(labels[c] for c in f['codes'])+
+                    f": {f['present']}/{f['known']} معروف في قفزات ≥25% | مجهول {f['unknown']}")
+            if not shared:
+                lines.append('العوامل المشتركة للقفزات ≥25%: لم تتوفر حالات معلومة كافية بعد.')
         lines.append('وصف لعينات مختارة بعد الحركة؛ لا توجد مجموعة ضابطة أو أفضلية تنبؤية مثبتة، ولا تطبيق تلقائي على التداول.')
     if strongest:
         lines.append('🏔 أكبر المسارات المثبتة بالدقيقة في الدراسات المكتملة فقط — ليس ترتيب السوق كله:')

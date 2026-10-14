@@ -2,7 +2,7 @@
 from itertools import combinations
 import copy
 
-from market_move_research import daily_features, utc, NY
+from market_move_research import daily_features, utc, valid_bar, NY
 
 PROTOCOL = 'historical-jump-common-factors-v1'
 FACTORS = {'PRIOR_DAY_VOLUME':'حجم اليوم السابق ≥2×',
@@ -28,7 +28,8 @@ def enrich_profile(profile, row, daily, sessions):
         prior, older = sessions[target-1], sessions[target-2]
         bars = [b for b in daily.get(row['symbol'],[]) if
                 utc(b['t']).astimezone(NY).date().isoformat() in {prior['date'],older['date']}]
-        if any(type(b.get(k)) not in (float,int) for b in bars for k in ('o','h','l','c','v')):
+        if (any(type(b.get(k)) not in (float,int) for b in bars for k in ('o','h','l','c','v'))
+                or any(not valid_bar(b) for b in bars)):
             raise ValueError('INVALID_NUMERIC_EVIDENCE')
         evidence = daily_features(row['symbol'],bars,prior,older)
         onset = utc(row['result']['jump_path']['start_at'])
@@ -42,7 +43,7 @@ def enrich_profile(profile, row, daily, sessions):
             comparison_day=older['date'],available_after=evidence['available_after'],
             cutoff=cutoff.isoformat(),volume_ratio_previous_day=evidence['volume_ratio_previous_day'],
             daily_return_pct=evidence['daily_return_pct'],range_pct=evidence['range_pct'])
-    except (ValueError,TypeError,KeyError,StopIteration,OverflowError):
+    except (ValueError,TypeError,KeyError,AttributeError,IndexError,StopIteration,OverflowError):
         pass
     tests = {'PRIOR_DAY_VOLUME':('volume_ratio_previous_day',2.),
              'PRIOR_DAY_MOMENTUM':('daily_return_pct',3.), 'PRIOR_DAY_RANGE':('range_pct',8.)}

@@ -2,12 +2,14 @@ import copy
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import Mock, patch
 
 from market_jump_common import enrich_profile, summarize_common, PROTOCOL
-from market_jump_profiles import FACTORS, upgrade_saved_profiles, summarize_profiles
+from market_jump_profiles import FACTORS, build_profile, upgrade_saved_profiles, summarize_profiles
 from market_jump_requests import schedule_studies
 from market_jump_paths import candidates
 from market_move_research import MoveStore, observe_session, utc, report_text, read_packet
+from market_move_research_loop import MoveResearchWorker
 import test_market_jump_profiles as profile_fixtures
 import test_market_jump_requests as request_fixtures
 import test_market_move_research as fixtures
@@ -129,6 +131,90 @@ class CommonJumpTests(unittest.TestCase):
         self.assertEqual(result['common_protocol'],PROTOCOL)
         self.assertEqual(result['status'],'UNAVAILABLE')
         self.assertNotIn('prior_day_factors',result)
+
+    def test_missing_daily_context_recovers_later_without_replacing_known_evidence(self):
+        now=utc('2026-10-14T09:00:00Z'); data,path=profile_fixtures.JumpProfileTests().evidence()
+        with tempfile.TemporaryDirectory() as tmp:
+            store=MoveStore(Path(tmp)/'move.db')
+            store.state('jump_session_calendar',dict(sessions=self.sessions))
+            store.add(fixtures.feature('TEST'),fixtures.session(),'JUMP_CASE','TEST',now,prospective=False)
+            row=store.episodes()[0]; result=observe_session(data,fixtures.session()); result['jump_path']=path
+            store.settle(row['episode_key'],result,now)
+            self.assertEqual(upgrade_saved_profiles(store,now)['upgraded'],1)
+            original=store.episodes()[0]
+            self.assertEqual(original['result']['jump_path']['profile']['prior_day_context']['status'],'UNAVAILABLE')
+            self.assertEqual(upgrade_saved_profiles(store,now)['upgraded'],0)
+            store.state('daily_cache',dict(rows=self.daily))
+            self.assertEqual(upgrade_saved_profiles(store,now)['upgraded'],1)
+            after=store.episodes()[0]
+            self.assertEqual(after['result']['jump_path']['profile']['prior_day_context']['status'],'AVAILABLE')
+            for key in ('status','attempts','checked_at','frozen_at','features_json'):
+                self.assertEqual(after[key],original[key])
+            for key in path['profile']:
+                self.assertEqual(after['result']['jump_path']['profile'][key],path['profile'][key])
+            changed=copy.deepcopy(self.daily); changed['TEST'][1]['v']=1
+            store.state('daily_cache',dict(rows=changed))
+            self.assertEqual(upgrade_saved_profiles(store,now)['upgraded'],0)
+            self.assertEqual(store.episodes()[0],after)
+
+    def test_invalid_duplicate_bar_does_not_leave_a_spurious_known_context(self):
+        daily=copy.deepcopy(self.daily)
+        corrupt=dict(daily['TEST'][1],v=float('nan'))
+        daily['TEST'].append(corrupt)
+        result=self.enrich(daily=daily)
+        self.assertEqual(result['prior_day_context']['status'],'UNAVAILABLE')
+        self.assertTrue(all(f['state']=='UNKNOWN' for f in result['prior_day_factors']))
+        self.assertEqual(self.enrich(daily=None)['prior_day_context']['status'],'AVAILABLE')
+        self.assertEqual(enrich_profile(self.row['result']['jump_path']['profile'],self.row,None,
+                                       self.sessions)['prior_day_context']['status'],'UNAVAILABLE')
+
+    def test_available_context_recovery_obeys_shared_write_budget_and_is_idempotent(self):
+        now=utc('2026-10-14T09:00:00Z'); data,path=profile_fixtures.JumpProfileTests().evidence()
+        with tempfile.TemporaryDirectory() as tmp:
+            store=MoveStore(Path(tmp)/'move.db')
+            store.state('jump_session_calendar',dict(sessions=self.sessions))
+            for symbol in ('ONE','TWO'):
+                store.add(fixtures.feature(symbol),fixtures.session(),'JUMP_CASE',symbol,now,prospective=False)
+                row=next(r for r in store.episodes() if r['symbol']==symbol)
+                result=observe_session(data,fixtures.session()); result['jump_path']=copy.deepcopy(path)
+                store.settle(row['episode_key'],result,now)
+            self.assertEqual(upgrade_saved_profiles(store,now)['upgraded'],2)
+            store.state('daily_cache',dict(rows={s:self.daily['TEST'] for s in ('ONE','TWO')}))
+            self.assertEqual(upgrade_saved_profiles(store,now,limit=1),dict(upgraded=1,pending=1,provider_reads=0))
+            self.assertEqual(upgrade_saved_profiles(store,now,limit=1),dict(upgraded=1,pending=0,provider_reads=0))
+            self.assertEqual(upgrade_saved_profiles(store,now)['upgraded'],0)
+
+    def test_optional_context_failure_preserves_completed_price_observations(self):
+        now=utc('2026-10-14T09:00:00Z')
+        calendar=[fixtures.session(d) for d in
+                  ('2026-10-02','2026-10-05','2026-10-06','2026-10-07','2026-10-08','2026-10-09',
+                   '2026-10-12','2026-10-13','2026-10-14')]
+        provider=Mock(); provider.calendar.return_value=calendar; provider.assets.return_value=['TEST']
+        provider.daily.side_effect=RuntimeError('temporary daily outage')
+        provider.intraday.side_effect=lambda symbol,s,now:fixtures.frame(s)
+        provider.news_before.return_value=dict(status='AVAILABLE',articles=[])
+        with tempfile.TemporaryDirectory() as tmp, patch('market_jump_common.enrich_profile',side_effect=RuntimeError('auxiliary failure')):
+            store=MoveStore(Path(tmp)/'move.db')
+            packet=MoveResearchWorker(store,provider).cycle(now)
+            self.assertEqual(packet['requested_jumps']['counts'],dict(COMPLETE=12,PENDING=18))
+            self.assertTrue(all(r['result'].get('jump_path',{}).get('status')=='COMPLETE'
+                                for r in store.episodes() if r['status']=='COMPLETE'))
+            self.assertEqual(packet['comparison']['complete_pairs'],0)
+
+    def test_legacy_path_rebuild_is_bounded_before_computation_not_just_before_writes(self):
+        now=utc('2026-10-14T09:00:00Z'); data,path=profile_fixtures.JumpProfileTests().evidence()
+        path.pop('profile')
+        with tempfile.TemporaryDirectory() as tmp:
+            store=MoveStore(Path(tmp)/'move.db')
+            for symbol in ('ONE','TWO','THREE'):
+                store.add(fixtures.feature(symbol),fixtures.session(),'JUMP_CASE',symbol,now,prospective=False)
+                row=next(r for r in store.episodes() if r['symbol']==symbol)
+                result=observe_session(data,fixtures.session()); result['jump_path']=copy.deepcopy(path)
+                store.settle(row['episode_key'],result,now)
+            with patch('market_jump_profiles.build_profile',wraps=build_profile) as rebuild:
+                stats=upgrade_saved_profiles(store,now,limit=1)
+                self.assertEqual(stats,dict(upgraded=1,pending=2,provider_reads=0))
+                self.assertEqual(rebuild.call_count,1)
 
 
 if __name__=='__main__':

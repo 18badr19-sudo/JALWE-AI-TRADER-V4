@@ -321,7 +321,7 @@ class TradeManager:
           ↓
         Partial exit
           ↓
-        Stop -> T1
+        Stop -> Entry
           ↓
         T2
           ↓

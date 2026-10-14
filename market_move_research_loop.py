@@ -161,6 +161,13 @@ class MoveResearchWorker:
             logger.info('MARKET_JUMP_STUDY_BATCH %s',json.dumps(dict(
                 selected=[dict(symbol=r['symbol'],session_day=r['session_day'],role=r['role'],
                                prospective=bool(r['prospective'])) for r in selected],limit=12)))
+            # Decode the full-universe cache once per batch. Optional daily
+            # enrichment cannot invalidate an already measured minute path.
+            try:
+                profile_daily = (self.store.state('daily_cache') or {}).get('rows',{})
+            except Exception as exc:
+                profile_daily = {}
+                logger.warning('MARKET_JUMP_CONTEXT_UNAVAILABLE %s',type(exc).__name__)
             frames, samples = {}, {}
             for row in selected:
                 try:
@@ -192,10 +199,12 @@ class MoveResearchWorker:
                             result['pre_move_news'] = {'status':'UNAVAILABLE','error_type':type(exc).__name__}
                     if row['role']=='JUMP_CASE' and result.get('jump_path',{}).get('profile',{}).get('status')=='AVAILABLE':
                         from market_jump_common import enrich_profile
-                        cache = self.store.state('daily_cache') or {}
                         evidence_row = dict(row,result=result)
-                        result['jump_path']['profile'] = enrich_profile(result['jump_path']['profile'],
-                            evidence_row,cache.get('rows',{}),sessions)
+                        try:
+                            result['jump_path']['profile'] = enrich_profile(result['jump_path']['profile'],
+                                evidence_row,profile_daily,sessions)
+                        except Exception as exc:
+                            logger.warning('MARKET_JUMP_CONTEXT_UNAVAILABLE %s',type(exc).__name__)
                 except Exception as exc:
                     from market.research_diagnostics import error_diagnostics
                     result = dict(status='DATA_UNAVAILABLE',outcome=None,error_type=type(exc).__name__,

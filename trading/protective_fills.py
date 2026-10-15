@@ -3,7 +3,7 @@ import math
 from datetime import datetime, timezone
 
 from core.models import OrderStatus
-from broker.order_evidence import whole_shares
+from broker.order_evidence import whole_shares, validate_order_snapshot
 from trading.trade_manager import TradeStage
 
 CANCELED_STATUSES = {'canceled', 'cancelled', 'expired'}
@@ -20,14 +20,6 @@ def apply_protective_stop_snapshot(database, trade_id, trade, raw):
     order_id = str(metadata.get('protective_stop_order_id') or '').strip()
     if not order_id:
         raise ValueError('Protective stop has no persisted broker identity.')
-    raw_id = str(getattr(raw, 'id', '') or '')
-    raw_symbol = str(getattr(raw, 'symbol', '') or '').strip().upper()
-    raw_side = getattr(raw, 'side', '')
-    raw_side = str(getattr(raw_side, 'value', raw_side) or '').lower()
-    if ((raw_id and raw_id != order_id) or
-            (raw_symbol and raw_symbol != trade.symbol) or
-            (raw_side and raw_side != 'sell')):
-        raise ValueError('Protective stop snapshot identity does not match the managed trade.')
     raw_status = getattr(raw, 'status', '')
     raw_status = str(getattr(raw_status, 'value', raw_status) or '').lower()
     filled = _quantity(getattr(raw, 'filled_qty', 0))
@@ -38,8 +30,12 @@ def apply_protective_stop_snapshot(database, trade_id, trade, raw):
     if requested is not None and filled > _quantity(requested):
         raise ValueError('Protective stop cumulative fill exceeds requested quantity.')
     expected = _quantity(requested) if requested is not None else previous + int(trade.remaining_quantity)
-    if raw_status == 'filled' and filled != expected:
-        raise ValueError('Protective stop FILLED status lacks the full confirmed quantity.')
+    # Validate all supplied identity and fill fields before changing protection,
+    # quantities or persisted proceeds, including terminal zero-fill responses.
+    evidence = validate_order_snapshot(
+        raw, symbol=trade.symbol, side='sell', quantity=expected, order_id=order_id,
+        client_order_id=metadata.get('protective_stop_client_order_id'),
+    )
     new_qty = filled - previous
     status = (OrderStatus.FILLED if raw_status == 'filled' else
               OrderStatus.CANCELED if raw_status in CANCELED_STATUSES else
@@ -47,8 +43,7 @@ def apply_protective_stop_snapshot(database, trade_id, trade, raw):
               OrderStatus.PARTIALLY_FILLED if raw_status == 'partially_filled' else
               OrderStatus.ACCEPTED)
     active = raw_status not in TERMINAL_STATUSES
-    average = getattr(raw, 'filled_avg_price', None)
-    average = float(average) if average is not None else None
+    average = evidence['filled_price']
     realized = 0.0
     incremental_price = None
     if new_qty:

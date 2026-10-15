@@ -330,12 +330,15 @@ class RestartAndProtectiveStopSafetyTests(
             get_order=Mock(
                 side_effect=[
                     SimpleNamespace(
+                        id="OLD-CANE-STOP",
                         status="new"
                     ),
                     SimpleNamespace(
+                        id="OLD-CANE-STOP",
                         status="new"
                     ),
                     SimpleNamespace(
+                        id="OLD-CANE-STOP",
                         status="canceled"
                     ),
                 ]

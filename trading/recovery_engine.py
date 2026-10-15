@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import copy
 import json
 import math
 import time
@@ -760,15 +761,26 @@ class RecoveryEngine:
             if str(getattr(raw, 'client_order_id', '')) != metadata['protective_stop_client_order_id']:
                 raise RuntimeError('Recovered stop client identity mismatch.')
             side = self._value(getattr(raw, 'side', '')).lower()
-            if self._normalize_symbol(getattr(raw, 'symbol', '')) != trade.symbol or side != 'sell' or self._safe_int(getattr(raw, 'qty', 0)) != int(metadata['protective_stop_quantity']):
+            evidence = validate_order_snapshot(
+                raw, symbol=trade.symbol, side='sell',
+                quantity=metadata['protective_stop_quantity'],
+                client_order_id=metadata['protective_stop_client_order_id'],
+            )
+            if (self._normalize_symbol(getattr(raw, 'symbol', '')) != trade.symbol
+                    or side != 'sell' or getattr(raw, 'qty', None) is None):
                 raise RuntimeError('Recovered protective stop does not match its persisted intent.')
-            order_id = str(getattr(raw, 'id', '') or '')
+            order_id = evidence['order_id']
             if not order_id:
                 raise RuntimeError('Recovered protective stop has no order ID.')
             metadata['protective_stop_order_id'] = order_id
             metadata['protective_stop_submission_uncertain'] = False
-            trade.metadata = metadata
-            database.save_managed_trade(trade_id, trade)
+            # Keep the live object and persisted uncertainty unchanged until all
+            # cumulative-fill checks pass and the snapshot is committed.
+            candidate = copy.deepcopy(trade)
+            candidate.metadata = metadata
+            result = apply_protective_stop_snapshot(database, trade_id, candidate, raw)
+            trade.__dict__.update(candidate.__dict__)
+            return result
         elif order_id:
             raw = self._broker_read_with_retry(
                 lambda: self.broker.get_order(order_id),

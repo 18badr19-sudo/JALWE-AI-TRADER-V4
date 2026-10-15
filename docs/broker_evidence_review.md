@@ -68,3 +68,24 @@ remain separate limitations.
 Primary references:
 - https://docs.alpaca.markets/us/docs/orders-at-alpaca#order-lifecycle
 - https://alpaca.markets/sdks/python/api_reference/trading/models.html
+
+## Protective-stop follow-up review (2026-10-15)
+
+The ordinary order validator was not consistently used by the protective-stop
+snapshot path. A missing broker ID, contradictory requested quantity or client
+ID, or a boolean fill price could still update protection and local quantities.
+Uncertain stop recovery also truncated requested quantities and persisted the
+recovered identity before checking cumulative fills and proceeds.
+
+Four regression tests reproduce invalid snapshots and recovery accounting,
+and verify that a valid recovered partial fill is applied exactly once. Before
+the repair, the first two tests failed in eight subcases. Protective snapshots
+now use the shared identity/quantity/price validator. Uncertain recovery checks
+and commits a staged trade snapshot before replacing the in-memory state, so a
+validation failure preserves the original unresolved intent. Two old fixtures
+now supply the broker ID that real Alpaca order responses provide.
+
+These are controlled-response defects; the inspected runtime logs do not prove
+that they occurred in production. Runtime GitHub review credentials, extended
+session quote entitlement, and research missing-minute coverage are separate
+configuration/data limitations and are not repaired by this change.

@@ -117,7 +117,7 @@ class ReviewRegressionTests(unittest.TestCase):
         manager = TradeManager()
         trade = manager.create_trade('TEST', 10, 10, 9, 11, 12, 13)
         trade.metadata['protective_stop_order_id'] = 'stop-1'
-        raw = SimpleNamespace(status='partially_filled', filled_qty='2', filled_avg_price='9', filled_at=None)
+        raw = SimpleNamespace(id='stop-1', status='partially_filled', filled_qty='2', filled_avg_price='9', filled_at=None)
         recovery = RecoveryEngine.__new__(RecoveryEngine)
         recovery.broker = SimpleNamespace(get_order=Mock(return_value=raw))
         with patch('trading.recovery_engine.database') as db:

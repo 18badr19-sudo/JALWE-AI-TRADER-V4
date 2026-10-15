@@ -744,10 +744,10 @@ class ExternalResearchBridge:
                 created = created.replace(tzinfo=UTC)
             else:
                 created = created.astimezone(UTC)
-            return max(
-                0.0,
-                (utc_now() - created).total_seconds() / 60.0,
-            )
+            age_seconds = (utc_now() - created).total_seconds()
+            if age_seconds < -5:
+                return None
+            return max(0.0, age_seconds / 60.0)
         except Exception:
             return None
 

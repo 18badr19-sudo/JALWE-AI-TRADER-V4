@@ -5,6 +5,7 @@ import time
 from datetime import datetime
 from typing import Any, Optional
 
+from broker.order_evidence import map_order_status, validate_order_snapshot
 from broker.alpaca_client import get_alpaca_client
 from core.models import (
     BrokerOrder,
@@ -119,59 +120,8 @@ class ReconciliationEngine:
     # ========================================================
 
     @staticmethod
-    def _map_status(
-        broker_status: Any,
-    ) -> OrderStatus:
-
-        raw = getattr(
-            broker_status,
-            "value",
-            broker_status,
-        )
-
-        value = str(
-            raw or ""
-        ).strip().lower()
-
-        if value == "filled":
-            return OrderStatus.FILLED
-
-        if value == "partially_filled":
-            return (
-                OrderStatus.PARTIALLY_FILLED
-            )
-
-        if value in {
-            "accepted",
-            "pending_new",
-            "accepted_for_bidding",
-        }:
-            return OrderStatus.ACCEPTED
-
-        if value in {
-            "new",
-            "pending_replace",
-            "pending_cancel",
-        }:
-            return OrderStatus.SUBMITTED
-
-        if value in {
-            "canceled",
-            "cancelled",
-            "expired",
-            "done_for_day",
-            "replaced",
-        }:
-            return OrderStatus.CANCELED
-
-        if value in {
-            "rejected",
-            "suspended",
-            "stopped",
-        }:
-            return OrderStatus.REJECTED
-
-        return OrderStatus.SUBMITTED
+    def _map_status(broker_status: Any) -> OrderStatus:
+        return map_order_status(broker_status)
 
     # ========================================================
     # ORDER RECONCILIATION
@@ -209,6 +159,11 @@ class ReconciliationEngine:
                 "Unable to retrieve broker order."
             ) from exc
 
+        evidence = validate_order_snapshot(
+            broker_order, symbol=order.symbol, side=order.side, quantity=order.quantity,
+            order_id=order.order_id, client_order_id=order.client_order_id,
+        )
+
         raw_status = getattr(
             broker_order,
             "status",
@@ -219,21 +174,8 @@ class ReconciliationEngine:
             raw_status
         )
 
-        filled_quantity = self._safe_int(
-            getattr(
-                broker_order,
-                "filled_qty",
-                0,
-            )
-        )
-
-        filled_price = self._safe_float(
-            getattr(
-                broker_order,
-                "filled_avg_price",
-                None,
-            )
-        )
+        filled_quantity = evidence['filled_quantity']
+        filled_price = evidence['filled_price']
 
         filled_at = self._safe_datetime(
             getattr(

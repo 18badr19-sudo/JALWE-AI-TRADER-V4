@@ -3,6 +3,7 @@ import math
 from datetime import datetime, timezone
 
 from core.models import OrderStatus
+from broker.order_evidence import whole_shares
 from trading.trade_manager import TradeStage
 
 CANCELED_STATUSES = {'canceled', 'cancelled', 'expired'}
@@ -11,10 +12,7 @@ TERMINAL_STATUSES = CANCELED_STATUSES | REJECTED_STATUSES | {'filled'}
 
 
 def _quantity(value):
-    number = float(value or 0)
-    if not math.isfinite(number) or number < 0 or not number.is_integer():
-        raise ValueError('Protective stop fill quantity must be finite, nonnegative whole shares.')
-    return int(number)
+    return whole_shares(0 if value is None else value, allow_zero=True)
 
 
 def apply_protective_stop_snapshot(database, trade_id, trade, raw):
@@ -39,6 +37,9 @@ def apply_protective_stop_snapshot(database, trade_id, trade, raw):
     requested = metadata.get('protective_stop_quantity')
     if requested is not None and filled > _quantity(requested):
         raise ValueError('Protective stop cumulative fill exceeds requested quantity.')
+    expected = _quantity(requested) if requested is not None else previous + int(trade.remaining_quantity)
+    if raw_status == 'filled' and filled != expected:
+        raise ValueError('Protective stop FILLED status lacks the full confirmed quantity.')
     new_qty = filled - previous
     status = (OrderStatus.FILLED if raw_status == 'filled' else
               OrderStatus.CANCELED if raw_status in CANCELED_STATUSES else

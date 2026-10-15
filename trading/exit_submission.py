@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from core.models import BrokerOrder, OrderStatus, TradeSide
+from broker.order_evidence import validate_order_snapshot
 from trading.trade_manager import TradeAction, TradeManagementDecision
 
 
@@ -59,9 +60,13 @@ def recover_exit_submission(database, trade_id, trade, broker, manager):
         database.save_managed_trade(trade_id, trade)
         return
     raw = broker.get_order_by_client_id(intent['client_order_id'])
+    evidence = validate_order_snapshot(
+        raw, symbol=trade.symbol, side=TradeSide.SELL, quantity=intent['quantity'],
+        client_order_id=intent['client_order_id'],
+    )
     symbol = str(getattr(raw, 'symbol', '')).upper()
     side = str(getattr(getattr(raw, 'side', ''), 'value', getattr(raw, 'side', ''))).lower()
-    qty = int(float(getattr(raw, 'qty', 0)))
+    qty = evidence['quantity']
     if symbol != trade.symbol or side != 'sell' or qty != int(intent['quantity']):
         raise RuntimeError('Recovered exit does not match the persisted intent.')
     if str(getattr(raw, 'client_order_id', '')) != intent['client_order_id']:

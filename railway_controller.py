@@ -553,11 +553,26 @@ def code_review_ui():
 
 
 def poll_code_review_requests():
+    ui = None
     try:
-        code_review_ui().poll(send_message)
+        ui = code_review_ui()
+        ui.poll(send_message)
     except Exception as exc:
-        # Only exception type; URLs/headers may carry service credentials.
-        logging.getLogger(__name__).warning('CODE_OWNER_REVIEW_POLL_UNAVAILABLE %s',type(exc).__name__)
+        # Never log exception text, URLs, bodies or credentials. Numeric HTTP
+        # status and quota exhaustion distinguish configuration from transport.
+        status = getattr(exc, 'code', None)
+        status = status if type(status) is int and 100 <= status <= 599 else None
+        headers = getattr(exc, 'headers', None)
+        remaining = headers.get('X-RateLimit-Remaining') if isinstance(headers, dict) or hasattr(headers, 'get') else None
+        category = ('RATE_LIMIT' if status == 429 or (status == 403 and remaining == '0') else
+                    'AUTHENTICATION' if status == 401 else
+                    'FORBIDDEN' if status == 403 else
+                    'NOT_FOUND' if status == 404 else
+                    'UPSTREAM' if status is not None and status >= 500 else 'UNAVAILABLE')
+        configured = bool(getattr(getattr(ui, 'api', None), 'token', None))
+        logging.getLogger(__name__).warning(
+            'CODE_OWNER_REVIEW_POLL_UNAVAILABLE %s http_status=%s category=%s credential_configured=%s',
+            type(exc).__name__, status, category, configured)
 
 
 # ============================================================

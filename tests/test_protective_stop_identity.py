@@ -38,7 +38,7 @@ class ProtectiveStopIdentityTests(unittest.TestCase):
                 db.record_strategy_pnl_event.assert_not_called()
 
     def test_invalid_recovered_stop_is_not_persisted_as_resolved(self):
-        for changes in (dict(qty='5.5'), dict(status='filled', filled_qty='2'),
+        for changes in (dict(qty='5.5'), dict(qty=None), dict(status='filled', filled_qty='2'),
                         dict(filled_avg_price='NaN')):
             with self.subTest(changes=changes):
                 trade = self.trade(uncertain=True); before = copy.deepcopy(trade)

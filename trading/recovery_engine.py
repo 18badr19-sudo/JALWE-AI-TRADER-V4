@@ -766,7 +766,8 @@ class RecoveryEngine:
                 quantity=metadata['protective_stop_quantity'],
                 client_order_id=metadata['protective_stop_client_order_id'],
             )
-            if self._normalize_symbol(getattr(raw, 'symbol', '')) != trade.symbol or side != 'sell':
+            if (self._normalize_symbol(getattr(raw, 'symbol', '')) != trade.symbol
+                    or side != 'sell' or getattr(raw, 'qty', None) is None):
                 raise RuntimeError('Recovered protective stop does not match its persisted intent.')
             order_id = evidence['order_id']
             if not order_id:

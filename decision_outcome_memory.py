@@ -129,6 +129,13 @@ class DecisionOutcomeMemory:
         frame.index = pd.to_datetime(frame.index, utc=True, errors="coerce")
         for column in columns:
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        # A minute with contradictory provider rows has no single verified bar.
+        # Compare before validity filtering so an invalid conflicting copy cannot
+        # disappear and make the remaining copy look like complete evidence.
+        repeated = frame.loc[frame.index.duplicated(keep=False)]
+        if not repeated.empty:
+            conflicts = repeated.groupby(level=0).nunique(dropna=False).gt(1).any(axis=1)
+            frame = frame.loc[~frame.index.isin(conflicts.index[conflicts])]
         finite = frame.apply(lambda col: col.map(lambda x: pd.notna(x) and math.isfinite(x))).all(axis=1)
         valid = (finite & (frame["low"] > 0) & (frame["volume"] > 0)
                  & (frame["high"] >= frame[["open", "close", "low"]].max(axis=1))

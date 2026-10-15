@@ -7,6 +7,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from broker.order_evidence import map_order_status, validate_order_snapshot, TERMINAL_RAW_STATUSES
 from broker.alpaca_client import get_alpaca_client
 from core.database import database
 from core.models import BrokerOrder, OrderStatus, TradeSide
@@ -59,6 +60,8 @@ class RecoveryEngine:
     )
 
     ACTIVE_ORDER_STATUSES = {
+        "replaced",
+        "calculated",
         "done_for_day",
         "stopped",
         "suspended",
@@ -169,44 +172,7 @@ class RecoveryEngine:
 
     @staticmethod
     def _map_order_status(status: Any) -> OrderStatus:
-        value = str(
-            getattr(status, "value", status) or ""
-        ).strip().lower()
-
-        if value == "filled":
-            return OrderStatus.FILLED
-
-        if value == "partially_filled":
-            return OrderStatus.PARTIALLY_FILLED
-
-        if value in {
-            "accepted",
-            "pending_new",
-            "accepted_for_bidding",
-            "new",
-            "held",
-            "pending_replace",
-            "pending_cancel",
-        }:
-            return OrderStatus.ACCEPTED
-
-        if value in {
-            "canceled",
-            "cancelled",
-            "expired",
-            "done_for_day",
-            "replaced",
-        }:
-            return OrderStatus.CANCELED
-
-        if value in {
-            "rejected",
-            "suspended",
-            "stopped",
-        }:
-            return OrderStatus.REJECTED
-
-        return OrderStatus.SUBMITTED
+        return map_order_status(status)
 
     # ========================================================
     # BUILD BUY BROKER ORDER FROM RAW ALPACA RESPONSE
@@ -217,6 +183,11 @@ class RecoveryEngine:
         raw_order: Any,
         intent: dict[str, Any],
     ) -> BrokerOrder:
+        evidence = validate_order_snapshot(
+            raw_order, symbol=intent.get('symbol'), side=TradeSide.BUY,
+            quantity=intent.get('quantity'), order_id=intent.get('broker_order_id'),
+            client_order_id=intent.get('client_order_id'),
+        )
         order_id = str(
             getattr(raw_order, "id", "") or ""
         ).strip()
@@ -246,22 +217,9 @@ class RecoveryEngine:
                 "Recovered entry intent points to a non-BUY broker order."
             )
 
-        quantity = self._safe_int(
-            getattr(raw_order, "qty", None)
-        )
-
-        if quantity <= 0:
-            quantity = self._safe_int(
-                intent.get("quantity")
-            )
-
-        filled_quantity = self._safe_int(
-            getattr(raw_order, "filled_qty", 0)
-        )
-
-        filled_price = self._safe_float(
-            getattr(raw_order, "filled_avg_price", None)
-        )
+        quantity = evidence['quantity']
+        filled_quantity = evidence['filled_quantity']
+        filled_price = evidence['filled_price']
 
         submitted_at = getattr(
             raw_order,
@@ -1116,7 +1074,9 @@ class RecoveryEngine:
                 getattr(order, "status", "")
             ).lower()
 
-            if status not in self.ACTIVE_ORDER_STATUSES:
+            # Unknown or replaced JALWE orders cannot silently disappear from
+            # the startup gate merely because a new status was not enumerated.
+            if status in TERMINAL_RAW_STATUSES:
                 continue
 
             if (

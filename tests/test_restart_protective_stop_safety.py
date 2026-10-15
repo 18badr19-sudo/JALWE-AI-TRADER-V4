@@ -466,7 +466,8 @@ class RestartAndProtectiveStopSafetyTests(
             broker=SimpleNamespace(
                 get_order=Mock(
                     return_value=SimpleNamespace(
-                        status="filled"
+                        id="FILLED-CANE-STOP", symbol="CANE", side="sell",
+                        status="filled", qty="5", filled_qty="5", filled_avg_price="11.58"
                     )
                 )
             ),
@@ -502,6 +503,8 @@ class RestartAndProtectiveStopSafetyTests(
         self.assertTrue(
             result["filled"]
         )
+        self.assertEqual(trade.remaining_quantity, 0)
+        self.assertEqual(trade.realized_quantity, 5)
         self.assertFalse(
             result["active"]
         )

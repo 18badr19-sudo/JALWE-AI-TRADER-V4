@@ -8,6 +8,7 @@ from uuid import uuid4
 from trading.exit_sessions import exit_session
 from core.runtime_controls import new_entries_allowed
 
+from broker.order_evidence import map_order_status, validate_order_snapshot
 from broker.alpaca_client import (
     get_alpaca_client,
 )
@@ -147,69 +148,8 @@ class ExecutionEngine:
     # ========================================================
 
     @staticmethod
-    def _map_status(
-        broker_status: Any,
-    ) -> OrderStatus:
-
-        raw = getattr(
-            broker_status,
-            "value",
-            broker_status,
-        )
-
-        value = str(
-            raw or ""
-        ).strip().lower()
-
-        if value == "filled":
-
-            return (
-                OrderStatus.FILLED
-            )
-
-        if value == "partially_filled":
-
-            return (
-                OrderStatus.PARTIALLY_FILLED
-            )
-
-        if value in {
-            "accepted",
-            "pending_new",
-            "accepted_for_bidding",
-            "new",
-            "held",
-        }:
-
-            return (
-                OrderStatus.ACCEPTED
-            )
-
-        if value in {
-            "canceled",
-            "cancelled",
-            "expired",
-            "done_for_day",
-            "replaced",
-        }:
-
-            return (
-                OrderStatus.CANCELED
-            )
-
-        if value in {
-            "rejected",
-            "suspended",
-            "stopped",
-        }:
-
-            return (
-                OrderStatus.REJECTED
-            )
-
-        return (
-            OrderStatus.SUBMITTED
-        )
+    def _map_status(broker_status: Any) -> OrderStatus:
+        return map_order_status(broker_status)
 
     # ========================================================
     # CLIENT ORDER ID
@@ -304,6 +244,11 @@ class ExecutionEngine:
                 "an order ID."
             )
 
+        evidence = validate_order_snapshot(
+            broker_response, symbol=symbol, side=side, quantity=quantity,
+            client_order_id=client_order_id,
+        )
+
         raw_status = getattr(
             broker_response,
             "status",
@@ -316,25 +261,8 @@ class ExecutionEngine:
             )
         )
 
-        filled_price = (
-            self._safe_float(
-                getattr(
-                    broker_response,
-                    "filled_avg_price",
-                    None,
-                )
-            )
-        )
-
-        filled_quantity = (
-            self._safe_int(
-                getattr(
-                    broker_response,
-                    "filled_qty",
-                    0,
-                )
-            )
-        )
+        filled_price = evidence['filled_price']
+        filled_quantity = evidence['filled_quantity']
 
         raw_status_value = getattr(
             raw_status,

@@ -157,11 +157,13 @@ class StrategyExperiments:
                 continue
             key = hashlib.sha256(f"{episode}|{name}|{PROTOCOL}".encode()).hexdigest()
             eligible = bool(native_ok and candidate.get("eligible_at_decision"))
+            from research_entry_variants import PROTOCOL as ENTRY_VARIANT_PROTOCOL
             conn.execute("""INSERT OR IGNORE INTO strategy_trials VALUES
                 (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
             """, (key, episode, decision_key, payload["symbol"], stamp.isoformat(),
                   stamp.astimezone(NY).date().isoformat(), ctx, name, baseline,
-                  int(eligible), json.dumps({**candidate, "research_stop_context": metadata.get("research_stop_context")}, default=str), PROTOCOL,
+                  int(eligible), json.dumps({**candidate, "research_stop_context": metadata.get("research_stop_context"),
+                                            "entry_variant_protocol": ENTRY_VARIANT_PROTOCOL}, default=str), PROTOCOL,
                   "PENDING" if eligible else "INELIGIBLE"))
         self.guard.record_selection(conn, metadata, episode, decision_key, stamp, ctx, native_ok)
 
@@ -180,6 +182,9 @@ class StrategyExperiments:
                 result["entry_stop_matrix"] = entry_stop_matrix(bars, trigger, stop, candidate.get("research_stop_context"))
                 if row["strategy"] in {"PREMARKET_HIGH_BREAK", "OPENING_RANGE_BREAKOUT", "COMPRESSION_BREAKOUT", "BULL_FLAG_BREAKOUT"}:
                     result["breakout_retest"] = retest(bars, trigger, stop)
+                    from research_entry_variants import entry_challengers, PROTOCOL as ENTRY_VARIANT_PROTOCOL
+                    if candidate.get("entry_variant_protocol") == ENTRY_VARIANT_PROTOCOL:
+                        result["entry_challengers"] = entry_challengers(bars, trigger, stop)
                 if result.get("traded") and result.get("entry_at"):
                     runner_bars = bars.loc[bars.index >= result["entry_at"]]
                     result["runner_stop_comparison"] = runner_stops(runner_bars, number(trigger), number(stop), entry_fill=result["entry_fill"])
@@ -342,8 +347,12 @@ class StrategyExperiments:
         retests = premarket = comparisons = ambiguous = 0
         edges = []
         paired_stop_trials = 0
+        from research_entry_variants import count_results
+        entry_comparisons = []
         for trial in variants:
             result = json.loads(trial["result_json"])
+            if result.get("entry_challengers"):
+                entry_comparisons.append(result["entry_challengers"])
             matrix = result.get("entry_stop_matrix") or {}
             matrix_rules = matrix.get("rules") or {}
             if (matrix.get("protocol") == "paired-entry-structure-atr-fixed-risk-v1"
@@ -359,6 +368,11 @@ class StrategyExperiments:
                     edges.append(rules["T2"]["net_r"] - rules["T1"]["net_r"])
                 else:
                     ambiguous += 1
+        entry_counts = count_results(entry_comparisons)
+        entry_text = "\n".join(
+            f"{label}: دخول افتراضي {entry_counts[rule]['entries']} | بلا دخول {entry_counts[rule]['no_entry']} | غير محسوم {entry_counts[rule]['unknown']}"
+            for rule, label in (("BREAKOUT_HOLD_VOLUME", "ثبات الاختراق مع الحجم"),
+                                ("SUPPORT_RECLAIM_VOLUME", "استعادة المستوى مع الحجم")))
         return (f"🧪 تجارب الاستراتيجيات الافتراضية: {completed}/{count}\n"
                 f"تفضيلات PAPER المجتازة للتقييم: {active}\n"
                 "تكلفة مفترضة 0.10% لكل جانب؛ التقييم لا يمثل أرباحًا فعلية.\n" +
@@ -366,6 +380,8 @@ class StrategyExperiments:
                  if preferred else "الاختيار الأصلي مستمر حتى اجتياز المقارنة.") +
                 f"\nاختراق قمة ما قبل الافتتاح: {premarket} نتيجة مكتملة." +
                 f"\nإعادة اختبار الاختراق: {retests} نتيجة قابلة للقياس." +
+                "\n" + entry_text +
+                "\nتجربتان بحثيتان على نوافذ جديدة مكتملة؛ الأعداد نوافذ وقد تتكرر، ولا تغيّران اختيار الشراء تلقائيًا." +
                 f"\nمقارنة الدخول والوقف: {paired_stop_trials} نافذة مشتركة قابلة للقياس؛ مخاطرة افتراضية $1 وسقف كاش $100." +
                 "\nالوقف البديل: قاع آخر 5 شموع قبل القرار مع هامش 0.25 ATR من نفس الفترة؛ الكمية تتناقص مع اتساع الوقف. هدف 2R ومحاكاة خروج كامل، دون اعتماد تلقائي." +
                 (f"\nفرق متوسط المحاكاة لصالح وقف T2: {statistics.mean(edges):+.3f}R." if edges else "\nفرق وقف T2: لا توجد مقارنة مكتملة بعد." ) +

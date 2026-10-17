@@ -1,4 +1,5 @@
 import copy
+from contextlib import nullcontext
 from dataclasses import fields, MISSING
 from datetime import datetime, timedelta, timezone
 import json
@@ -76,7 +77,11 @@ class ReplayTests(unittest.TestCase):
         return e
 
     def capture(self,e):
-        with patch.dict(os.environ,{'JALWE_DECISION_REPLAY_ENABLED':'true'}), \
+        # Correctness cases must not depend on CI host scheduling. The dedicated
+        # budget-exhaustion test supplies its own advancing mocked clock.
+        clock=(nullcontext() if isinstance(audit.time.perf_counter,Mock)
+               else patch.object(audit.time,'perf_counter',return_value=0.))
+        with clock, patch.dict(os.environ,{'JALWE_DECISION_REPLAY_ENABLED':'true'}), \
              patch('intelligence.decision_replay.enqueue',side_effect=self.capsules.append), \
              patch('market_move_research.read_packet',return_value=None), \
              patch('intelligence.decision_engine.database.save_feature_snapshot',return_value=None), \

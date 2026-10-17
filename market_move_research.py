@@ -465,6 +465,7 @@ class MoveStore:
                 frozen_features=r['features'], result=r['result']) for r in cases],
             diagnostics=aggregate(rows, now),
             patterns=patterns or {'state':'UNAVAILABLE'},
+            factor_benchmark=self.state('daily_factor_benchmark') or {},
             forward_cohort=[dict(symbol=r['symbol'], role=r['role'], session_day=r['session_day'],
                 frozen_at=r['frozen_at'], evidence_day=r['features'].get('evidence_day'),
                 evaluate_after=(utc(r['session']['close'])+timedelta(minutes=16)).isoformat())
@@ -516,6 +517,7 @@ def read_packet(symbol=None, *, now=None, path=None):
         result['cases'] = [c for c in packet['latest_cases'] if symbol is None or c['symbol'] == symbol]
         result['diagnostics'] = packet.get('diagnostics', {})
         result['patterns'] = packet.get('patterns', {})
+        result['factor_benchmark'] = packet.get('factor_benchmark', {})
         result['historical_jumps'] = packet.get('historical_jumps', {})
         result['requested_jumps'] = packet.get('requested_jumps', {})
         result['historical_jump_profiles'] = packet.get('historical_jump_profiles', {})
@@ -558,6 +560,18 @@ def report_text(packet):
         jc = jumps.get('counts',{})
         lines.append(f"📚 مسارات القفزات — آخر {jumps['lookback_days']} يومًا: مرشحة {jumps['episodes']} | قفزات مؤكدة {jumps['confirmed']} | تنتظر {jc.get('PENDING',0)}")
         lines.append('مرشحو نطاق/فجوة يومية 8% أو أكثر بسيولة مرصودة قبل الحركة أو يومها؛ الأكبر له أولوية قراءة، والحد اليومي ليس مسارًا مثبتًا. لا يشترط شراء البوت أو قابلية التداول عند الوسيط.')
+    benchmark = packet.get('factor_benchmark',{})
+    if benchmark.get('protocol') == 'daily-factor-benchmark-v1':
+        history = benchmark['retrospective']['all_days']
+        forward = benchmark['forward']
+        lines.append(f"⚖️ قياس العوامل اليومي — {history['days']} جلسات تاريخية؛ يشمل الأسهم التي لم تصعد.")
+        for key,label in (('RANGE8','نطاق سابق ≥8%'),('ALL_THREE','اجتماع الشروط الثلاثة')):
+            evidence=history['rules'][key]; match=evidence['matching']; pairs=evidence['pairs']
+            lines.append(f"  {label}: بلغت +8% {match['reached']} | لم تبلغ {match['not_reached']} | نتيجة ناقصة {match['unknown']}")
+            lines.append(f"  أزواج ضابطة مكتملة {pairs['complete']}/{pairs['selected']}؛ بلغت +8%: مطابقة {pairs['matching_reached']} مقابل ضابطة {pairs['control_reached']}")
+        lines.append(f"  عينات مستقبلية مجمدة: {forward['cohort_days']} جلسات | تنتظر {forward['pending_symbol_days']} سهم/جلسة | قُيّمت {forward['evidence']['days']} جلسات.")
+        lines.append('القياس: أعلى شمعة يومية لدى المزود ≥8% من افتتاحها؛ ليس مسار دقائق أو ربح صفقة. لا يستنتج ترتيب الوقف والهدف.')
+        lines.append('الفترات التاريخية الأولى واللاحقة منفصلة، وتبقى بحثًا بأثر رجعي. العينات المستقبلية منفصلة؛ لا أفضلية مثبتة أو تطبيق تلقائي.')
     requested = packet.get('requested_jumps',{})
     if requested:
         rc = requested.get('counts',{})

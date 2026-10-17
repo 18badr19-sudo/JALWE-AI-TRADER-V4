@@ -166,6 +166,8 @@ class TradeChainTests(unittest.TestCase):
         header='TEST | JALWE=READY_FOR_PAPER_EXECUTION | ready'
         with self.db.connection() as conn:
             conn.execute("UPDATE system_events SET message=? WHERE id=1",(header,))
+            plan=conn.execute("EXPLAIN QUERY PLAN SELECT metadata_json FROM system_events WHERE event_type='APEX_RESEARCH_DECISION' AND instr(message,' | JALWE=READY_FOR_PAPER_EXECUTION | ')>0 ORDER BY id DESC LIMIT 501").fetchall()
+            self.assertIn('idx_system_events_ready_decision_id',str([tuple(r) for r in plan]))
             for i in range(80):
                 self.insert(conn,'system_events',dict(event_type='APEX_RESEARCH_DECISION',severity='INFO',
                     message='OTHER | JALWE=REJECTED | quality',metadata_json=json.dumps({'payload':'x'*100000})))

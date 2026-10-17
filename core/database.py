@@ -637,6 +637,16 @@ class Database:
                 """
             )
 
+            # Small partial index: historical entry audits must not walk large
+            # rejected-report payload pages. Created once by normal schema setup;
+            # audit reads themselves never create indexes or change history.
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_system_events_ready_decision_id
+                ON system_events(id DESC)
+                WHERE event_type='APEX_RESEARCH_DECISION'
+                  AND instr(message,' | JALWE=READY_FOR_PAPER_EXECUTION | ')>0
+                """)
+
     # ========================================================
     # EXISTING TRADE MODEL
     # ========================================================

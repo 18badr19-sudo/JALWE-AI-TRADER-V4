@@ -276,8 +276,16 @@ class MoveStore:
     def _episode_values(features, session, role, pair_key, now, *, prospective):
         if prospective and not (utc(features['available_after']) <= now < utc(session['open'])):
             raise ValueError('Prospective evidence was unavailable or cohort froze after open')
-        if role not in {'ACTIVITY', 'CONTROL', 'HOT_CASE', 'JUMP_CASE'} or (role in {'HOT_CASE','JUMP_CASE'} and prospective):
+        if role not in {'ACTIVITY', 'CONTROL', 'HOT_CASE', 'JUMP_CASE','ENTRY_STUDY'} or (role in {'HOT_CASE','JUMP_CASE','ENTRY_STUDY'} and prospective):
             raise ValueError('Invalid study role')
+        if role=='ENTRY_STUDY' and not (features.get('entry_protocol')=='prior-day-orb-execution-study-v1'
+                and utc(features['available_after'])<=utc(features['snapshot_prepared_at'])<=now<utc(session['open'])):
+            raise ValueError('Entry study was not frozen before open')
+        if role=='ENTRY_STUDY':
+            from prior_day_priority_bus import valid_signal
+            if not valid_signal(dict(symbol=features['symbol'],signal_id=features.get('priority_signal_id'),
+                    prepared_at=features['snapshot_prepared_at'],features=features),session):
+                raise ValueError('Invalid entry study nomination')
         key = stable_key(features['symbol']+'|'+role+'|'+pair_key, session['date'])
         return (key, session['date'], features['symbol'], role, pair_key, int(prospective), now.isoformat(),
                 json.dumps(features, allow_nan=False), json.dumps(session))
@@ -428,6 +436,7 @@ class MoveStore:
                                      (encoded,key,row['result_json'])).rowcount)
 
     def publish(self, now, health, *, patterns=None):
+        from prior_day_entry_study import summary as entry_summary
         cutoff = (now.astimezone(NY).date()-timedelta(days=90)).isoformat()
         with self.connect() as conn:
             conn.execute('DELETE FROM move_episodes WHERE session_day < ?', (cutoff,))
@@ -466,6 +475,10 @@ class MoveStore:
             diagnostics=aggregate(rows, now),
             patterns=patterns or {'state':'UNAVAILABLE'},
             factor_benchmark=self.state('daily_factor_benchmark') or {},
+            priority_link=self.state('prior_day_bus_status') or {},
+            entry_study=entry_summary(rows),
+            priority_trace=self.state('prior_day_trace_summary') or {},
+            priority_native_outcomes=self.state('prior_day_native_outcomes') or {},
             forward_cohort=[dict(symbol=r['symbol'], role=r['role'], session_day=r['session_day'],
                 frozen_at=r['frozen_at'], evidence_day=r['features'].get('evidence_day'),
                 evaluate_after=(utc(r['session']['close'])+timedelta(minutes=16)).isoformat())
@@ -518,6 +531,10 @@ def read_packet(symbol=None, *, now=None, path=None):
         result['diagnostics'] = packet.get('diagnostics', {})
         result['patterns'] = packet.get('patterns', {})
         result['factor_benchmark'] = packet.get('factor_benchmark', {})
+        result['priority_link'] = packet.get('priority_link', {})
+        result['entry_study'] = packet.get('entry_study', {})
+        result['priority_trace'] = packet.get('priority_trace', {})
+        result['priority_native_outcomes'] = packet.get('priority_native_outcomes', {})
         result['historical_jumps'] = packet.get('historical_jumps', {})
         result['requested_jumps'] = packet.get('requested_jumps', {})
         result['historical_jump_profiles'] = packet.get('historical_jump_profiles', {})
@@ -535,7 +552,7 @@ def report_text(packet):
     counts, comp = packet['counts'], packet['comparison']
     health = packet['health']
     states = {'READY':'يعمل', 'DATA_UNAVAILABLE':'تعذر جلب البيانات', 'STARTING':'يبدأ'}
-    roles = {'HOT_CASE':'دراسة صعود لاحقة', 'JUMP_CASE':'دراسة مسار قفزة تاريخية',
+    roles = {'HOT_CASE':'دراسة صعود لاحقة', 'JUMP_CASE':'دراسة مسار قفزة تاريخية','ENTRY_STUDY':'اختبار دخول للمطابقات',
              'ACTIVITY':'عينة نشاط مسبقة', 'CONTROL':'عينة مقارنة'}
     outcomes = {'UP8_FIRST':'صعود 8% أولًا', 'DOWN3_FIRST':'هبوط 3% أولًا',
                 'NO_BARRIER':'لم يبلغ العتبتين', 'AMBIGUOUS':'ترتيب غير محسوم'}
@@ -572,6 +589,27 @@ def report_text(packet):
         lines.append(f"  عينات مستقبلية مجمدة: {forward['cohort_days']} جلسات | تنتظر {forward['pending_symbol_days']} سهم/جلسة | قُيّمت {forward['evidence']['days']} جلسات.")
         lines.append('القياس: أعلى شمعة يومية لدى المزود ≥8% من افتتاحها؛ ليس مسار دقائق أو ربح صفقة. لا يستنتج ترتيب الوقف والهدف.')
         lines.append('الفترات التاريخية الأولى واللاحقة منفصلة، وتبقى بحثًا بأثر رجعي. العينات المستقبلية منفصلة؛ لا أفضلية مثبتة أو تطبيق تلقائي.')
+    link=packet.get('priority_link',{})
+    if link:
+        lines.append(f"🔗 ربط الباحث بـAPEX: {link.get('state')} | مرشحة {link.get('eligible',link.get('signals',0))} | جلسة {link.get('session_day','غير متاحة')}")
+        lines.append('مقاعد محدودة داخل الرادار والتحليل العميق؛ لا تتجاوز فحوص الجودة أو تسمح بشراء مباشر.')
+    entry=packet.get('entry_study',{})
+    if entry:
+        states=entry['states']; no_entry=sum(v for k,v in states.items() if k.startswith('NO_') or k=='INVALIDATED_BEFORE_ENTRY')
+        unknown=sum(v for k,v in states.items() if k not in {'PENDING','SIMULATED_EXIT','INVALIDATED_BEFORE_ENTRY'} and not k.startswith('NO_'))
+        lines.append(f"🧪 اختبار دخول نطاق أول 15 دقيقة: {entry['total']} عينة | تنتظر {states.get('PENDING',0)} | مخارج محاكاة {states.get('SIMULATED_EXIT',0)} | بلا دخول {no_entry} | ناقصة/ملتبسة {unknown}")
+        for bps,cost in entry.get('costs',{}).items():
+            mean=cost.get('mean_net_r'); text=f'{mean:+.2f}R' if mean is not None else 'N/A'
+            lines.append(f"  تكلفة مفترضة {int(bps)/100:.2f}% لكل جانب: مخارج محاكاة {cost['simulated_exits']} | موجب {cost['positive']} | سالب {cost['negative']} | متوسط {text}")
+        lines.append('تأكيد اختراق نطاق أول 15 دقيقة بحجم 1.5×، دخول افتتاح الدقيقة التالية ضمن حد المطاردة، وقف قاع النطاق وهدف 2R. ليس تنفيذًا أو ربحًا فعليًا؛ التكاليف مفترضة.')
+    trace=packet.get('priority_trace',{})
+    if trace:
+        lines.append(f"🧾 تتبع الإشارات: {trace.get('state')} | المراحل {trace.get('stages',{})}")
+    native=packet.get('priority_native_outcomes',{})
+    if native:
+        lines.append(f"  نتائج PAPER المرتبطة: {native.get('state')}")
+        if native.get('state')=='NATIVE_RECONCILED_EXITS':
+            lines.append(f"  صفقات لها خروج مؤكد {native['unique_trades']} | محقق قبل رسوم الوسيط ${native['realized_pnl_before_broker_fees']:+.2f}")
     requested = packet.get('requested_jumps',{})
     if requested:
         rc = requested.get('counts',{})

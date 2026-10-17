@@ -29,7 +29,7 @@ def session_backlog(rows, day):
     return dict(completed_session_pending=sum(r['status'] == 'PENDING' for r in current),
         completed_session_forward_total=len(forward),
         completed_session_forward_pending=sum(r['status'] == 'PENDING' for r in forward),
-        completed_session_historical_pending=sum(r['status'] == 'PENDING' and not r['prospective'] for r in current))
+        completed_session_historical_pending=sum(r['status'] == 'PENDING' and not r['prospective'] and r['role']!='ENTRY_STUDY' for r in current))
 
 
 class MoveResearchWorker:
@@ -185,6 +185,16 @@ class MoveResearchWorker:
                 forward=benchmark['forward'],validated_edge=False,execution_authority=False)))
         except Exception as exc:
             logger.warning('MARKET_FACTOR_BENCHMARK_UNAVAILABLE %s',type(exc).__name__)
+        try:
+            from prior_day_entry_study import prepare as prepare_entry_study
+            from prior_day_priority_bus import trace_summary
+            priority=prepare_entry_study(self.store,now,paper=settings.PAPER_TRADING,allow_live=settings.ALLOW_LIVE_TRADING,clock=clock)
+            logger.info('PRIOR_DAY_PRIORITY_PUBLISHED %s',json.dumps(priority,sort_keys=True))
+            from prior_day_entry_study import collect_realized
+            self.store.state('prior_day_native_outcomes',collect_realized())
+            self.store.state('prior_day_trace_summary',trace_summary())
+        except Exception as exc:
+            logger.warning('PRIOR_DAY_PREPARATION_UNAVAILABLE %s',type(exc).__name__)
         return dict(state='READY',universe_count=len(symbols),daily_symbols=len(daily),
                     completed_session=latest['date'],eligible_prior_features=len(features_latest),
                     historical_bars_delayed=True,selection_scope='ALPACA_ACTIVE_US_EQUITY_CATALOG',
@@ -244,6 +254,12 @@ class MoveResearchWorker:
                         checked_frames.add(frame_key)
                     data = frames[frame_key]
                     result = observe_session(data,row['session'])
+                    if row['role']=='ENTRY_STUDY':
+                        from prior_day_entry_study import simulate as simulate_entry
+                        result['entry_study']=simulate_entry(data,row['session'])
+                        logger.info('PRIOR_DAY_ENTRY_STUDY_RESULT %s',json.dumps(dict(
+                            signal_id=row['features'].get('priority_signal_id'),symbol=row['symbol'],
+                            session_day=row['session_day'],result=result['entry_study']),sort_keys=True))
                     if row['role'] == 'JUMP_CASE':
                         result['jump_path'] = jump_path(data,row['session'],
                                                        full_session_complete=result['status']=='COMPLETE')
@@ -253,7 +269,7 @@ class MoveResearchWorker:
                         cached.update({minute:value for (symbol,minute),value in samples.items() if symbol==row['symbol']})
                         probed = diagnose_gaps(self.provider,row['symbol'],result,now,cached=cached)
                         samples.update({(row['symbol'],s['minute']):s for s in probed if s.get('complete') and s.get('minute')})
-                    if result['status'] == 'COMPLETE':
+                    if result['status'] == 'COMPLETE' and row['role']!='ENTRY_STUDY':
                         path = result.get('jump_path',{})
                         cutoff = utc(path['start_at']) if path.get('start_at') else (
                             utc(result['up_at']) if result.get('up_at') else utc(row['session']['open']))

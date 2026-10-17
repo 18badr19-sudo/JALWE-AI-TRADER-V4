@@ -3646,6 +3646,8 @@ def process_research(
             )
         )
 
+        payload['decision_replay_id']=getattr(decision,'replay_id',None)
+
         jalwe_state = str(
             safe_dict(
                 payload.get(

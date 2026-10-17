@@ -356,6 +356,11 @@ def main():
     while True:
         started = time.monotonic()
         worker.cycle()
+        try:
+            from sma_crossover_study import refresh as refresh_sma_study
+            refresh_sma_study(worker.store,provider,datetime.now(timezone.utc))
+        except Exception as exc:
+            logger.warning('SMA_CROSSOVER_STUDY_UNAVAILABLE %s',type(exc).__name__)
         time.sleep(next_cycle_delay(time.monotonic()-started))
 
 

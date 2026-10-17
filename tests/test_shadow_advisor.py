@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from intelligence.shadow_advisor import (
-    AdvisorConfig, ModelClient, SCENARIOS, ShadowAdvisor, frozen_evidence, validate_review)
+    AdvisorConfig, ModelClient, SCENARIOS, ROLES, ShadowAdvisor, frozen_evidence, validate_review)
 
 
 NOW = 1781000000.
@@ -29,7 +29,8 @@ def review():
         'scenarios': [{'scenario': s, 'assessment': 'UNKNOWN',
                        'reason_ar': 'السعر وحده لا يحسم المسار.', 'evidence_refs': ['price']}
                       for s in SCENARIOS],
-        'missing_evidence_ar': ['تأكيد إغلاق شمعة الاختراق.'], 'next_check_ar': 'راقب الإغلاق التالي.'}
+        'missing_evidence_ar': ['تأكيد إغلاق شمعة الاختراق.'], 'next_check_ar': 'راقب الإغلاق التالي.',
+        'roles':[dict(role=r,assessment='UNKNOWN',reason_ar='الأدلة لا تكفي.',evidence_refs=[]) for r in ROLES]}
 
 
 class ShadowAdvisorTests(unittest.TestCase):

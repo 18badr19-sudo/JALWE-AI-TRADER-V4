@@ -2685,6 +2685,10 @@ def help_text() -> str:
         "/learning - حالة التعلم الذاتي\n"
         "/ai_status - حالة محلل الذكاء الاصطناعي المستقل\n"
         "/ai_review SNAP - أحدث تفسير محفوظ للسهم\n"
+        "/explain SNAP - شرح آخر قرار من السجل وأدلة التنفيذ المرتبطة\n"
+        "/sma_study - محاكاة SPY اليومية 20/50 المستقلة\n"
+        "/replay_status - حالة تسجيل وإعادة تشغيل مسار القرار\n"
+        "/replay SNAP - أحدث نتيجة إعادة محفوظة للسهم دون تداول\n"
         "/move_research - نتائج مسار أبحاث الحركات المستقل\n"
         "/learn_now - تشغيل دورة تعلم الآن\n"
         "/sell - بيع صفقة PAPER محددة مع تأكيد\n"
@@ -2711,6 +2715,18 @@ def help_text() -> str:
 def handle(text: str, requested_by=None) -> Any:
     cmd = str(text or "").strip()
     low = cmd.lower()
+
+    if low.split(' ',1)[0] in {'/explain','/why'}:
+        from decision_explanations import explain
+        return explain(cmd.split(' ',1)[1] if ' ' in cmd else '')
+
+    if low == '/sma_study':
+        from sma_crossover_study import status_text as sma_status_text
+        return sma_status_text()
+
+    if low == '/replay_status' or low.split(' ',1)[0] == '/replay':
+        from intelligence.decision_replay import status_text as replay_status_text
+        return replay_status_text(cmd.split(' ',1)[1].strip() if ' ' in cmd else None)
 
     if low == '/ai_status' or low.split(' ', 1)[0] == '/ai_review':
         from intelligence.shadow_advisor import advisor_status_text

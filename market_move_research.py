@@ -645,6 +645,15 @@ def report_text(packet):
         else:
             lines.append('قواعد مرشحة ثابتة: 3؛ نشاط الحجم، نطاق السعر والزخم من اليوم السابق.')
         lines.append('تعلم ارتباطات وصفية، وليس إثباتًا لأسباب الصعود. التطبيق يرتب الفحص فقط؛ الشراء يمر بالشروط الأصلية.')
+    from core.config import settings
+    from market_move_trial import status as trial_status
+    trial = trial_status(datetime.now(timezone.utc),paper=settings.PAPER_TRADING,
+                         allow_live=settings.ALLOW_LIVE_TRADING)
+    trial_labels = {'ACTIVE_EXPERIMENT':'مفعلة لأولوية فحص PAPER فقط',
+        'DISABLED':'متوقفة', 'PAPER_ONLY':'متوقفة خارج PAPER', 'NOT_STARTED':'لم تبدأ', 'EXPIRED':'انتهت'}
+    lines.append('🧪 تجربة بدر للعوامل المشتركة: '+trial_labels[trial['state']])
+    lines.append('الشروط مجتمعة: نطاق اليوم السابق ≥8%، الحجم ≥2× اليوم الذي قبله، والصعود ≥3%.')
+    lines.append('تجربة غير مثبتة؛ لا تتجاوز شروط الشراء والمخاطر. تنتهي 2026-10-31 05:53 السعودية.')
     for c in packet.get('cases', [])[:5]:
         result = c['result']
         lines.append(f"• {c['symbol']} {c['session_day']} | {roles.get(c['role'], c['role'])} | {outcomes.get(result.get('outcome'), 'غير محسوم')}")

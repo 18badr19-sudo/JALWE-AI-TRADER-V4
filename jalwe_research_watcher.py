@@ -3954,6 +3954,11 @@ def scan_bridge(
         if state.get('last_move_trial_audit') != digest:
             event = 'MARKET_MOVE_TRIAL_APPLIED' if trial.get('prioritized_symbols') else 'MARKET_MOVE_TRIAL_STATUS'
             logger.info('%s %s',event,json.dumps(trial,sort_keys=True))
+            if trial.get('order_comparison'):
+                logger.info('MARKET_MOVE_TRIAL_COMPARISON %s',json.dumps(dict(
+                    session_day=trial.get('session_day'),packet_id=trial.get('packet_id'),
+                    observed_at=datetime.now(timezone.utc).isoformat(),
+                    **trial['order_comparison']),sort_keys=True))
             state['last_move_trial_audit'] = digest
     except Exception as exc:
         logger.warning('MARKET_MOVE_TRIAL_UNAVAILABLE %s',type(exc).__name__)

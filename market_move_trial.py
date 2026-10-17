@@ -18,6 +18,30 @@ RULE = {'range_pct': 8., 'volume_ratio_previous_day': 2., 'daily_return_pct': 3.
 MODE = 'OWNER_PAPER_PRIORITY_TRIAL'
 
 
+def order_comparison(baseline, ordered, symbol_of, preferred):
+    """Observed batch ranks only; no alternate execution or PnL is inferred."""
+    def ranks(items):
+        seen = {}
+        result = []
+        for rank,item in enumerate(items,1):
+            symbol = str(symbol_of(item)).upper()
+            occurrence = seen.get(symbol,0)+1
+            seen[symbol] = occurrence
+            result.append(dict(symbol=symbol,occurrence=occurrence,rank=rank))
+        return result
+    before,after = ranks(baseline),ranks(ordered)
+    matched_before = [r['rank'] for r in before if r['symbol'] in preferred]
+    matched_after = [r['rank'] for r in after if r['symbol'] in preferred]
+    return dict(protocol='same-batch-priority-observation-v1',
+        baseline_scope='POST_LEARNED_PRIORITY_PRE_OWNER_TRIAL',
+        baseline_order=before,experimental_order=after,
+        report_count=len(before),matched_report_count=len(matched_before),
+        matched_mean_rank_before=sum(matched_before)/len(matched_before) if matched_before else None,
+        matched_mean_rank_after=sum(matched_after)/len(matched_after) if matched_after else None,
+        interpretation='OBSERVED_RANKS_NOT_COUNTERFACTUAL_TIMING_OR_PNL',
+        execution_authority=False)
+
+
 def status(now, *, paper, allow_live):
     enabled = os.getenv('JALWE_PRIOR_DAY_TRIAL_ENABLED', 'true').strip().lower() in {'1','true','yes','on'}
     state = ('DISABLED' if not enabled else 'PAPER_ONLY' if not paper or allow_live
@@ -83,6 +107,7 @@ def prioritize(items, *, now, symbol_of, paper, allow_live, path=None):
             session_day=now.astimezone(NY).date().isoformat(), packet_id=packet['packet_id'],
             prioritized_symbols=sorted(preferred), matched_evidence=list(preferred.values()),
             nonmatching_symbols=sorted(nonmatching), unknown_symbols=unknown,
+            order_comparison=order_comparison(baseline,ordered,symbol_of,preferred),
             learned_policy_state=(packet.get('patterns') or {}).get('state'))
     except Exception as exc:
         return baseline, dict(audit, reason='TRIAL_READ_UNAVAILABLE', error_type=type(exc).__name__)

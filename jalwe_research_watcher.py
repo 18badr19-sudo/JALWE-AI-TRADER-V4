@@ -3738,6 +3738,13 @@ def process_research(
         # ====================================================
 
         try:
+            from prior_day_entry_study import trace_decision
+            trace=trace_decision(research,payload)
+            if trace: logger.info('PRIOR_DAY_JALWE_TRACE %s',json.dumps(trace,sort_keys=True))
+        except Exception as exc:
+            logger.warning('PRIOR_DAY_JALWE_TRACE_UNAVAILABLE %s',type(exc).__name__)
+
+        try:
             tracked = (
                 get_opportunity_performance_tracker()
                 .start_from_payload(

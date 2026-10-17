@@ -10,6 +10,7 @@ import math
 from pathlib import Path
 import re
 import sqlite3
+import time
 
 PROTOCOL='native-trade-chain-evidence-audit-v1'
 
@@ -81,7 +82,7 @@ def inspect_trade(trade,entry,exits,orders,decision):
     slippage=(filled_entry-reference)/reference*10000 if filled_entry is not None and filled_entry>0 and reference is not None and reference>0 else None
     timing={}
     for label,start,end in (
-        ('decision_to_submission_seconds',(decision or {}).get('timestamp'),(entry or {}).get('submitted_at')),
+        ('entry_quote_check_to_submission_seconds',obj(obj(native.get('metadata')).get('entry_quality')).get('checked_at'),(entry or {}).get('submitted_at')),
         ('submission_to_fill_seconds',(entry or {}).get('submitted_at'),(entry or {}).get('filled_at'))):
         if start is None or end is None: continue
         try:
@@ -119,10 +120,23 @@ def audit(path=None,symbol=None,limit=20):
     limit=max(1,min(int(limit),50))
     conn=sqlite3.connect(path.resolve().as_uri()+'?mode=ro',uri=True,timeout=.5); conn.row_factory=sqlite3.Row
     try:
+        deadline=time.monotonic()+10.
+        conn.set_progress_handler(lambda: int(time.monotonic()>deadline),1000)
         conn.execute('BEGIN') # one consistent read snapshot, no schema or data writes
         trade_rows=conn.execute('SELECT * FROM managed_trades '+('WHERE symbol=? ' if symbol else '')+'ORDER BY created_at DESC,trade_id DESC LIMIT ?',
             (symbol,limit+1) if symbol else (limit+1,)).fetchall()
         results=[]
+        wanted={r['trade_id'] for r in trade_rows[:limit]}
+        decision_by_identity={}
+        decision_rows=[]
+        if wanted:
+            marks=','.join('?' for _ in wanted)
+            # One scan, not one full historical JSON scan per trade.
+            decision_rows=conn.execute("SELECT metadata_json FROM system_events WHERE event_type='APEX_RESEARCH_DECISION' AND CASE WHEN json_valid(metadata_json) THEN json_extract(metadata_json,'$.execution.managed_trade_id') END IN ("+marks+") ORDER BY id DESC LIMIT 501",tuple(wanted)).fetchall()
+            for row in decision_rows:
+                p=obj(row[0]);e=obj(p.get('execution'))
+                identity=(e.get('managed_trade_id'),e.get('broker_order_id'))
+                if e.get('broker_order_submitted') is True: decision_by_identity.setdefault(identity,p)
         for encoded in trade_rows[:limit]:
             t=dict(encoded)
             entry=conn.execute('SELECT * FROM broker_orders WHERE order_id=?',(t.get('entry_order_id'),)).fetchone()
@@ -135,13 +149,12 @@ def audit(path=None,symbol=None,limit=20):
                 if order: orders[order_id]=dict(order)
             # Match native entry by BOTH managed trade identity and entry order.
             # A newer rejection for this symbol can never replace its entry reason.
-            decisions=conn.execute("SELECT metadata_json FROM system_events WHERE event_type='APEX_RESEARCH_DECISION' AND CASE WHEN json_valid(metadata_json) THEN json_extract(metadata_json,'$.execution.managed_trade_id') END=? AND CASE WHEN json_valid(metadata_json) THEN json_extract(metadata_json,'$.execution.broker_order_id') END=? ORDER BY id DESC LIMIT 2",(t['trade_id'],t.get('entry_order_id'))).fetchall()
-            p=obj(decisions[0][0]) if decisions else None
+            p=decision_by_identity.get((t['trade_id'],t.get('entry_order_id')))
             if p and (p.get('symbol')!=t['symbol'] or obj(p.get('execution')).get('broker_order_submitted') is not True): p=None
             result=inspect_trade(t,dict(entry) if entry else None,exits,orders,p)
             results.append(result)
         return dict(base,state='AUDITED' if results else 'NO_MANAGED_TRADES',trades=results,
-            states=dict(Counter(r['state'] for r in results)),truncated=len(trade_rows)>limit,
+            states=dict(Counter(r['state'] for r in results)),entry_link_limit_reached=len(decision_rows)>=501,truncated=len(trade_rows)>limit,
             loss_cause='UNPROVEN_NO_MARKET_COUNTERFACTUAL',fees='NOT_AVAILABLE_NOT_ASSUMED_ZERO')
     except (sqlite3.Error,ValueError,TypeError,KeyError,OverflowError) as exc:
         return dict(base,state='EVIDENCE_UNAVAILABLE',error_type=type(exc).__name__)

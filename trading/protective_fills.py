@@ -2,7 +2,7 @@
 import math
 from datetime import datetime, timezone
 
-from core.models import OrderStatus
+from core.models import OrderStatus, BrokerOrder, TradeSide
 from broker.order_evidence import whole_shares, validate_order_snapshot
 from trading.trade_manager import TradeStage
 
@@ -43,6 +43,22 @@ def apply_protective_stop_snapshot(database, trade_id, trade, raw):
               OrderStatus.PARTIALLY_FILLED if raw_status == 'partially_filled' else
               OrderStatus.ACCEPTED)
     active = raw_status not in TERMINAL_STATUSES
+    def optional_time(value):
+        if value is None: return None
+        try:
+            parsed=value if isinstance(value,datetime) else datetime.fromisoformat(str(value).replace('Z','+00:00'))
+            return parsed if parsed.tzinfo is not None else None
+        except (ValueError,TypeError): return None
+    try:
+        requested_price=float(getattr(raw,'stop_price',None) or metadata.get('protective_stop_price'))
+        if not math.isfinite(requested_price) or requested_price<=0: requested_price=None
+    except (ValueError,TypeError,OverflowError): requested_price=None
+    snapshot=BrokerOrder(symbol=trade.symbol,side=TradeSide.SELL,quantity=expected,
+        order_id=order_id,client_order_id=getattr(raw,'client_order_id',None) or metadata.get('protective_stop_client_order_id'),status=status,
+        filled_quantity=filled,filled_price=evidence['filled_price'],requested_price=requested_price,
+        submitted_at=optional_time(getattr(raw,'submitted_at',None)),
+        filled_at=optional_time(getattr(raw,'filled_at',None)),
+        metadata={'source':'PROTECTIVE_STOP_RECONCILIATION','observed_at':datetime.now(timezone.utc).isoformat()})
     average = evidence['filled_price']
     realized = 0.0
     incremental_price = None
@@ -75,7 +91,7 @@ def apply_protective_stop_snapshot(database, trade_id, trade, raw):
         filled_at = getattr(raw, 'filled_at', None) or datetime.now(timezone.utc)
         event_time = filled_at.isoformat() if hasattr(filled_at, 'isoformat') else str(filled_at)
         database.record_strategy_pnl_event(
-            trade_state=trade, event_key=f'{order_id}:{filled}', trade_id=trade_id,
+            trade_state=trade, broker_order_snapshot=snapshot, event_key=f'{order_id}:{filled}', trade_id=trade_id,
             order_id=order_id, symbol=trade.symbol, action='BROKER_PROTECTIVE_STOP',
             quantity=new_qty, fill_price=incremental_price, entry_price=trade.entry_price,
             realized_pnl=realized, event_time=event_time,
@@ -83,6 +99,8 @@ def apply_protective_stop_snapshot(database, trade_id, trade, raw):
         )
     else:
         database.save_managed_trade(trade_id, trade)
+        if filled>0 or raw_status in TERMINAL_STATUSES:
+            database.save_broker_order(snapshot)
     return dict(checked=True, active=active, filled=raw_status == 'filled',
                 status=status.value, raw_status=raw_status, order_id=order_id,
                 filled_quantity=filled, new_fill_quantity=new_qty, fill_price=average)

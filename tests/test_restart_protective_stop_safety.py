@@ -434,9 +434,9 @@ class RestartAndProtectiveStopSafetyTests(
             ]
         )
 
-        fake_database.save_broker_order.assert_called_once_with(
-            new_stop
-        )
+        fake_database.save_broker_order.assert_any_call(new_stop)
+        self.assertEqual(sum(call.args[0].order_id == new_stop.order_id
+                             for call in fake_database.save_broker_order.call_args_list),1)
         fake_database.save_managed_trade.assert_called()
 
     def test_filled_protective_stop_wins_race_without_second_sell(

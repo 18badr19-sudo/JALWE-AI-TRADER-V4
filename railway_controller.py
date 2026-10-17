@@ -2947,7 +2947,9 @@ def main() -> None:
     from missed_opportunity_audit import emit_audit
     emit_audit(database.database_path)
     from trade_chain_audit import emit_audit as emit_trade_audit
-    emit_trade_audit(database.database_path)
+    import threading
+    threading.Thread(target=emit_trade_audit,args=(database.database_path,),
+                     daemon=True,name='native-trade-chain-audit').start()
 
     print(
         "Persistence probe | "

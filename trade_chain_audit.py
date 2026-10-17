@@ -128,21 +128,32 @@ def audit(path=None,symbol=None,limit=20):
         results=[]
         wanted={r['trade_id'] for r in trade_rows[:limit]}
         identities={(r['trade_id'],r['entry_order_id']) for r in trade_rows[:limit]}
+        symbols_by_identity={(r['trade_id'],r['entry_order_id']):r['symbol'] for r in trade_rows[:limit]}
         decision_by_identity={};decision_rows=[];link_state='COMPLETE_SEARCH'
+        lookup_path='NO_TRADES'
         if wanted:
             # Cheap exact-ID text prefilter; JSON is parsed only for candidates.
             # Never require a particular JSON whitespace layout, and stop once
             # every requested entry identity is found instead of scanning older history.
             text_filter=' OR '.join('instr(metadata_json,?)>0' for _ in wanted)
             try:
-                cursor=conn.execute("SELECT metadata_json FROM system_events WHERE event_type='APEX_RESEARCH_DECISION' AND ("+text_filter+") ORDER BY id DESC LIMIT 501",tuple(wanted))
-                for row in cursor:
-                    decision_rows.append(row)
-                    p=obj(row[0]);e=obj(p.get('execution'))
-                    identity=(e.get('managed_trade_id'),e.get('broker_order_id'))
-                    if identity in identities and e.get('broker_order_submitted') is True:
-                        decision_by_identity.setdefault(identity,p)
-                    if identities.issubset(decision_by_identity): break
+                def consume(cursor):
+                    for row in cursor:
+                        decision_rows.append(row)
+                        p=obj(row[0]);e=obj(p.get('execution'))
+                        identity=(e.get('managed_trade_id'),e.get('broker_order_id'))
+                        if (identity in identities and e.get('broker_order_submitted') is True
+                                and p.get('symbol')==symbols_by_identity[identity]):
+                            decision_by_identity.setdefault(identity,p)
+                        if identities.issubset(decision_by_identity): break
+                # The native writer has always stored this small message header.
+                # Inspect it before touching overflow pages holding large JSON
+                # feature reports. This is only a candidate filter, never ownership.
+                lookup_path='NATIVE_READY_MESSAGE'
+                consume(conn.execute("SELECT metadata_json FROM system_events WHERE event_type='APEX_RESEARCH_DECISION' AND instr(message,' | JALWE=READY_FOR_PAPER_EXECUTION | ')>0 ORDER BY id DESC LIMIT 501"))
+                if not identities.issubset(decision_by_identity):
+                    lookup_path='LEGACY_ID_FALLBACK'
+                    consume(conn.execute("SELECT metadata_json FROM system_events WHERE event_type='APEX_RESEARCH_DECISION' AND ("+text_filter+") ORDER BY id DESC LIMIT 501",tuple(wanted)))
             except sqlite3.OperationalError as exc:
                 if time.monotonic()<=deadline: raise
                 link_state='READ_BUDGET_EXCEEDED'
@@ -168,7 +179,7 @@ def audit(path=None,symbol=None,limit=20):
             result=inspect_trade(t,dict(entry) if entry else None,exits,orders,p)
             results.append(result)
         return dict(base,state='AUDITED' if results else 'NO_MANAGED_TRADES',trades=results,
-            states=dict(Counter(r['state'] for r in results)),entry_link_read_state=link_state,entry_link_limit_reached=len(decision_rows)>=501,truncated=len(trade_rows)>limit,
+            states=dict(Counter(r['state'] for r in results)),entry_link_read_state=link_state,entry_link_lookup_path=lookup_path,entry_link_limit_reached=len(decision_rows)>=501,truncated=len(trade_rows)>limit,
             loss_cause='UNPROVEN_NO_MARKET_COUNTERFACTUAL',fees='NOT_AVAILABLE_NOT_ASSUMED_ZERO')
     except (sqlite3.Error,ValueError,TypeError,KeyError,OverflowError) as exc:
         return dict(base,state='EVIDENCE_UNAVAILABLE',error_type=type(exc).__name__)

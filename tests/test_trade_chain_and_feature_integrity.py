@@ -162,6 +162,24 @@ class TradeChainTests(unittest.TestCase):
         self.assertTrue(result['trades'][0]['ledger_complete'])
         self.assertIn('EXACT_ENTRY_DECISION_LINK_MISSING',result['trades'][0]['unknown'])
 
+    def test_native_ready_header_skips_large_rejected_payloads_and_still_checks_identity(self):
+        header='TEST | JALWE=READY_FOR_PAPER_EXECUTION | ready'
+        with self.db.connection() as conn:
+            conn.execute("UPDATE system_events SET message=? WHERE id=1",(header,))
+            for i in range(80):
+                self.insert(conn,'system_events',dict(event_type='APEX_RESEARCH_DECISION',severity='INFO',
+                    message='OTHER | JALWE=REJECTED | quality',metadata_json=json.dumps({'payload':'x'*100000})))
+            wrong=copy.deepcopy(self.decision);wrong['symbol']='OTHER'
+            self.insert(conn,'system_events',dict(event_type='APEX_RESEARCH_DECISION',severity='INFO',
+                message=header,metadata_json=json.dumps(wrong)))
+        original=audit.obj
+        with patch.object(audit,'obj',wraps=original) as parsed:
+            result=audit.audit(self.path)
+        self.assertEqual(result['entry_link_lookup_path'],'NATIVE_READY_MESSAGE')
+        self.assertEqual(result['entry_link_read_state'],'COMPLETE_SEARCH')
+        self.assertEqual(result['trades'][0]['decision_reason'],'recorded entry')
+        self.assertFalse(any(isinstance(c.args[0],str) and len(c.args[0])>100000 for c in parsed.call_args_list))
+
     def test_symbol_injection_missing_database_and_commands_are_read_only(self):
         self.assertEqual(audit.audit(self.path,"X' OR 1=1")['state'],'INVALID_SYMBOL')
         absent=self.path.parent/'absent.db'

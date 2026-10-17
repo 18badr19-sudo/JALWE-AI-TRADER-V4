@@ -51,6 +51,14 @@ class OwnerTrialTests(unittest.TestCase):
         self.assertEqual(audit['matched_evidence'][0]['range_pct'],8.)
         self.assertEqual(audit['learned_policy_state'],'COLLECTING_TRAINING')
         self.assertFalse(audit['entry_authority'])
+        comparison=audit['order_comparison']
+        self.assertEqual([r['symbol'] for r in comparison['baseline_order']],['OTHER','MATCH','UNKNOWN','MATCH'])
+        self.assertEqual([r['symbol'] for r in comparison['experimental_order']],['MATCH','MATCH','OTHER','UNKNOWN'])
+        self.assertEqual(comparison['matched_report_count'],2)
+        self.assertEqual(comparison['matched_mean_rank_before'],3.)
+        self.assertEqual(comparison['matched_mean_rank_after'],1.5)
+        self.assertEqual([r['occurrence'] for r in comparison['experimental_order'][:2]],[1,2])
+        self.assertIn('NOT_COUNTERFACTUAL',comparison['interpretation'])
         self.assertIsNone(self.store.state('pattern_policy'))
         self.assertEqual(len(self.store.episodes()),0)
 
@@ -116,6 +124,15 @@ class OwnerTrialTests(unittest.TestCase):
         self.assertEqual([c.args[0] for c in process.call_args_list],ordered)
         self.assertEqual(manage.call_count,4)
         self.assertTrue(any('MARKET_MOVE_TRIAL_APPLIED' in str(c) for c in log.call_args_list))
+        self.assertTrue(any('MARKET_MOVE_TRIAL_COMPARISON' in str(c) for c in log.call_args_list))
+
+    def test_no_matching_reports_is_unknown_effect_not_zero_profit(self):
+        comparison=trial.order_comparison(self.items,self.items,lambda r:r.symbol,set())
+        self.assertIsNone(comparison['matched_mean_rank_before'])
+        self.assertIsNone(comparison['matched_mean_rank_after'])
+        self.assertEqual(comparison['baseline_order'],comparison['experimental_order'])
+        self.assertFalse(comparison['execution_authority'])
+        self.assertNotIn('pnl',comparison)
 
     def test_report_distinguishes_manual_experiment_from_training(self):
         packet = read_packet(path=self.path,now=self.now)

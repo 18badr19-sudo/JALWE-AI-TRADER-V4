@@ -17,7 +17,7 @@ class ProtectiveSnapshotPersistenceTests(unittest.TestCase):
         self.db=Database(str(Path(tmp.name)/'native.db'))
         self.trade=TradeManager().create_trade('TEST',10.,5,9.,11.,12.,13.)
         self.trade.metadata.update(protective_stop_order_id='STOP',protective_stop_quantity=5,
-            protective_stop_client_order_id='owned',protective_stop_applied_qty=0)
+            protective_stop_client_order_id='owned',protective_stop_applied_qty=0,protective_stop_price=9.)
         self.db.save_managed_trade('trade',self.trade)
 
     def raw(self,filled,average):
@@ -32,7 +32,7 @@ class ProtectiveSnapshotPersistenceTests(unittest.TestCase):
         order=self.db.get_broker_order_row('STOP')
         self.assertEqual(order['filled_quantity'],3);self.assertEqual(order['filled_price'],9.1)
         self.assertEqual(order['status'],'PARTIALLY_FILLED')
-        self.assertEqual(order['client_order_id'],'owned')
+        self.assertEqual(order['client_order_id'],'owned');self.assertEqual(order['requested_price'],9.)
         self.assertEqual(self.db.load_managed_trade('trade').remaining_quantity,2)
         self.assertAlmostEqual(self.db.get_strategy_realized_pnl_total(),-2.7)
         apply_protective_stop_snapshot(self.db,'trade',self.trade,self.raw(3,9.1))

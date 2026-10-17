@@ -3934,6 +3934,21 @@ def scan_bridge(
     except Exception as exc:
         logger.warning('MARKET_MOVE_PRIORITY_UNAVAILABLE %s',type(exc).__name__)
 
+    # Explicit owner experiment is not an activated/validated learned policy.
+    # Preserve all reports and every native decision/execution gate below.
+    try:
+        from market_move_trial import prioritize as trial_prioritize
+        research_items, trial = trial_prioritize(research_items,now=datetime.now(timezone.utc),
+            symbol_of=lambda item:getattr(item,'symbol',''),
+            paper=settings.PAPER_TRADING,allow_live=settings.ALLOW_LIVE_TRADING)
+        digest = hashlib.sha256(json.dumps(trial,sort_keys=True).encode()).hexdigest()
+        if state.get('last_move_trial_audit') != digest:
+            event = 'MARKET_MOVE_TRIAL_APPLIED' if trial.get('prioritized_symbols') else 'MARKET_MOVE_TRIAL_STATUS'
+            logger.info('%s %s',event,json.dumps(trial,sort_keys=True))
+            state['last_move_trial_audit'] = digest
+    except Exception as exc:
+        logger.warning('MARKET_MOVE_TRIAL_UNAVAILABLE %s',type(exc).__name__)
+
     discovered = len(
         research_items
     )
@@ -4013,6 +4028,10 @@ def heartbeat(
 # ============================================================
 
 def print_startup_health() -> None:
+
+    from market_move_trial import status as trial_status
+    logger.info('MARKET_MOVE_TRIAL_STATUS %s',json.dumps(trial_status(datetime.now(timezone.utc),
+        paper=settings.PAPER_TRADING,allow_live=settings.ALLOW_LIVE_TRADING),sort_keys=True))
 
     bridge = (
         get_external_research_bridge()

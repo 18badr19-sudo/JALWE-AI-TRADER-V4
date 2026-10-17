@@ -32,7 +32,7 @@ The first production audit found complete exit-ledger quantities for seven close
 
 The saved top-level research report timestamp occurs after orchestration, so it is not used as decision start time. Timing uses the recorded native entry-quote check when available, plus broker submission/fill timestamps. Missing timing stays unavailable.
 
-Entry-decision links use one bounded SQL scan for all selected trade identities, rather than rescanning the full JSON history for every trade. Reads have a ten-second progress budget, and startup audit runs on a daemon thread so it cannot hold up native worker startup. No index/schema mutation is needed. Saturating the entry-link result cap is explicitly recorded.
+Entry-decision links use one bounded SQL scan for all selected trade identities, rather than rescanning the full JSON history for every trade. Reads have a ten-second progress budget, and startup audit runs on a daemon thread so it cannot hold up native worker startup. The audit performs no index/schema mutation; the initialization index is described below. Saturating the entry-link result cap is explicitly recorded.
 
 Historical entry lookup first filters text by exact selected trade IDs, parses only candidate JSON in Python, and stops once every selected trade/order pair is found. Whitespace layout, malformed candidate JSON and unrelated order IDs cannot establish ownership. If that historical search exhausts its time budget, entry links are marked incomplete while the small native order/position/ledger reads still report their independent evidence; no partial link set becomes a complete-search claim.
 

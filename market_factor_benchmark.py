@@ -11,6 +11,7 @@ import json
 import math
 
 from market_move_research import NY, bucket, daily_features, utc, valid_bar
+import market_factor_statistics as statistics
 
 PROTOCOL = 'daily-factor-benchmark-v1'
 RULES = {'RANGE8': {'range_pct':8.}, 'VOLUME2': {'volume_ratio_previous_day':2.},
@@ -75,7 +76,7 @@ def daily_outcomes(records, session, indexed):
     return outcomes
 
 
-def measure(records, session, indexed, *, outcomes=None):
+def measure(records, session, indexed, *, outcomes=None, returns=None, market_return=None):
     outcomes = daily_outcomes(records,session,indexed) if outcomes is None else outcomes
     result = {}
     for rule in RULES:
@@ -90,7 +91,10 @@ def measure(records, session, indexed, *, outcomes=None):
             matching_reached=sum(a for a,b in complete),control_reached=sum(b for a,b in complete),
             day_edge=sum(int(a)-int(b) for a,b in complete)/len(complete) if complete else None)
         result[rule] = groups
-    return dict(day=session['date'],rules=result)
+    returns=statistics.observe_returns(records,session['date'],indexed) if returns is None else returns
+    evidence=statistics.measure(records,session['date'],outcomes,returns,market_return,
+        {rule:paired(records,session['date'],rule) for rule in RULES})
+    return dict(day=session['date'],rules=result,statistics=evidence)
 
 
 def aggregate(days):
@@ -111,6 +115,7 @@ def aggregate(days):
         p.update(coverage=p['complete']/p['selected'] if p['selected'] else None,days_with_pairs=len(edges),
                  day_weighted_frequency_difference=sum(edges)/len(edges) if edges else None)
         value['pairs']=p; result['rules'][rule]=value
+    result['statistics']=statistics.aggregate([d['statistics'] for d in days if 'statistics' in d],RULES)
     return result
 
 
@@ -163,11 +168,20 @@ def update(store, daily, sessions, symbols, now, *, clock=None, source_session=N
         fixed=store.state('daily_factor_definition')
     if fixed.get('spec_hash')!=SPEC or fixed.get('protocol')!=PROTOCOL:
         raise ValueError('BENCHMARK_DEFINITION_MISMATCH')
+    statistics_definition=store.state('daily_factor_statistics_definition')
+    if statistics_definition is None:
+        statistics_definition=dict(spec_hash=statistics.SPEC,defined_at=now.isoformat())
+        with store.connect() as conn:
+            conn.execute('INSERT OR IGNORE INTO move_state VALUES (?,?)',
+                ('daily_factor_statistics_definition',json.dumps(statistics_definition)))
+        statistics_definition=store.state('daily_factor_statistics_definition')
+    if statistics_definition.get('spec_hash')!=statistics.SPEC:
+        raise ValueError('STATISTICS_DEFINITION_MISMATCH')
     freeze_next(store,now,fixed['defined_at'],clock=clock)
     mature=[s for s in sessions if utc(s['close'])+DELAY<=now]
     with store.connect() as conn:
         cohort_keys=[r[0] for r in conn.execute('SELECT key FROM move_state WHERE key LIKE ? ORDER BY key',(PREFIX+'%',))]
-    cache_key=dict(spec_hash=SPEC,mature_through=mature[-1]['date'] if mature else None,
+    cache_key=dict(spec_hash=SPEC,statistics_spec=statistics.SPEC,mature_through=mature[-1]['date'] if mature else None,
                    source_session=source_session,cohorts=cohort_keys)
     saved=store.state('daily_factor_benchmark')
     if saved and saved.get('cache_key')==cache_key:
@@ -193,7 +207,8 @@ def update(store, daily, sessions, symbols, now, *, clock=None, source_session=N
                     records.append(row)
             except (ValueError,TypeError,KeyError,OverflowError):
                 continue
-        measured=measure(records,s,indexed)
+        market_return=statistics.close_return(indexed.get(statistics.BENCHMARK,{}).get(s['date']))
+        measured=measure(records,s,indexed,market_return=market_return)
         measured['unknown_or_ineligible_inputs']=len(universe)-len(records)
         historical.append(measured)
     forward,pending=[],0
@@ -213,9 +228,22 @@ def update(store, daily, sessions, symbols, now, *, clock=None, source_session=N
         # A shrinking daily cache must never erase already observed outcomes.
         outcomes={symbol:preserved[symbol] if type(preserved.get(symbol)) is bool else value
                   for symbol,value in observed.items()}
+        observed_returns=statistics.observe_returns(cohort['records'],cohort['session']['date'],indexed)
+        same=(previous.get('protocol')==PROTOCOL and previous.get('spec_hash')==SPEC
+              and previous.get('frozen_at')==cohort['frozen_at'] and previous.get('statistics_spec')==statistics.SPEC)
+        old_returns=previous.get('close_returns',{}) if same else {}
+        returns={symbol:old_returns[symbol] if statistics.number(old_returns.get(symbol)) else value
+                 for symbol,value in observed_returns.items()}
+        market_return=(previous.get('benchmark_return_pct') if same and statistics.number(previous.get('benchmark_return_pct'))
+                       else statistics.close_return(indexed.get(statistics.BENCHMARK,{}).get(cohort['session']['date'])))
         store.state(result_key,dict(protocol=PROTOCOL,spec_hash=SPEC,frozen_at=cohort['frozen_at'],
-            updated_at=now.isoformat(),outcomes=outcomes))
-        forward.append(measure(cohort['records'],cohort['session'],indexed,outcomes=outcomes))
+            updated_at=now.isoformat(),outcomes=outcomes,statistics_spec=statistics.SPEC,
+            close_returns=returns,benchmark_return_pct=market_return))
+        measured=measure(cohort['records'],cohort['session'],indexed,outcomes=outcomes,
+                         returns=returns,market_return=market_return)
+        if utc(statistics_definition['defined_at'])>=utc(cohort['session']['open']):
+            measured.pop('statistics')
+        forward.append(measured)
     split=max(1,len(historical)*2//3) if historical else 0
     result=dict(protocol=PROTOCOL,spec_hash=SPEC,rules=RULES,updated_at=now.isoformat(),cache_key=cache_key,
         endpoint='PROVIDER_DAILY_HIGH_GE_OPEN_PLUS_8_NOT_PNL_OR_FIRST_BARRIER',
@@ -224,10 +252,19 @@ def update(store, daily, sessions, symbols, now, *, clock=None, source_session=N
                            excluded_inputs=sum(d['unknown_or_ineligible_inputs'] for d in historical)),
         forward=dict(state='FROZEN_FORWARD_DAILY_DATA' if forward else 'WAITING_FORWARD_DAILY_DATA',
                      pending_symbol_days=pending,cohort_days=len(cohort_keys),evidence=aggregate(forward)),
+        statistics_method=dict(protocol=statistics.PROTOCOL,spec_hash=statistics.SPEC,
+            defined_at=statistics_definition['defined_at'],
+            benchmark=statistics.BENCHMARK,return_endpoint='PROVIDER_DAILY_OPEN_TO_CLOSE_MINUS_SAME_DAY_SPY_BETA_ONE',
+            confidence=.95,min_days=statistics.MIN_DAYS,min_pairs=statistics.MIN_PAIRS,
+            block_days=statistics.BLOCK_DAYS,resamples=statistics.RESAMPLES,
+            scope='DESCRIPTIVE_NOT_PNL_NOT_CAUSAL_NOT_VALIDATED_ALPHA'),
         automatic_application=False,execution_authority=False,validated_edge=False,
         limitations=['Current asset catalog survivorship bias','Retrospective periods are not unseen validation',
             'Daily bar session scope is provider-defined, not verified regular-session minute coverage',
             'Missing bars remain unknown; no stop/target chronology or executable return',
-            'Controls matched on coarse prior-price/liquidity buckets; other confounders remain'])
+            'Controls matched on coarse prior-price/liquidity buckets; other confounders remain',
+            'SPY subtraction assumes beta=1, not estimated risk-adjusted alpha; no execution costs',
+            'Bootstrap resamples blocks of five observed days; gaps and longer dependence remain',
+            'Intervals are marginal and exploratory, not adjusted for multiple rules or a promotion gate'])
     store.state('daily_factor_benchmark',result)
     return result

@@ -183,6 +183,11 @@ class MoveResearchWorker:
                 protocol=benchmark['protocol'],updated_at=benchmark['updated_at'],
                 endpoint=benchmark['endpoint'],historical=benchmark['retrospective']['all_days'],
                 forward=benchmark['forward'],validated_edge=False,execution_authority=False)))
+            logger.info('MARKET_FACTOR_STATISTICS %s',json.dumps(dict(
+                method=benchmark.get('statistics_method',{}),
+                retrospective=benchmark['retrospective']['all_days'].get('statistics',{}),
+                forward=benchmark['forward']['evidence'].get('statistics',{}),
+                validated_edge=False,execution_authority=False),sort_keys=True,allow_nan=False))
         except Exception as exc:
             logger.warning('MARKET_FACTOR_BENCHMARK_UNAVAILABLE %s',type(exc).__name__)
         try:
@@ -322,6 +327,8 @@ class MoveResearchWorker:
             patterns = {'state':'UNAVAILABLE','error_type':type(exc).__name__}
             logger.warning('MARKET_MOVE_PATTERNS_UNAVAILABLE %s',type(exc).__name__)
         key, packet = self.store.publish(published_at,health,patterns=patterns)
+        logger.info('MARKET_NEWS_STATISTICS %s',json.dumps(packet.get('news_statistics',{}),
+            sort_keys=True,allow_nan=False))
         try:
             emit_evidence(self.store,self.store.episodes(),logger)
         except Exception as exc:

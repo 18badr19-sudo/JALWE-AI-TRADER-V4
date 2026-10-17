@@ -437,6 +437,7 @@ class MoveStore:
 
     def publish(self, now, health, *, patterns=None):
         from prior_day_entry_study import summary as entry_summary
+        from market_factor_statistics import news_summary
         cutoff = (now.astimezone(NY).date()-timedelta(days=90)).isoformat()
         with self.connect() as conn:
             conn.execute('DELETE FROM move_episodes WHERE session_day < ?', (cutoff,))
@@ -475,6 +476,7 @@ class MoveStore:
             diagnostics=aggregate(rows, now),
             patterns=patterns or {'state':'UNAVAILABLE'},
             factor_benchmark=self.state('daily_factor_benchmark') or {},
+            news_statistics=news_summary(rows),
             priority_link=self.state('prior_day_bus_status') or {},
             entry_study=entry_summary(rows),
             priority_trace=self.state('prior_day_trace_summary') or {},
@@ -531,6 +533,7 @@ def read_packet(symbol=None, *, now=None, path=None):
         result['diagnostics'] = packet.get('diagnostics', {})
         result['patterns'] = packet.get('patterns', {})
         result['factor_benchmark'] = packet.get('factor_benchmark', {})
+        result['news_statistics'] = packet.get('news_statistics', {})
         result['priority_link'] = packet.get('priority_link', {})
         result['entry_study'] = packet.get('entry_study', {})
         result['priority_trace'] = packet.get('priority_trace', {})
@@ -589,6 +592,8 @@ def report_text(packet):
         lines.append(f"  عينات مستقبلية مجمدة: {forward['cohort_days']} جلسات | تنتظر {forward['pending_symbol_days']} سهم/جلسة | قُيّمت {forward['evidence']['days']} جلسات.")
         lines.append('القياس: أعلى شمعة يومية لدى المزود ≥8% من افتتاحها؛ ليس مسار دقائق أو ربح صفقة. لا يستنتج ترتيب الوقف والهدف.')
         lines.append('الفترات التاريخية الأولى واللاحقة منفصلة، وتبقى بحثًا بأثر رجعي. العينات المستقبلية منفصلة؛ لا أفضلية مثبتة أو تطبيق تلقائي.')
+    from market_factor_statistics import report_lines as statistics_report
+    lines.extend(statistics_report(benchmark,packet.get('news_statistics',{})))
     link=packet.get('priority_link',{})
     if link:
         lines.append(f"🔗 ربط الباحث بـAPEX: {link.get('state')} | مرشحة {link.get('eligible',link.get('signals',0))} | جلسة {link.get('session_day','غير متاحة')}")

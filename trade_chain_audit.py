@@ -127,16 +127,30 @@ def audit(path=None,symbol=None,limit=20):
             (symbol,limit+1) if symbol else (limit+1,)).fetchall()
         results=[]
         wanted={r['trade_id'] for r in trade_rows[:limit]}
-        decision_by_identity={}
-        decision_rows=[]
+        identities={(r['trade_id'],r['entry_order_id']) for r in trade_rows[:limit]}
+        decision_by_identity={};decision_rows=[];link_state='COMPLETE_SEARCH'
         if wanted:
-            marks=','.join('?' for _ in wanted)
-            # One scan, not one full historical JSON scan per trade.
-            decision_rows=conn.execute("SELECT metadata_json FROM system_events WHERE event_type='APEX_RESEARCH_DECISION' AND CASE WHEN json_valid(metadata_json) THEN json_extract(metadata_json,'$.execution.managed_trade_id') END IN ("+marks+") ORDER BY id DESC LIMIT 501",tuple(wanted)).fetchall()
-            for row in decision_rows:
-                p=obj(row[0]);e=obj(p.get('execution'))
-                identity=(e.get('managed_trade_id'),e.get('broker_order_id'))
-                if e.get('broker_order_submitted') is True: decision_by_identity.setdefault(identity,p)
+            # Cheap exact-ID text prefilter; JSON is parsed only for candidates.
+            # Never require a particular JSON whitespace layout, and stop once
+            # every requested entry identity is found instead of scanning older history.
+            text_filter=' OR '.join('instr(metadata_json,?)>0' for _ in wanted)
+            try:
+                cursor=conn.execute("SELECT metadata_json FROM system_events WHERE event_type='APEX_RESEARCH_DECISION' AND ("+text_filter+") ORDER BY id DESC LIMIT 501",tuple(wanted))
+                for row in cursor:
+                    decision_rows.append(row)
+                    p=obj(row[0]);e=obj(p.get('execution'))
+                    identity=(e.get('managed_trade_id'),e.get('broker_order_id'))
+                    if identity in identities and e.get('broker_order_submitted') is True:
+                        decision_by_identity.setdefault(identity,p)
+                    if identities.issubset(decision_by_identity): break
+            except sqlite3.OperationalError as exc:
+                if time.monotonic()<=deadline: raise
+                link_state='READ_BUDGET_EXCEEDED'
+            finally:
+                # The bounded small position/order/ledger reads still produce
+                # useful evidence when historical entry-report links are unavailable.
+                conn.set_progress_handler(None,0)
+        if len(decision_rows)>=501 and not identities.issubset(decision_by_identity): link_state='ROW_LIMIT_REACHED'
         for encoded in trade_rows[:limit]:
             t=dict(encoded)
             entry=conn.execute('SELECT * FROM broker_orders WHERE order_id=?',(t.get('entry_order_id'),)).fetchone()
@@ -154,7 +168,7 @@ def audit(path=None,symbol=None,limit=20):
             result=inspect_trade(t,dict(entry) if entry else None,exits,orders,p)
             results.append(result)
         return dict(base,state='AUDITED' if results else 'NO_MANAGED_TRADES',trades=results,
-            states=dict(Counter(r['state'] for r in results)),entry_link_limit_reached=len(decision_rows)>=501,truncated=len(trade_rows)>limit,
+            states=dict(Counter(r['state'] for r in results)),entry_link_read_state=link_state,entry_link_limit_reached=len(decision_rows)>=501,truncated=len(trade_rows)>limit,
             loss_cause='UNPROVEN_NO_MARKET_COUNTERFACTUAL',fees='NOT_AVAILABLE_NOT_ASSUMED_ZERO')
     except (sqlite3.Error,ValueError,TypeError,KeyError,OverflowError) as exc:
         return dict(base,state='EVIDENCE_UNAVAILABLE',error_type=type(exc).__name__)
@@ -164,6 +178,8 @@ def audit(path=None,symbol=None,limit=20):
 def status_text(symbol=None,path=None):
     r=audit(path,symbol,limit=5 if symbol else 10)
     lines=['🧾 تدقيق سلسلة الصفقة — سجلات JALWE','الحالة: '+r['state']]
+    if r.get('entry_link_read_state') not in {None,'COMPLETE_SEARCH'}:
+        lines.append('قراءة روابط الدخول: '+r['entry_link_read_state'])
     for t in r['trades']:
         lines.append(t['symbol']+' | '+t['stage']+' | '+t['state'])
         if 'realized_pnl_before_broker_fees' in t:

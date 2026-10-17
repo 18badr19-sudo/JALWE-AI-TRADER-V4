@@ -123,12 +123,31 @@ class MoveProvider:
         if now < end+timedelta(minutes=16):
             raise ResearchReadError('WAITING_FOR_HISTORICAL_DELAY')
         rows = self.bars([symbol],utc(session['open']),end,'1Min').get(symbol, [])
+        return self._minute_frame(rows)
+
+    @staticmethod
+    def _minute_frame(rows):
         data = pd.DataFrame(rows)
         if data.empty:
             return pd.DataFrame(columns=['open','high','low','close','volume'],index=pd.DatetimeIndex([],tz='UTC'))
         data = data.rename(columns={'o':'open','h':'high','l':'low','c':'close','v':'volume'})
         data.index = pd.to_datetime(data.pop('t'),utc=True,errors='coerce')
         return data
+
+    def intraday_many(self, symbols, session, now):
+        """One bounded, fully paginated SIP read; absent symbols stay empty."""
+        symbols = list(dict.fromkeys(symbols))
+        if not symbols:
+            return {}
+        if len(symbols) > 24:
+            raise ResearchReadError('INTRADAY_BATCH_TOO_LARGE')
+        end = utc(session['close'])
+        if now < end+timedelta(minutes=16):
+            raise ResearchReadError('WAITING_FOR_HISTORICAL_DELAY')
+        rows = self.bars(symbols,utc(session['open']),end,'1Min')
+        # bars() follows every token or raises; never treat the first page as
+        # proof that symbols sorted after it have no trades.
+        return {symbol:self._minute_frame(rows.get(symbol,[])) for symbol in symbols}
 
     def news_before(self, symbol, cutoff):
         articles, token, seen, complete, malformed = [], None, set(), False, 0

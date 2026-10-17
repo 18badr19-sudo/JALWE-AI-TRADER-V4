@@ -173,6 +173,18 @@ class MoveResearchWorker:
         manifest = self.store.enqueue_jumps(jump_candidates,
                                            jump_mark,now,LOOKBACK_DAYS)
         logger.info('MARKET_JUMP_HISTORY_QUEUED %s',json.dumps(manifest))
+        # An independent daily endpoint includes non-winners and blind controls.
+        # Optional benchmark failure cannot stop the minute-study worker.
+        try:
+            from market_factor_benchmark import update as factor_benchmark
+            benchmark = factor_benchmark(self.store,daily,sessions,symbols,now,
+                                         clock=clock,source_session=latest['date'])
+            logger.info('MARKET_FACTOR_BENCHMARK %s',json.dumps(dict(
+                protocol=benchmark['protocol'],updated_at=benchmark['updated_at'],
+                endpoint=benchmark['endpoint'],historical=benchmark['retrospective']['all_days'],
+                forward=benchmark['forward'],validated_edge=False,execution_authority=False)))
+        except Exception as exc:
+            logger.warning('MARKET_FACTOR_BENCHMARK_UNAVAILABLE %s',type(exc).__name__)
         return dict(state='READY',universe_count=len(symbols),daily_symbols=len(daily),
                     completed_session=latest['date'],eligible_prior_features=len(features_latest),
                     historical_bars_delayed=True,selection_scope='ALPACA_ACTIVE_US_EQUITY_CATALOG',

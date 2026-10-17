@@ -140,6 +140,28 @@ class TradeChainTests(unittest.TestCase):
         self.assertIn('LEDGER_POSITION_QUANTITY_DIFF',t['findings']);self.assertFalse(t['ledger_complete'])
         self.assertIn('ENTRY_ORDER_IDENTITY_MISMATCH',t['findings'])
 
+    def test_text_prefilter_never_trusts_unrelated_or_malformed_json(self):
+        with self.db.connection() as conn:
+            self.insert(conn,'system_events',dict(event_type='APEX_RESEARCH_DECISION',severity='INFO',message='bad',metadata_json='{"managed": invalid'))
+            p=copy.deepcopy(self.decision);p['execution']['broker_order_id']='OTHER'
+            p['jalwe']['reason']='wrong entry order'
+            self.insert(conn,'system_events',dict(event_type='APEX_RESEARCH_DECISION',severity='INFO',message='wrong',metadata_json=json.dumps(p,separators=(',',':'))))
+        result=audit.audit(self.path)
+        self.assertEqual(result['entry_link_read_state'],'COMPLETE_SEARCH')
+        self.assertEqual(result['trades'][0]['decision_reason'],'recorded entry')
+
+    def test_entry_link_budget_never_erases_independent_ledger_evidence(self):
+        with self.db.connection() as conn:
+            for i in range(500):
+                self.insert(conn,'system_events',dict(event_type='APEX_RESEARCH_DECISION',severity='INFO',message='unrelated',metadata_json=json.dumps({'symbol':'OTHER','n':i})))
+        with patch.object(audit.time,'monotonic',side_effect=[0.]+[20.]*10000):
+            result=audit.audit(self.path)
+        self.assertEqual(result['state'],'AUDITED')
+        self.assertEqual(result['entry_link_read_state'],'READ_BUDGET_EXCEEDED')
+        self.assertEqual(result['trades'][0]['realized_pnl_before_broker_fees'],-2.)
+        self.assertTrue(result['trades'][0]['ledger_complete'])
+        self.assertIn('EXACT_ENTRY_DECISION_LINK_MISSING',result['trades'][0]['unknown'])
+
     def test_symbol_injection_missing_database_and_commands_are_read_only(self):
         self.assertEqual(audit.audit(self.path,"X' OR 1=1")['state'],'INVALID_SYMBOL')
         absent=self.path.parent/'absent.db'

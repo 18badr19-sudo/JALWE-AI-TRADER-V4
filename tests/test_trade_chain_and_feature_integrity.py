@@ -80,7 +80,7 @@ class TradeChainTests(unittest.TestCase):
             action='TAKE_PROFIT_1',quantity=4,fill_price=11.,entry_price=10.,realized_pnl=4.,event_time='2026-10-16T14:01Z'),
             dict(event_key='SELL1:10',trade_id='managed',order_id='SELL1',symbol='TEST',action='PROTECTIVE_STOP',quantity=6,
             fill_price=9.,entry_price=10.,realized_pnl=-6.,event_time='2026-10-16T15:00Z')]
-        self.decision=dict(timestamp='2026-10-16T14:00:00Z',symbol='TEST',jalwe=dict(state='READY_FOR_PAPER_EXECUTION',entry_price=9.99,reason='recorded entry'),
+        self.decision=dict(timestamp='2026-10-16T14:00:04Z',symbol='TEST',jalwe=dict(metadata={'entry_quality':{'checked_at':'2026-10-16T14:00:00Z'}},state='READY_FOR_PAPER_EXECUTION',entry_price=9.99,reason='recorded entry'),
             execution=dict(managed_trade_id='managed',broker_order_id='BUY1',broker_order_submitted=True))
         self.seed()
 
@@ -103,7 +103,7 @@ class TradeChainTests(unittest.TestCase):
         self.assertEqual(t['decision_reason'],'recorded entry')
         self.assertAlmostEqual(t['fill_vs_decision_reference_bps'],(10-9.99)/9.99*10000)
         self.assertFalse(t['reference_deviation_is_measured_execution_cost'])
-        self.assertEqual(t['timing'],{'decision_to_submission_seconds':1.,'submission_to_fill_seconds':2.})
+        self.assertEqual(t['timing'],{'entry_quote_check_to_submission_seconds':1.,'submission_to_fill_seconds':2.})
         self.assertEqual(t['initial_risk_dollars'],10.)
         self.assertEqual(before,self.path.read_bytes());self.assertFalse(r['execution_authority'])
 

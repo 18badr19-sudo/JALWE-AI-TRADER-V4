@@ -25,3 +25,11 @@ Future real native decision transcripts are sampled in the background audit work
 Warmup sensitivity compares the same final observation using 51/100/200/all available bars. Differences are descriptive, not automatic bugs or reasons to change a gate. VWAP session context and exponentially weighted initialization can legitimately differ. This samples native indicators only; it does not certify every strategy, data timestamp, LLM training cutoff or end-to-end execution timing. Synthetic tests are not market evidence. Until a new native transcript is available the command says it is waiting.
 
 Validation covers malformed evidence rejection, prefix invariance, intentionally injected future leakage, warmup sensitivity, read-only files, exact entry ownership, cumulative partial exits, weighted price/PnL math, incomplete evidence, protection snapshots and Telegram command routing. Existing full PAPER tests remain required.
+
+## Follow-up from real saved evidence
+
+The first production audit found complete exit-ledger quantities for seven closed trades, but older broker stop-order rows still held submission-time quantities/prices. Future validated protective-stop fill snapshots are now persisted with the realized ledger event and managed position in the same SQLite transaction. A persistence failure rolls all three back; repeated cumulative snapshots do not add realized PnL twice. Zero-new-fill terminal observations also refresh the saved order snapshot. Historical snapshots are not fabricated or rewritten by the auditor.
+
+The saved top-level research report timestamp occurs after orchestration, so it is not used as decision start time. Timing uses the recorded native entry-quote check when available, plus broker submission/fill timestamps. Missing timing stays unavailable.
+
+Entry-decision links use one bounded SQL scan for all selected trade identities, rather than rescanning the full JSON history for every trade. Reads have a ten-second progress budget, and startup audit runs on a daemon thread so it cannot hold up native worker startup. No index/schema mutation is needed. Saturating the entry-link result cap is explicitly recorded.

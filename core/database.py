@@ -1267,6 +1267,7 @@ class Database:
     def save_broker_order(
         self,
         order: BrokerOrder,
+        _connection: Optional[sqlite3.Connection] = None,
     ) -> None:
 
         metadata_json = json.dumps(
@@ -1298,7 +1299,7 @@ class Database:
             None,
         )
 
-        with self.connection() as conn:
+        with (nullcontext(_connection) if _connection is not None else self.connection()) as conn:
 
             conn.execute(
                 """
@@ -2461,6 +2462,7 @@ class Database:
         event_time: str,
         metadata: Optional[dict[str, Any]] = None,
         trade_state: Optional[Any] = None,
+        broker_order_snapshot: Optional[BrokerOrder] = None,
     ) -> bool:
         """
         Persist one broker-confirmed realized PnL increment.
@@ -2524,6 +2526,12 @@ class Database:
                     metadata_json,
                 ),
             )
+
+            if broker_order_snapshot is not None:
+                snapshot_side=getattr(broker_order_snapshot.side,"value",broker_order_snapshot.side)
+                if broker_order_snapshot.order_id != order_id or broker_order_snapshot.symbol != symbol or snapshot_side != "SELL":
+                    raise ValueError("Broker snapshot identity does not match realized event.")
+                self.save_broker_order(broker_order_snapshot,_connection=conn)
 
             if trade_state is not None:
                 if not trade_id:

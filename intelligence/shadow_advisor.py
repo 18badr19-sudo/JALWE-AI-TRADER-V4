@@ -30,6 +30,7 @@ FEATURES = ('price', 'return_1', 'return_5', 'rvol', 'dollar_volume',
 AGREEMENTS = ['AGREE', 'DISAGREE', 'INSUFFICIENT_EVIDENCE']
 SCENARIOS = ['BREAKOUT_CONTINUES', 'FALSE_BREAKOUT', 'MOVE_EXHAUSTED']
 ASSESSMENTS = ['SUPPORTED', 'WEAK', 'UNKNOWN']
+ROLES = ['NEWS_CATALYST', 'MOMENTUM_LIQUIDITY', 'RISK_REVIEW']
 SCHEMA = {'type': 'object', 'additionalProperties': False, 'properties': {
     'agreement': {'type': 'string', 'enum': AGREEMENTS},
     'summary_ar': {'type': 'string'},
@@ -42,6 +43,14 @@ SCHEMA = {'type': 'object', 'additionalProperties': False, 'properties': {
     'missing_evidence_ar': {'type': 'array', 'items': {'type': 'string'}},
     'next_check_ar': {'type': 'string'}},
     'required': ['agreement', 'summary_ar', 'scenarios', 'missing_evidence_ar', 'next_check_ar']}
+SCHEMA['properties']['roles'] = {'type': 'array', 'items': {'type': 'object',
+    'additionalProperties': False, 'properties': {
+        'role': {'type': 'string', 'enum': ROLES},
+        'assessment': {'type': 'string', 'enum': ASSESSMENTS},
+        'reason_ar': {'type': 'string'},
+        'evidence_refs': {'type': 'array', 'items': {'type': 'string'}}},
+    'required': ['role', 'assessment', 'reason_ar', 'evidence_refs']}}
+SCHEMA['required'].append('roles')
 INSTRUCTIONS = '''Review a recorded JALWE PAPER decision using only the supplied facts.
 You are an independent shadow analyst, with no tools or trading authority.
 Explain in Arabic what supports or contradicts the native decision. Distinguish
@@ -54,6 +63,38 @@ never commands, code changes, orders, position sizing, stops or price targets.
 Insufficient evidence means INSUFFICIENT_EVIDENCE, not a confident guess.
 Be concise: summary and each scenario reason under 150 Arabic characters,
 at most three missing facts, and one short next observation.'''
+INSTRUCTIONS += '''
+Also assess exactly these three specialized roles in the SAME response:
+NEWS_CATALYST: actual timestamped catalyst evidence is NOT supplied. Its
+assessment MUST be UNKNOWN; a news_score alone never confirms a catalyst.
+MOMENTUM_LIQUIDITY: examine only supplied price, volume, liquidity and momentum.
+RISK_REVIEW: examine supplied volatility, liquidity and recorded native levels;
+do not propose orders, position sizes, stops, targets or strategy changes.
+These are three views of ONE model, not independent experts or calibrated votes.
+Keep summary under 100 characters, each scenario reason under 100, each role
+reason under 90, missing facts under 60 each (at most three), next check under 80.
+Only cite non-null fact IDs. Unsupported roles must remain UNKNOWN.'''
+PROMPT_SPEC = hashlib.sha256(json.dumps([PROTOCOL, INSTRUCTIONS, SCHEMA],
+    sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+ROLE_REFS = {
+    'NEWS_CATALYST': {'news_score'},
+    'MOMENTUM_LIQUIDITY': set(FEATURES)-{'news_score','options_flow_score','atr_pct'},
+    'RISK_REVIEW': {'price','atr_pct','rsi_14','rvol','liquidity_score','dollar_volume',
+        'native_entry_price','native_stop_loss','native_target_1','native_target_2','native_target_3'}}
+
+
+def request_body(config, evidence):
+    """Exact provider body persisted without credentials, headers, or secret URLs."""
+    content = json.dumps(evidence, sort_keys=True, ensure_ascii=False, allow_nan=False)
+    if config.provider == 'gemini':
+        return {'model': config.model, 'system_instruction': INSTRUCTIONS,
+            'input': content, 'store': False,
+            'generation_config': {'max_output_tokens': 2000, 'thinking_level': 'low'},
+            'response_format': {'type': 'text', 'mime_type': 'application/json', 'schema': SCHEMA}}
+    return {'model': config.model, 'instructions': INSTRUCTIONS,
+        'input': content, 'store': False, 'reasoning': {'effort': 'low'}, 'max_output_tokens': 2000,
+        'text': {'format': {'type': 'json_schema', 'name': 'jalwe_shadow_review',
+                            'schema': SCHEMA, 'strict': True}}}
 
 
 def bounded_int(value, default, ceiling):
@@ -171,6 +212,28 @@ def validate_review(review, evidence):
             raise ValueError('SUPPORTED_WITHOUT_EVIDENCE')
     if seen != set(SCENARIOS):
         raise ValueError('DUPLICATED_SCENARIOS')
+    roles = review['roles']
+    if not isinstance(roles,list) or len(roles)!=3:
+        raise ValueError('MISSING_ROLES')
+    seen=set()
+    for item in roles:
+        if not isinstance(item,dict) or set(item)!={'role','assessment','reason_ar','evidence_refs'}:
+            raise ValueError('INVALID_ROLE_FIELDS')
+        role=item['role']; refs=item['evidence_refs']
+        if role not in ROLES or item['assessment'] not in ASSESSMENTS:
+            raise ValueError('INVALID_ROLE')
+        seen.add(role)
+        if not isinstance(item['reason_ar'],str) or not 1<=len(item['reason_ar'])<=500:
+            raise ValueError('INVALID_ROLE_REASON')
+        if not isinstance(refs,list) or len(refs)>10 or any(
+                not isinstance(ref,str) or ref not in ROLE_REFS[role] or evidence['facts'].get(ref) is None for ref in refs):
+            raise ValueError('UNSUPPORTED_ROLE_EVIDENCE')
+        if item['assessment']=='SUPPORTED' and not refs:
+            raise ValueError('ROLE_SUPPORTED_WITHOUT_EVIDENCE')
+        if role=='NEWS_CATALYST' and item['assessment']!='UNKNOWN':
+            raise ValueError('NO_VERIFIED_CATALYST_INPUT')
+    if seen!=set(ROLES):
+        raise ValueError('DUPLICATED_ROLES')
     return review
 
 
@@ -183,6 +246,17 @@ class ProviderHTTPError(ValueError):
         super().__init__(self.kind)
 
 
+class ReviewParseError(ValueError):
+    def __init__(self,raw_output):
+        self.raw_output=raw_output
+        super().__init__('INVALID_MODEL_JSON')
+
+
+def parse_model_text(text):
+    try: return json.loads(text)
+    except (ValueError,TypeError): raise ReviewParseError(text) from None
+
+
 class ModelClient:
     def __init__(self, config):
         self.config = config
@@ -190,11 +264,7 @@ class ModelClient:
     def review(self, evidence):
         if self.config.provider != 'openai' or self.config.state() != 'SHADOW_ONLY':
             raise ValueError('OPENAI_CONFIGURATION_NOT_APPROVED')
-        request = {'model': self.config.model, 'instructions': INSTRUCTIONS,
-            'input': json.dumps(evidence, ensure_ascii=False, allow_nan=False), 'store': False,
-            'reasoning': {'effort': 'low'}, 'max_output_tokens': 2000,
-            'text': {'format': {'type': 'json_schema', 'name': 'jalwe_shadow_review',
-                                'schema': SCHEMA, 'strict': True}}}
+        request = request_body(self.config, evidence)
         req = urllib.request.Request('https://api.openai.com/v1/responses', method='POST',
             data=json.dumps(request).encode(), headers={'Content-Type': 'application/json',
                 'Authorization': 'Bearer ' + self.config.api_key})
@@ -214,7 +284,7 @@ class ModelClient:
                  for c in item.get('content', []) if c.get('type') == 'output_text']
         if len(texts) != 1:
             raise ValueError('MODEL_REFUSAL_OR_MISSING_OUTPUT')
-        return json.loads(texts[0]), body.get('usage', {})
+        return parse_model_text(texts[0]), {**(body.get('usage') or {}), '_raw_output': texts[0]}
 
 
 class GeminiQuotaExhausted(RuntimeError):
@@ -229,10 +299,7 @@ class GeminiClient:
     def review(self, evidence):
         if self.config.provider != 'gemini' or self.config.state() != 'SHADOW_ONLY':
             raise ValueError('GEMINI_CONFIGURATION_NOT_APPROVED')
-        request = {'model': self.config.model, 'system_instruction': INSTRUCTIONS,
-            'input': json.dumps(evidence, ensure_ascii=False, allow_nan=False), 'store': False,
-            'generation_config': {'max_output_tokens': 2000, 'thinking_level': 'low'},
-            'response_format': {'type': 'text', 'mime_type': 'application/json', 'schema': SCHEMA}}
+        request = request_body(self.config, evidence)
         req = urllib.request.Request('https://generativelanguage.googleapis.com/v1beta/interactions',
             method='POST', data=json.dumps(request).encode(), headers={
                 'Content-Type': 'application/json', 'x-goog-api-key': self.config.api_key})
@@ -254,7 +321,8 @@ class GeminiClient:
         if len(texts) != 1:
             raise ValueError('GEMINI_REFUSAL_OR_MISSING_OUTPUT')
         usage = body.get('usage') or {}
-        return json.loads(texts[0]), {
+        return parse_model_text(texts[0]), {
+            '_raw_output': texts[0],
             'input_tokens': usage.get('total_input_tokens'),
             'output_tokens': usage.get('total_output_tokens'), 'total_tokens': usage.get('total_tokens')}
 
@@ -276,6 +344,9 @@ class ShadowAdvisor:
                 conn.execute("ALTER TABLE shadow_reviews ADD COLUMN provider TEXT NOT NULL DEFAULT 'openai'")
             if 'model' not in columns:
                 conn.execute("ALTER TABLE shadow_reviews ADD COLUMN model TEXT NOT NULL DEFAULT 'legacy'")
+            for name in ('prompt_spec','request_json','raw_output'):
+                if name not in columns:
+                    conn.execute('ALTER TABLE shadow_reviews ADD COLUMN '+name+' TEXT')
             conn.execute('CREATE TABLE IF NOT EXISTS shadow_advisor_state (key TEXT PRIMARY KEY,value REAL NOT NULL)')
             conn.execute('CREATE INDEX IF NOT EXISTS shadow_review_session ON shadow_reviews(session)')
             conn.execute("DELETE FROM shadow_reviews WHERE created < ? AND state != 'RUNNING'", (clock()-90*86400,))
@@ -291,24 +362,35 @@ class ShadowAdvisor:
             conn.close()
 
     def submit(self, payload):
-        if self.mode() != 'SHADOW_ONLY':
+        if self.mode() not in {'SHADOW_ONLY','GEMINI_QUOTA_PAUSED'}:
             return self.mode()
         now = self.clock()
         evidence = frozen_evidence(payload, now)
         if evidence is None:
             return 'INELIGIBLE_EVIDENCE'
         content = json.dumps(evidence, sort_keys=True, ensure_ascii=False, allow_nan=False)
-        key = hashlib.sha256((self.config.provider+'|'+self.config.model+'|'+content).encode()).hexdigest()
+        request = json.dumps(request_body(self.config,evidence),sort_keys=True,ensure_ascii=False,allow_nan=False)
+        key = hashlib.sha256((self.config.provider+'|'+PROMPT_SPEC+'|'+request).encode()).hexdigest()
         session = datetime.fromtimestamp(now, ZoneInfo('America/New_York')).date().isoformat()
         with self.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
-            if conn.execute('SELECT 1 FROM shadow_reviews WHERE id=?', (key,)).fetchone():
+            existing=conn.execute('SELECT * FROM shadow_reviews WHERE id=?',(key,)).fetchone()
+            if existing and existing['state']=='ANALYZED' and existing['prompt_spec']==PROMPT_SPEC:
+                try:
+                    validate_review(json.loads(existing['result']),evidence)
+                    conn.execute("INSERT INTO shadow_advisor_state VALUES ('cache_hits',1) ON CONFLICT(key) DO UPDATE SET value=value+1")
+                    return 'CACHE_HIT'
+                except (ValueError,TypeError,KeyError):
+                    return 'INVALID_CACHED_REVIEW'
+            if self.mode() != 'SHADOW_ONLY':
+                return self.mode()
+            if existing:
                 return 'DUPLICATE'
             count = conn.execute('SELECT COUNT(*) FROM shadow_reviews WHERE session=?', (session,)).fetchone()[0]
             if count >= min(30, max(1, self.config.daily_limit)):
                 return 'DAILY_LIMIT'
-            conn.execute('INSERT INTO shadow_reviews (id,symbol,session,created,state,evidence,provider,model) VALUES (?,?,?,?,?,?,?,?)',
-                (key, evidence['symbol'], session, now, 'PENDING', content, self.config.provider, self.config.model))
+            conn.execute('INSERT INTO shadow_reviews (id,symbol,session,created,state,evidence,provider,model,prompt_spec,request_json) VALUES (?,?,?,?,?,?,?,?,?,?)',
+                (key,evidence['symbol'],session,now,'PENDING',content,self.config.provider,self.config.model,PROMPT_SPEC,request))
         return 'QUEUED'
 
     def process_one(self):
@@ -318,14 +400,19 @@ class ShadowAdvisor:
         with self.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
             conn.execute("UPDATE shadow_reviews SET state='EXPIRED',finished=? WHERE state='PENDING' AND created<?", (now, now-120))
-            row = conn.execute("SELECT * FROM shadow_reviews WHERE state='PENDING' AND provider=? AND model=? ORDER BY created,id LIMIT 1",
-                (self.config.provider, self.config.model)).fetchone()
+            row = conn.execute("SELECT * FROM shadow_reviews WHERE state='PENDING' AND provider=? AND model=? AND prompt_spec=? ORDER BY created,id LIMIT 1",
+                (self.config.provider, self.config.model,PROMPT_SPEC)).fetchone()
             if row is None:
                 return False
             conn.execute("UPDATE shadow_reviews SET state='RUNNING' WHERE id=?", (row['id'],))
         evidence = json.loads(row['evidence'])
+        raw_output=None
         try:
+            if json.loads(row['request_json'])!=request_body(self.config,evidence):
+                raise ValueError('RECORDED_REQUEST_MISMATCH')
             result, usage = self.client.review(evidence)
+            raw_output=usage.get('_raw_output') if isinstance(usage.get('_raw_output'),str) else json.dumps(result,ensure_ascii=False)
+            raw_output=raw_output[:65536]
             validate_review(result, evidence)
             # Keep only accounting fields; arbitrary provider content never enters logs.
             usage = {k: v for k, v in usage.items() if k in {'input_tokens', 'output_tokens', 'total_tokens'} and type(v) is int}
@@ -337,11 +424,13 @@ class ShadowAdvisor:
                     ('gemini_quota_pause_until', self.clock()+86400))
             result, usage, state, error = None, {}, 'QUOTA_EXHAUSTED', 'GeminiQuotaExhausted'
         except Exception as exc:
+            if isinstance(exc,ReviewParseError) and isinstance(exc.raw_output,str):
+                raw_output=exc.raw_output[:65536]
             error = exc.kind if type(exc) is ProviderHTTPError else type(exc).__name__
             result, usage, state = None, {}, 'FAILED'
         with self.connect() as conn:
-            conn.execute('UPDATE shadow_reviews SET state=?,result=?,usage=?,error_kind=?,finished=? WHERE id=?',
-                (state, json.dumps(result, ensure_ascii=False), json.dumps(usage), error, self.clock(), row['id']))
+            conn.execute('UPDATE shadow_reviews SET state=?,result=?,usage=?,error_kind=?,finished=?,raw_output=? WHERE id=?',
+                (state,json.dumps(result,ensure_ascii=False),json.dumps(usage),error,self.clock(),raw_output,row['id']))
         LOGGER.info('SHADOW_AI_REVIEW %s', json.dumps({'id': row['id'], 'symbol': row['symbol'],
             'state': state, 'error_kind': error, 'provider': row['provider'], 'model': row['model'], 'execution_authority': False}))
         return True
@@ -352,6 +441,7 @@ class ShadowAdvisor:
             conn.execute("UPDATE shadow_reviews SET state='INTERRUPTED',finished=? WHERE state='RUNNING'", (self.clock(),))
             conn.execute("UPDATE shadow_reviews SET state='CONFIG_CHANGED',finished=? WHERE state='PENDING' AND (provider!=? OR model!=?)",
                 (self.clock(), self.config.provider, self.config.model))
+            conn.execute("UPDATE shadow_reviews SET state='PROMPT_CHANGED',finished=? WHERE state='PENDING' AND (prompt_spec IS NULL OR prompt_spec!=?)",(self.clock(),PROMPT_SPEC))
         def run():
             while True:
                 try:
@@ -369,6 +459,8 @@ class ShadowAdvisor:
             row = conn.execute('SELECT * FROM shadow_reviews WHERE symbol=? ORDER BY created DESC LIMIT 1',
                 (str(symbol or '').upper(),)).fetchone() if symbol else None
         return {'protocol': PROTOCOL, 'mode': self.mode(), 'key_present': bool(self.config.api_key),
+            'prompt_spec':PROMPT_SPEC,'roles':ROLES,'roles_scope':'THREE_VIEWS_ONE_MODEL_NOT_INDEPENDENT',
+            'cache_hits':self.cache_hits(),
             'provider': self.config.provider, 'free_tier_confirmed': self.config.free_tier_confirmed,
             'quota_pause_until': self.quota_pause_until() if self.config.provider == 'gemini' else None,
             'model': self.config.model, 'daily_limit': min(30, max(1, self.config.daily_limit)),
@@ -378,6 +470,11 @@ class ShadowAdvisor:
         with self.connect() as conn:
             row = conn.execute("SELECT value FROM shadow_advisor_state WHERE key='gemini_quota_pause_until'").fetchone()
         return row['value'] if row else 0
+
+    def cache_hits(self):
+        with self.connect() as conn:
+            row=conn.execute("SELECT value FROM shadow_advisor_state WHERE key='cache_hits'").fetchone()
+        return int(row['value']) if row else 0
 
     def mode(self):
         state = self.config.state()
@@ -409,6 +506,8 @@ def advisor_status_text(symbol=None):
         'المزود: ' + status['provider'],
         'النموذج: ' + status['model'], 'حد التحليلات اليومي: ' + str(status['daily_limit']),
         'السجلات: ' + json.dumps(status['counts'], ensure_ascii=False)]
+    lines.append('الأدوار: أخبار ومحفزات | زخم وسيولة | مخاطر — آراء نموذج واحد.')
+    lines.append('إعادة استخدام تحليل مطابق: '+str(status['cache_hits']))
     if status['provider'] == 'gemini':
         lines.append('تأكيد مشروع Free Tier: ' + ('نعم' if status['free_tier_confirmed'] else 'ينتظر'))
         if status['mode'] == 'GEMINI_QUOTA_PAUSED':
@@ -424,6 +523,7 @@ def advisor_status_text(symbol=None):
             result = json.loads(row['result'])
             lines += [result['agreement'], result['summary_ar']]
             lines += [x['scenario'] + ': ' + x['reason_ar'] for x in result['scenarios']]
+            lines += [x['role']+': '+x['reason_ar'] for x in result.get('roles',[])]
             lines += ['ما ينقص: ' + '؛ '.join(result['missing_evidence_ar']), 'الفحص التالي: ' + result['next_check_ar']]
     elif symbol:
         lines.append('لا يوجد تحليل محفوظ لهذا السهم.')

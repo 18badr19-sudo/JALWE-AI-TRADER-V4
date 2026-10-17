@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import json
+import os
 import math
 
 from dataclasses import dataclass, field
@@ -26,6 +27,7 @@ from market.market_context import get_market_context_engine
 from market.market_data import get_market_data
 from market.session_features import get_session_feature_engine
 from trading.risk_engine import get_risk_engine
+from intelligence.decision_replay import observe, capture
 
 
 logger = logging.getLogger(__name__)
@@ -149,6 +151,13 @@ class DecisionEngine:
         self.risk_engine = get_risk_engine()
         self.external_research_bridge = get_external_research_bridge()
         self._breakout_latches: dict[str, dict[str, Any]] = {}
+        from intelligence.shadow_advisor import PROMPT_SPEC,ROLES
+        logger.info('SHADOW_REVIEW_PROTOCOL_LOADED prompt_spec=%s roles=%s execution_authority=false',PROMPT_SPEC,ROLES)
+        logger.info('DECISION_REPLAY_STATUS %s',json.dumps({
+            'protocol':'native-decision-coordinator-replay-v1',
+            'paper_only':True,'execution_authority':False,
+            'enabled':os.getenv('JALWE_DECISION_REPLAY_ENABLED','true').lower() in {'true','1','yes','on'} and settings.PAPER_TRADING and not settings.ALLOW_LIVE_TRADING,
+            'scope':'RECORDED_STAGE_RESPONSE_COORDINATOR_REPLAY_NOT_COMPONENT_RECOMPUTATION'}))
 
     # ========================================================
     # RESULT HELPERS
@@ -352,7 +361,7 @@ class DecisionEngine:
 
             try:
                 candidate_bars = (
-                    self.market_data.get_bars(
+                    observe('market_data.get_bars', self.market_data.get_bars,
                         symbol,
                         timeframe,
                         request_limit,
@@ -360,8 +369,8 @@ class DecisionEngine:
                 )
 
                 candidate_diagnostics = (
-                    self.feature_engine
-                    .diagnose_input(
+                    observe('feature_engine.diagnose_input', self.feature_engine
+                    .diagnose_input,
                         candidate_bars
                     )
                 )
@@ -500,7 +509,7 @@ class DecisionEngine:
         }
 
         try:
-            research = self.external_research_bridge.get_latest_research(symbol)
+            research = observe('external_research_bridge.get_latest_research', self.external_research_bridge.get_latest_research, symbol)
         except Exception as exc:
             logger.warning(
                 "External research bridge read failed for %s: %s",
@@ -521,7 +530,7 @@ class DecisionEngine:
         snapshot["available"] = True
 
         try:
-            age_minutes = self.external_research_bridge.get_age_minutes(research)
+            age_minutes = observe('external_research_bridge.get_age_minutes', self.external_research_bridge.get_age_minutes, research)
         except Exception:
             age_minutes = None
 
@@ -615,7 +624,7 @@ class DecisionEngine:
         warnings: list[str],
     ) -> None:
         try:
-            self.news_engine.apply_to_features(features)
+            observe('news_engine.apply_to_features', self.news_engine.apply_to_features, features)
         except Exception as exc:
             logger.warning("News enrichment failed: %s", exc)
             warnings.append(f"News data unavailable: {exc}")
@@ -630,7 +639,7 @@ class DecisionEngine:
         warnings: list[str],
     ) -> None:
         try:
-            self.options_engine.apply_to_features(features)
+            observe('options_engine.apply_to_features', self.options_engine.apply_to_features, features)
         except Exception as exc:
             logger.warning("Options enrichment failed: %s", exc)
             warnings.append(f"Options data unavailable: {exc}")
@@ -656,7 +665,7 @@ class DecisionEngine:
         if not latch:
             return None
 
-        now_ts = datetime.now(timezone.utc).timestamp()
+        now_ts = observe('clock', lambda: datetime.now(timezone.utc)).timestamp()
         expires_at = float(latch.get("expires_at", 0.0) or 0.0)
 
         if not latch.get("pre_entry_gates_passed") or not math.isfinite(expires_at) or expires_at <= now_ts:
@@ -686,7 +695,7 @@ class DecisionEngine:
 
         # Keep a hard macro safety gate live during the short latch.
         try:
-            current_market = self.market_context_engine.get_regime_result()
+            current_market = observe('market_context_engine.get_regime_result', self.market_context_engine.get_regime_result)
             current_market_name = getattr(
                 current_market.regime,
                 "value",
@@ -725,7 +734,7 @@ class DecisionEngine:
 
         try:
             current_price = float(
-                self.market_data.get_last_price(symbol)
+                observe('market_data.get_last_price', self.market_data.get_last_price, symbol)
             )
         except Exception:
             current_price = float(
@@ -769,7 +778,7 @@ class DecisionEngine:
             },
         )
 
-        breakout = self.breakout_engine.evaluate(
+        breakout = observe('breakout_engine.evaluate', self.breakout_engine.evaluate,
             latched_trigger,
             bars,
             features,
@@ -845,11 +854,11 @@ class DecisionEngine:
         try:
             self._apply_news(features, warnings)
             self._apply_options(features, warnings)
-            current_ai = self.ai_engine.evaluate(features)
-            current_opportunity = self.opportunity_engine.evaluate(features)
-            current_routed = self.strategy_router.route(current_opportunity, current_market)
-            session = self.session_feature_engine.build(symbol, bars)
-            current_session = self.session_strategy_engine.evaluate(features, session, bars)
+            current_ai = observe('ai_engine.evaluate', self.ai_engine.evaluate, features)
+            current_opportunity = observe('opportunity_engine.evaluate', self.opportunity_engine.evaluate, features)
+            current_routed = observe('strategy_router.route', self.strategy_router.route, current_opportunity, current_market)
+            session = observe('session_feature_engine.build', self.session_feature_engine.build, symbol, bars)
+            current_session = observe('session_strategy_engine.evaluate', self.session_strategy_engine.evaluate, features, session, bars)
             candidates = self._session_experiment_evidence(current_session, self.session_strategy_engine.minimum_score)
             selected = next((c for c in candidates if c["strategy"] == latch.get("strategy")), None)
             gates["ai"] = getattr(current_ai.action, "value", str(current_ai.action)) == "BUY"
@@ -880,7 +889,7 @@ class DecisionEngine:
         # Current grading can reduce risk, but cannot increase the original budget.
         risk_budget = min(float(latch.get("risk_pct", 0) or 0), float(current_routed.final_risk_pct))
 
-        risk = self.risk_engine.evaluate(
+        risk = observe('risk_engine.evaluate', self.risk_engine.evaluate,
             features=features,
             ai_analysis=current_ai,
             daily_start_equity=daily_start_equity,
@@ -960,12 +969,12 @@ class DecisionEngine:
     def _final_entry_evidence(self, symbol, features, entry, stop, feed):
         from trading.entry_quality import assess_entry
         try:
-            quote = self.market_data.get_latest_quote(symbol)
+            quote = observe('market_data.get_latest_quote', self.market_data.get_latest_quote, symbol)
         except Exception as exc:
             return {"approved": False, "reason": "ENTRY_QUOTE_UNAVAILABLE",
                     "error_type": type(exc).__name__, "feed": feed}
-        return assess_entry(features, quote, entry, stop, feed,
-                            now=datetime.now(timezone.utc), min_rvol=settings.MIN_RVOL,
+        return observe('assess_entry', assess_entry, features, quote, entry, stop, feed,
+                            now=observe('clock', lambda: datetime.now(timezone.utc)), min_rvol=settings.MIN_RVOL,
                             max_spread_pct=settings.MAX_SPREAD_PCT)
 
     # ========================================================
@@ -984,7 +993,7 @@ class DecisionEngine:
             timestamp = features.timestamp
             if timestamp.tzinfo is None:
                 timestamp = timestamp.replace(tzinfo=timezone.utc)
-            age = (datetime.now(timezone.utc) - timestamp).total_seconds() / 60
+            age = (observe('clock', lambda: datetime.now(timezone.utc)) - timestamp).total_seconds() / 60
             fresh = max_age is not None and math.isfinite(age) and 0 <= age <= max_age
         except (AttributeError, TypeError, ValueError, OverflowError):
             fresh = False
@@ -1007,14 +1016,14 @@ class DecisionEngine:
         evidence = {"attempted": True, "initial_age_minutes": age,
                     "feed": feed, "status": "NO_FRESH_REPLACEMENT"}
         try:
-            refreshed = self.market_data.get_bars(symbol, timeframe, bar_limit)
+            refreshed = observe('market_data.get_bars', self.market_data.get_bars, symbol, timeframe, bar_limit)
             if refreshed is None or refreshed.empty:
                 return bars, features, diagnostics, evidence
             if refreshed.attrs.get("data_feed") != feed:
                 evidence["status"] = "FEED_MISMATCH"
                 return bars, features, diagnostics, evidence
-            candidate = self.feature_engine.build(symbol, refreshed)
-            fresh_diagnostics = self.feature_engine.diagnose_input(refreshed)
+            candidate = observe('feature_engine.build', self.feature_engine.build, symbol, refreshed)
+            fresh_diagnostics = observe('feature_engine.diagnose_input', self.feature_engine.diagnose_input, refreshed)
             fresh_diagnostics.update(self._apply_feature_freshness(candidate, timeframe))
             evidence["refreshed_age_minutes"] = fresh_diagnostics.get("latest_bar_age_minutes")
             if (candidate.data_quality_ok and not candidate.data_is_stale
@@ -1026,6 +1035,15 @@ class DecisionEngine:
         return bars, features, diagnostics, evidence
 
     def analyze(
+        self, symbol: str, *, strategy_equity: float = 100.0,
+        daily_start_equity: float = 100.0, timeframe: str = '5m', bar_limit: int = 500,
+        external_research_max_age_minutes: int = DEFAULT_EXTERNAL_RESEARCH_MAX_AGE_MINUTES,
+    ) -> FinalTradeDecision:
+        return capture(self,self._analyze_native,symbol,strategy_equity=strategy_equity,
+            daily_start_equity=daily_start_equity,timeframe=timeframe,bar_limit=bar_limit,
+            external_research_max_age_minutes=external_research_max_age_minutes)
+
+    def _analyze_native(
         self,
         symbol: str,
         *,
@@ -1083,7 +1101,7 @@ class DecisionEngine:
         # Independent research is evidence metadata only, never gate/score authority.
         try:
             from market_move_research import read_packet
-            move_packet = read_packet(symbol)
+            move_packet = observe('read_packet', read_packet, symbol)
             if move_packet is not None:
                 base_metadata['market_move_research'] = move_packet
         except Exception as exc:
@@ -1098,7 +1116,7 @@ class DecisionEngine:
         # ====================================================
 
         try:
-            bars = self.market_data.get_bars(
+            bars = observe('market_data.get_bars', self.market_data.get_bars,
                 symbol,
                 timeframe,
                 bar_limit,
@@ -1129,7 +1147,7 @@ class DecisionEngine:
         # ====================================================
 
         feature_diagnostics = (
-            self.feature_engine.diagnose_input(
+            observe('feature_engine.diagnose_input', self.feature_engine.diagnose_input,
                 bars
             )
         )
@@ -1152,7 +1170,7 @@ class DecisionEngine:
             ] = backfill_metadata
 
         try:
-            features = self.feature_engine.build(symbol, bars)
+            features = observe('feature_engine.build', self.feature_engine.build, symbol, bars)
         except Exception as exc:
             return self._reject(
                 symbol=symbol,
@@ -1290,7 +1308,7 @@ class DecisionEngine:
         # LearningEngine later pairs closed PAPER trades with the
         # nearest snapshot around their entry time.
         try:
-            database.save_feature_snapshot(
+            observe('feature_snapshot_store', database.save_feature_snapshot,
                 symbol=symbol,
                 snapshot=features,
             )
@@ -1304,7 +1322,7 @@ class DecisionEngine:
         # ====================================================
 
         try:
-            ai = self.ai_engine.evaluate(features)
+            ai = observe('ai_engine.evaluate', self.ai_engine.evaluate, features)
         except Exception as exc:
             return self._reject(
                 symbol=symbol,
@@ -1328,7 +1346,7 @@ class DecisionEngine:
         # ====================================================
 
         try:
-            opportunity = self.opportunity_engine.evaluate(features)
+            opportunity = observe('opportunity_engine.evaluate', self.opportunity_engine.evaluate, features)
         except Exception as exc:
             return self._reject(
                 symbol=symbol,
@@ -1348,7 +1366,7 @@ class DecisionEngine:
         # ====================================================
 
         try:
-            market = self.market_context_engine.get_regime_result()
+            market = observe('market_context_engine.get_regime_result', self.market_context_engine.get_regime_result)
         except Exception as exc:
             return self._reject(
                 symbol=symbol,
@@ -1378,7 +1396,7 @@ class DecisionEngine:
         # ====================================================
 
         try:
-            routed = self.strategy_router.route(
+            routed = observe('strategy_router.route', self.strategy_router.route,
                 opportunity,
                 market,
             )
@@ -1443,7 +1461,7 @@ class DecisionEngine:
         # ====================================================
 
         try:
-            session = self.session_feature_engine.build(
+            session = observe('session_feature_engine.build', self.session_feature_engine.build,
                 symbol,
                 bars,
             )
@@ -1465,7 +1483,7 @@ class DecisionEngine:
         # ====================================================
 
         try:
-            session_strategy = self.session_strategy_engine.evaluate(
+            session_strategy = observe('session_strategy_engine.evaluate', self.session_strategy_engine.evaluate,
                 features,
                 session,
                 bars,
@@ -1490,11 +1508,11 @@ class DecisionEngine:
             base_metadata["session_strategy_candidates"] = self._session_experiment_evidence(session_strategy, minimum)
             base_metadata["session_strategy_baseline"] = getattr(session_strategy.strategy, "value", session_strategy.strategy)
             from strategy_experiments import get_strategy_experiments
-            session_strategy, selection = get_strategy_experiments().choose(
+            session_strategy, selection = observe('strategy_selection', lambda: get_strategy_experiments().choose(
                 session_strategy, regime=market_name, feed=base_metadata.get("decision_data_feed"),
-                now=datetime.now(timezone.utc), paper=settings.PAPER_TRADING,
+                now=observe('clock', lambda: datetime.now(timezone.utc)), paper=settings.PAPER_TRADING,
                 allow_live=settings.ALLOW_LIVE_TRADING, minimum_score=minimum,
-            )
+            ))
             base_metadata["strategy_selection"] = selection
         except Exception:
             logger.exception("Strategy preference unavailable; retaining native score selection")
@@ -1533,7 +1551,7 @@ class DecisionEngine:
 
         try:
             live_last_price = float(
-                self.market_data.get_last_price(
+                observe('market_data.get_last_price', self.market_data.get_last_price,
                     symbol
                 )
             )
@@ -1558,7 +1576,7 @@ class DecisionEngine:
                 "trigger_price_source"
             ] = "SESSION_PRICE_FALLBACK"
 
-        trigger = self.trigger_engine.evaluate(
+        trigger = observe('trigger_engine.evaluate', self.trigger_engine.evaluate,
             session_strategy,
             current_price=trigger_current_price,
             bars=bars,
@@ -1636,7 +1654,7 @@ class DecisionEngine:
         # 11. BREAKOUT CONFIRMATION
         # ====================================================
 
-        breakout = self.breakout_engine.evaluate(
+        breakout = observe('breakout_engine.evaluate', self.breakout_engine.evaluate,
             trigger,
             bars,
             features,
@@ -1673,8 +1691,8 @@ class DecisionEngine:
                 )):
                     self._breakout_latches[symbol] = {
                         "pre_entry_gates_passed": True,
-                        "created_at": datetime.now(timezone.utc).timestamp(),
-                        "expires_at": datetime.now(timezone.utc).timestamp() + 420.0,
+                        "created_at": observe('clock', lambda: datetime.now(timezone.utc)).timestamp(),
+                        "expires_at": observe('clock', lambda: datetime.now(timezone.utc)).timestamp() + 420.0,
                         "trigger_price": trigger.trigger_price,
                         "stop_price": breakout.stop_price if breakout.stop_price is not None else trigger.stop_price,
                         "market_regime": market_name, "strategy": session_strategy_name,
@@ -1722,7 +1740,7 @@ class DecisionEngine:
         # 12. RISK ENGINE
         # ====================================================
 
-        risk = self.risk_engine.evaluate(
+        risk = observe('risk_engine.evaluate', self.risk_engine.evaluate,
             features=features,
             ai_analysis=ai,
             daily_start_equity=daily_start_equity,

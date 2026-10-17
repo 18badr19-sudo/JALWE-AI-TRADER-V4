@@ -48,6 +48,7 @@ jobs:
           ALPACA_BASE_URL: https://paper-api.alpaca.markets
           PAPER_TRADING: "true"
           ALLOW_LIVE_TRADING: "false"
+          JALWE_DECISION_REPLAY_ENABLED: "false"
           TEST_POSTGRES_DSN: postgresql://postgres:test-only@localhost:5432/bridge_test
         run: |
           python -m unittest discover -s tests -v

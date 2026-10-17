@@ -65,7 +65,7 @@ def schedule_studies(rows, keys, limit=12, *, bounds=None, discovery_bounds=None
     """Forward observations first; up to 8 requested seats, remaining discovery.
 
     Daily range/gap bounds order reads, never prove an ordered price path.
-    Inputs must already pass observation_due. Reserve up to two discovery seats
+    Inputs must already pass observation_due. Reserve a bounded share of discovery seats
     for eligible retries when new work fills that lane, earliest expiry first.
     Forward and explicit-request priorities and the total budget stay unchanged.
     """
@@ -98,7 +98,7 @@ def schedule_studies(rows, keys, limit=12, *, bounds=None, discovery_bounds=None
                       else r.get('session',{}).get('close'))
             return (utc(anchor).timestamp() if anchor else float('inf'),
                     r['attempts'], r['episode_key'])
-        reserved = sorted(retries,key=expiry_rank)[:min(2,max(1,remaining//2))]
+        reserved = sorted(retries,key=expiry_rank)[:min(max(2,limit//6),max(1,remaining//2))]
         reserved_keys = {r['episode_key'] for r in reserved}
         selected += [r for r in other if r['episode_key'] not in reserved_keys][:remaining-len(reserved)]
         selected += reserved

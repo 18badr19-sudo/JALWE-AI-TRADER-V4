@@ -14,6 +14,13 @@ from market_jump_paths import VERSION as JUMP_VERSION, SCAN_VERSION, LOOKBACK_DA
 from market_jump_requests import queue_requested, requested_keys, requested_bounds, schedule_studies
 
 logger = logging.getLogger(__name__)
+PRODUCTION_STUDY_LIMIT = 48
+STUDY_INTERVAL_SECONDS = 300
+
+
+def next_cycle_delay(elapsed):
+    # Start-to-start target, with a real idle interval after a slow provider.
+    return max(60., STUDY_INTERVAL_SECONDS-max(0.,elapsed))
 
 
 def session_backlog(rows, day):
@@ -26,8 +33,42 @@ def session_backlog(rows, day):
 
 
 class MoveResearchWorker:
-    def __init__(self, store, provider):
+    def __init__(self, store, provider, *, study_limit=12, batch_reads=False):
+        if type(study_limit) is not int or not 1 <= study_limit <= PRODUCTION_STUDY_LIMIT:
+            raise ValueError('INVALID_STUDY_LIMIT')
         self.store, self.provider = store, provider
+        self.study_limit, self.batch_reads = study_limit, bool(batch_reads)
+
+    def prefetch(self, selected, now):
+        """Deduplicate symbol/session reads without changing any episode evidence."""
+        frames = {}
+        if not self.batch_reads:
+            return frames
+        groups = {}
+        for row in selected:
+            key = (row['session']['open'],row['session']['close'])
+            group = groups.setdefault(key,dict(session=row['session'],symbols=[]))
+            if row['symbol'] not in group['symbols']:
+                group['symbols'].append(row['symbol'])
+        for (opening,close), group in groups.items():
+            for offset in range(0,len(group['symbols']),24):
+                symbols = group['symbols'][offset:offset+24]
+                try:
+                    data = self.provider.intraday_many(symbols,group['session'],now)
+                    for symbol in symbols:
+                        frames[(symbol,opening,close)] = data[symbol]
+                except Exception as exc:
+                    # An account/rate/transport failure must not fan out into
+                    # dozens of individual retries or consume episode attempts.
+                    if (getattr(exc,'status_code',None) in {401,403,429,500,502,503,504}
+                            or str(exc)=='PROVIDER_READ_FAILED'):
+                        raise
+                    # A malformed/symbol-specific batch can fall back to the
+                    # original isolated reads, still under the 48-study limit.
+                    logger.warning('MARKET_JUMP_BATCH_READ_FALLBACK %s',json.dumps(dict(
+                        symbols=len(symbols),session_day=group['session']['date'],
+                        error_type=type(exc).__name__)))
+        return frames
 
     def prepare(self, now, sessions, symbols, *, clock=None):
         self.store.state('jump_session_calendar',dict(sessions=sessions))
@@ -128,7 +169,7 @@ class MoveResearchWorker:
         self.store.state('jump_discovery_priority',dict(session=latest['date'],bounds=discovery_bounds))
         logger.info('MARKET_JUMP_DISCOVERY_PRIORITY %s',json.dumps(dict(session=latest['date'],
             candidates=len(discovery_bounds),large_upward_bounds=sum(v>=25 for v in discovery_bounds.values()),
-            scope='DAILY_UPWARD_BOUND_READ_ORDER_NOT_CONFIRMED_JUMP',limit=12)))
+            scope='DAILY_UPWARD_BOUND_READ_ORDER_NOT_CONFIRMED_JUMP',limit=self.study_limit)))
         manifest = self.store.enqueue_jumps(jump_candidates,
                                            jump_mark,now,LOOKBACK_DAYS)
         logger.info('MARKET_JUMP_HISTORY_QUEUED %s',json.dumps(manifest))
@@ -138,6 +179,8 @@ class MoveResearchWorker:
                     jump_lookback_days=LOOKBACK_DAYS,jump_selection='ALL_DAILY_RANGE_OR_GAP_CANDIDATES')
 
     def cycle(self, now=None):
+        started = time.monotonic()
+        selected_count = processed_count = prefetched_count = 0
         supplied_now = now is not None
         now = now or datetime.now(timezone.utc)
         health = {'state':'STARTING'}
@@ -157,11 +200,12 @@ class MoveResearchWorker:
             priority = self.store.state('jump_request_priority') or {}
             discovery = self.store.state('jump_discovery_priority') or {}
             selected = schedule_studies(due,requested_keys(sessions,now),bounds=priority.get('bounds',{}),
-                discovery_bounds=discovery.get('bounds',{}))
+                discovery_bounds=discovery.get('bounds',{}),limit=self.study_limit)
+            selected_count = len(selected)
             logger.info('MARKET_JUMP_STUDY_BATCH %s',json.dumps(dict(
                 selected=[dict(symbol=r['symbol'],session_day=r['session_day'],role=r['role'],
                                prospective=bool(r['prospective']),status=r['status'],
-                               attempts=r['attempts']) for r in selected],limit=12,
+                               attempts=r['attempts']) for r in selected],limit=self.study_limit,
                 eligible_retries=sum(r['status']!='PENDING' for r in due),
                 selected_retries=sum(r['status']!='PENDING' for r in selected))))
             # Decode the full-universe cache once per batch. Optional daily
@@ -171,16 +215,21 @@ class MoveResearchWorker:
             except Exception as exc:
                 profile_daily = {}
                 logger.warning('MARKET_JUMP_CONTEXT_UNAVAILABLE %s',type(exc).__name__)
-            frames, samples = {}, {}
+            frames, samples = self.prefetch(selected,now), {}
+            prefetched_count = len(frames)
+            checked_frames = set()
             for row in selected:
                 try:
                     frame_key = (row['symbol'],row['session']['open'],row['session']['close'])
-                    if frame_key not in frames:
-                        raw = self.provider.intraday(row['symbol'],row['session'],now)
+                    if frame_key not in checked_frames:
+                        raw = frames.get(frame_key)
+                        if raw is None:
+                            raw = self.provider.intraday(row['symbol'],row['session'],now)
                         initial = observe_session(raw,row['session'])
                         if row['status'] != 'PENDING' and initial['status'] == 'PARTIAL_DATA':
                             raw = recheck_absent_bars(self.provider,row['symbol'],raw,row['session'],initial,now)
                         frames[frame_key] = raw
+                        checked_frames.add(frame_key)
                     data = frames[frame_key]
                     result = observe_session(data,row['session'])
                     if row['role'] == 'JUMP_CASE':
@@ -212,7 +261,8 @@ class MoveResearchWorker:
                     from market.research_diagnostics import error_diagnostics
                     result = dict(status='DATA_UNAVAILABLE',outcome=None,error_type=type(exc).__name__,
                                   diagnostic_version=VERSION,data_diagnostics=error_diagnostics(exc))
-                self.store.settle(row['episode_key'],result,now,retry=row['status'] != 'PENDING')
+                if self.store.settle(row['episode_key'],result,now,retry=row['status'] != 'PENDING'):
+                    processed_count += 1
                 if row['role']=='JUMP_CASE':
                     path = result.get('jump_path',{})
                     logger.info('MARKET_JUMP_STUDY_RESULT %s',json.dumps(dict(
@@ -228,6 +278,9 @@ class MoveResearchWorker:
                           reason=str(exc) if str(exc).startswith(('HTTP_','WAITING_')) else 'RESEARCH_READ_FAILED')
         if health.get('state') == 'READY':
             health.update(session_backlog(self.store.episodes(), health['completed_session']))
+        health['study_batch'] = dict(limit=self.study_limit,selected=selected_count,processed=processed_count,
+            prefetched_symbol_sessions=prefetched_count,batch_reads=self.batch_reads,
+            elapsed_seconds=round(time.monotonic()-started,2),target_interval_seconds=STUDY_INTERVAL_SECONDS)
         published_at = now if supplied_now else datetime.now(timezone.utc)
         try:
             from market_jump_profiles import upgrade_saved_profiles
@@ -262,11 +315,13 @@ def main():
     if not settings.PAPER_TRADING or settings.ALLOW_LIVE_TRADING:
         raise RuntimeError('Research worker requires the existing PAPER-only configuration')
     provider = MoveProvider(settings.ALPACA_API_KEY,settings.ALPACA_SECRET_KEY)
-    worker = MoveResearchWorker(MoveStore(default_path()),provider)
+    worker = MoveResearchWorker(MoveStore(default_path()),provider,
+                                study_limit=PRODUCTION_STUDY_LIMIT,batch_reads=True)
     logger.info('MARKET_MOVE_WORKER_STARTED protocol=%s read_only_provider=true broker_orders=false',PROTOCOL)
     while True:
+        started = time.monotonic()
         worker.cycle()
-        time.sleep(900)
+        time.sleep(next_cycle_delay(time.monotonic()-started))
 
 
 if __name__ == '__main__':

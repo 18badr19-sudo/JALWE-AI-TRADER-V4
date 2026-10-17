@@ -1,5 +1,10 @@
 # Research retry scheduling and complete report delivery
 
+This documents the original 12-study scheduling fix. Production throughput has
+since been increased with shared reads and a bounded 48-study budget; see
+[research_throughput.md](research_throughput.md). The 12-study default remains
+available for isolated callers and its original fairness tests.
+
 The research report can exceed Telegram's message limit after adding jump
 profiles, requested studies and pattern state. The controller used to send only
 the first 4,000 Python characters and then mark the daily report as sent.

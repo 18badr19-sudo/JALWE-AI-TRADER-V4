@@ -547,6 +547,10 @@ def report_text(packet):
         f"مكتملة: {counts.get('COMPLETE', 0)} | تنتظر: {counts.get('PENDING', 0)} | ناقصة/غير متاحة: {counts.get('PARTIAL_DATA',0)+counts.get('DATA_UNAVAILABLE',0)}",
         f"مقارنات مستقبلية مكتملة: {comp['complete_pairs']} على {comp['unique_days']} أيام | {comparisons.get(comp['state'], 'غير متاح')}"]
     jumps = packet.get('historical_jumps',{})
+    batch = health.get('study_batch',{})
+    if batch:
+        lines.append(f"آخر دفعة أبحاث: عولجت {batch['processed']} من {batch['selected']} | الحد {batch['limit']} | الزمن {batch['elapsed_seconds']:.0f} ثانية")
+        lines.append('جلب شموع مشترك حسب الجلسة؛ سرعة المعالجة لا تعني اكتمال البيانات أو ضمان انتهاء الطابور.')
     if 'completed_session_forward_total' in health:
         lines.append(f"عينات الجلسة الأخيرة: {health['completed_session_forward_total']} | تنتظر أول تقييم {health['completed_session_forward_pending']} | دراسات تاريخية تنتظر {health['completed_session_historical_pending']}")
         lines.append('تقرير حالة العينات؛ نقص البيانات يبقى غير محسوم. قائمة الدراسات التاريخية لا تحجز إرسال تقرير المقارنة.')

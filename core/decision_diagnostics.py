@@ -30,6 +30,9 @@ def decision_details(decision):
     lines = []
     feature = metadata.get('feature_diagnostics',{})
     if isinstance(feature,dict):
+        issues=feature.get('input_issues')
+        if isinstance(issues,list) and issues:
+            lines.append('  سلامة الشموع: '+', '.join(str(code) for code in issues)[:300])
         age,limit = numeric(feature.get('latest_bar_age_minutes')),numeric(feature.get('max_bar_age_minutes'))
         if age is not None and limit is not None:
             lines.append(f'  عمر الشمعة: {age:.1f} دقيقة | الحد {limit:g}')

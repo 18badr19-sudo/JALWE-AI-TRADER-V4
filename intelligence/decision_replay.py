@@ -329,6 +329,7 @@ class ReplayStore:
             conn.execute('CREATE TABLE IF NOT EXISTS replay_sources (id TEXT PRIMARY KEY,manifest TEXT NOT NULL,coordinator_source TEXT NOT NULL)')
             conn.execute('CREATE TABLE IF NOT EXISTS decision_replays (id TEXT PRIMARY KEY,symbol TEXT NOT NULL,created REAL NOT NULL,session TEXT NOT NULL,code_key TEXT NOT NULL,state TEXT NOT NULL,capsule BLOB,result TEXT NOT NULL,ready INTEGER NOT NULL)')
             conn.execute('CREATE INDEX IF NOT EXISTS replay_symbol_time ON decision_replays(symbol,created)')
+            conn.execute('CREATE TABLE IF NOT EXISTS indicator_audits (id TEXT PRIMARY KEY,symbol TEXT NOT NULL,session TEXT NOT NULL,created REAL NOT NULL,code_key TEXT NOT NULL,result TEXT NOT NULL)')
 
     @contextmanager
     def connect(self):
@@ -356,6 +357,25 @@ class ReplayStore:
             conn.execute('INSERT OR IGNORE INTO decision_replays VALUES (?,?,?,?,?,?,?,?,?)',
                 (capsule['id'],capsule['symbol'],stamp,session,capsule['code_key'],result['state'],packed,canonical(result),int(ready)))
             conn.execute('DELETE FROM replay_sources WHERE id NOT IN (SELECT DISTINCT code_key FROM decision_replays)')
+            # Background audit only: at most four real transcript frames/day.
+            # Failures cannot roll back the original decision or its replay.
+            conn.execute('DELETE FROM indicator_audits WHERE created<?',(time.time()-14*86400,))
+            measured=conn.execute('SELECT COUNT(*) FROM indicator_audits WHERE session=?',(session,)).fetchone()[0]
+            if result.get('state')=='MATCH' and measured<4:
+                for event in reversed(capsule['events']):
+                    if event['label']!='market_data.get_bars': continue
+                    try:
+                        frame=codec.decode(event['output'])
+                        if not isinstance(frame,pd.DataFrame): continue
+                        from feature_integrity import audit_frame
+                        audit=audit_frame(frame)
+                        conn.execute('INSERT OR IGNORE INTO indicator_audits VALUES (?,?,?,?,?,?)',
+                            (capsule['id'],capsule['symbol'],session,time.time(),capsule['code_key'],canonical(audit)))
+                        LOGGER.info('NATIVE_INDICATOR_AUDIT %s',canonical(dict(symbol=capsule['symbol'],
+                            state=audit['state'],rows=audit.get('rows'),failures=audit.get('failures',[]))))
+                    except Exception as exc: LOGGER.warning('NATIVE_INDICATOR_AUDIT_UNAVAILABLE %s',type(exc).__name__)
+                    break
+
         return result
 
 

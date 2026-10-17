@@ -361,6 +361,27 @@ class FeatureEngine:
 
         return True
 
+    def input_issues(self, bars: pd.DataFrame) -> list[str]:
+        """Reject malformed evidence rather than counting it as usable bars."""
+        if bars is None or not isinstance(bars,pd.DataFrame) or bars.empty:
+            return ['EMPTY_INPUT']
+        if not self.REQUIRED_COLUMNS.issubset(bars.columns): return ['MISSING_COLUMNS']
+        if bars.columns.has_duplicates: return ['DUPLICATE_COLUMNS']
+        try:
+            normalized=self._ensure_utc_index(bars)
+            issues=[]
+            if len(normalized)!=len(bars): issues.append('INVALID_TIMESTAMP')
+            if normalized.index.has_duplicates: issues.append('DUPLICATE_TIMESTAMP')
+            values=normalized[list(self.REQUIRED_COLUMNS)].apply(pd.to_numeric,errors='coerce')
+            if not np.isfinite(values.to_numpy(dtype=float)).all(): issues.append('NONFINITE_OHLCV')
+            prices=values[['open','high','low','close']]
+            if (prices<=0).any().any(): issues.append('NONPOSITIVE_PRICE')
+            if (values['volume']<0).any(): issues.append('NEGATIVE_VOLUME')
+            if ((values['high']<prices.max(axis=1)) | (values['low']>prices.min(axis=1))).any():
+                issues.append('INCONSISTENT_OHLC')
+            return issues
+        except (ValueError,TypeError,OverflowError): return ['INVALID_OHLCV']
+
     def diagnose_input(
         self,
         bars: pd.DataFrame,
@@ -382,6 +403,7 @@ class FeatureEngine:
             }
 
         received_rows = len(bars)
+        input_issues = self.input_issues(bars)
 
         missing_columns = sorted(
             self.REQUIRED_COLUMNS.difference(
@@ -466,8 +488,10 @@ class FeatureEngine:
             ),
             "data_quality_ok": bool(
                 not missing_columns
+                and not input_issues
                 and valid_rows >= required_rows
             ),
+            "input_issues": input_issues,
             # Current V4 does not yet hard-reject based on
             # a standalone bar-age threshold inside
             # FeatureEngine. Keep this explicit so alerts do
@@ -479,64 +503,9 @@ class FeatureEngine:
     # BUILD FEATURES
     # ========================================================
 
-    def build(
-        self,
-        symbol: str,
-        bars: pd.DataFrame,
-    ) -> FeatureSnapshot:
-
-        symbol = str(
-            symbol or ""
-        ).strip().upper()
-
-        if not symbol:
-            raise ValueError(
-                "Symbol cannot be empty."
-            )
-
-        if not self._validate_dataframe(
-            bars
-        ):
-            logger.warning(
-                "Insufficient market data "
-                "for feature generation | symbol=%s",
-                symbol,
-            )
-
-            return FeatureSnapshot(
-                symbol=symbol,
-                data_quality_ok=False,
-            )
-
-        df = self._ensure_utc_index(
-            bars
-        )
-
-        # ----------------------------------------------------
-        # NUMERIC NORMALIZATION
-        # ----------------------------------------------------
-
-        for column in self.REQUIRED_COLUMNS:
-
-            df[column] = pd.to_numeric(
-                df[column],
-                errors="coerce",
-            )
-
-        df = df.dropna(
-            subset=list(
-                self.REQUIRED_COLUMNS
-            )
-        )
-
-        if not self._validate_dataframe(
-            df
-        ):
-            return FeatureSnapshot(
-                symbol=symbol,
-                data_quality_ok=False,
-            )
-
+    def calculate_indicators(self, bars: pd.DataFrame) -> pd.DataFrame:
+        """Native causal indicator series shared by build and offline audits."""
+        df = bars.copy()
         close = df["close"]
         volume = df["volume"]
 
@@ -664,6 +633,71 @@ class FeatureEngine:
                 np.nan,
             )
         )
+
+        return df
+
+    def build(
+        self,
+        symbol: str,
+        bars: pd.DataFrame,
+    ) -> FeatureSnapshot:
+
+        symbol = str(
+            symbol or ""
+        ).strip().upper()
+
+        if not symbol:
+            raise ValueError(
+                "Symbol cannot be empty."
+            )
+
+        if not self._validate_dataframe(
+            bars
+        ):
+            logger.warning(
+                "Insufficient market data "
+                "for feature generation | symbol=%s",
+                symbol,
+            )
+
+            return FeatureSnapshot(
+                symbol=symbol,
+                data_quality_ok=False,
+            )
+
+        if self.input_issues(bars):
+            return FeatureSnapshot(symbol=symbol,data_quality_ok=False)
+
+        df = self._ensure_utc_index(
+            bars
+        )
+
+        # ----------------------------------------------------
+        # NUMERIC NORMALIZATION
+        # ----------------------------------------------------
+
+        for column in self.REQUIRED_COLUMNS:
+
+            df[column] = pd.to_numeric(
+                df[column],
+                errors="coerce",
+            )
+
+        df = df.dropna(
+            subset=list(
+                self.REQUIRED_COLUMNS
+            )
+        )
+
+        if not self._validate_dataframe(
+            df
+        ):
+            return FeatureSnapshot(
+                symbol=symbol,
+                data_quality_ok=False,
+            )
+
+        df = self.calculate_indicators(df)
 
         # ----------------------------------------------------
         # LATEST BAR

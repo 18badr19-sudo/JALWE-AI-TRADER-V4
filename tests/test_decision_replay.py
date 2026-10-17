@@ -164,6 +164,15 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(result.state,DecisionState.READY_FOR_PAPER_EXECUTION)
         self.assertEqual(self.capsules,[])
 
+    def test_malformed_input_reason_is_saved_without_fabricated_stop_context(self):
+        engine=self.engine()
+        engine.feature_engine.build.return_value.data_quality_ok=False
+        engine.feature_engine.diagnose_input.return_value['input_issues']=['DUPLICATE_TIMESTAMP']
+        decision=self.capture(engine)
+        self.assertIn('DUPLICATE_TIMESTAMP',decision.reason)
+        self.assertIsNone(decision.metadata['research_stop_context']['model_low'])
+        engine.ai_engine.evaluate.assert_not_called()
+
     def test_normal_500_bar_capture_is_bounded_and_replayable(self):
         # This tests transcript fidelity and size, not machine-dependent speed.
         with patch.object(audit.time,'perf_counter',return_value=0.):

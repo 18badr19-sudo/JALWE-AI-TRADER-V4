@@ -2685,6 +2685,8 @@ def help_text() -> str:
         "/learning - حالة التعلم الذاتي\n"
         "/ai_status - حالة محلل الذكاء الاصطناعي المستقل\n"
         "/ai_review SNAP - أحدث تفسير محفوظ للسهم\n"
+        "/trade_audit DRH - تدقيق القرار والتنفيذ والخروج لصفقات السهم\n"
+        "/indicator_audit - فحص المؤشرات المحفوظة وتأثير طول التاريخ\n"
         "/explain SNAP - شرح آخر قرار من السجل وأدلة التنفيذ المرتبطة\n"
         "/sma_study - محاكاة SPY اليومية 20/50 المستقلة\n"
         "/replay_status - حالة تسجيل وإعادة تشغيل مسار القرار\n"
@@ -2715,6 +2717,14 @@ def help_text() -> str:
 def handle(text: str, requested_by=None) -> Any:
     cmd = str(text or "").strip()
     low = cmd.lower()
+
+    if low.split(' ',1)[0] == '/trade_audit':
+        from trade_chain_audit import status_text as trade_audit_text
+        return trade_audit_text(cmd.split(' ',1)[1] if ' ' in cmd else None)
+
+    if low == '/indicator_audit':
+        from feature_integrity import status_text as indicator_audit_text
+        return indicator_audit_text()
 
     if low.split(' ',1)[0] in {'/explain','/why'}:
         from decision_explanations import explain
@@ -2936,6 +2946,8 @@ def main() -> None:
     probe = update_persistence_probe()
     from missed_opportunity_audit import emit_audit
     emit_audit(database.database_path)
+    from trade_chain_audit import emit_audit as emit_trade_audit
+    emit_trade_audit(database.database_path)
 
     print(
         "Persistence probe | "

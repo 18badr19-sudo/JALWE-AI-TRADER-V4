@@ -1198,7 +1198,7 @@ class DecisionEngine:
         base_metadata["decision_features"] = self._decision_feature_evidence(features)
         base_metadata["research_stop_context"] = {
             "atr": getattr(features, "atr", None), "atr_timeframe": timeframe,
-            "model_low": float(bars["low"].tail(5).min()) if "low" in bars else None,
+            "model_low": float(bars["low"].tail(5).min()) if features.data_quality_ok and "low" in bars else None,
             "model_bars": 5, "available_at_decision": True,
         }
 
@@ -1236,6 +1236,10 @@ class DecisionEngine:
                     )
                     + "."
                 )
+
+            elif feature_diagnostics.get("input_issues"):
+                quality_reason = "Feature quality failed: malformed bars (" + ", ".join(
+                    str(code) for code in feature_diagnostics["input_issues"]) + ")."
 
             elif valid_rows < required_rows:
                 quality_reason = (

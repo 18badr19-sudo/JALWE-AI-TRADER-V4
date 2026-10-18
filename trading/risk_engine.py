@@ -725,6 +725,8 @@ class RiskEngine:
         confirmed_entry_price: Optional[float] = None,
         confirmed_stop_price: Optional[float] = None,
         confirmation_approved: Optional[bool] = None,
+        account_provider=None,
+        position_reader=None,
     ) -> RiskDecision:
         """
         daily_start_equity:
@@ -893,7 +895,7 @@ class RiskEngine:
         try:
 
             broker = (
-                get_alpaca_client()
+                (account_provider or get_alpaca_client)()
             )
 
             account = (
@@ -979,7 +981,7 @@ class RiskEngine:
         try:
             available_cash = self._strategy_available_cash(
                 effective_equity, broker_cash,
-                database.get_active_managed_trade_rows(),
+                (position_reader or database.get_active_managed_trade_rows)(),
             )
         except (ValueError, TypeError, KeyError, OverflowError):
             return self._reject("Invalid open strategy position values.")

@@ -59,6 +59,19 @@ def matches(features):
     return all(features[k] >= minimum for k,minimum in RULE.items())
 
 
+def snapshot_match(value, symbol, now):
+    """Pure point-in-time eligibility shared by the reader and offline lab."""
+    try:
+        f, s = value['features'], value['session']
+        eligible = (s['date'] == now.astimezone(NY).date().isoformat()
+            and f['symbol'] == symbol and f['evidence_day'] < s['date']
+            and utc(f['available_after']) <= utc(value['prepared_at']) < utc(s['open']) <= now < utc(s['close'])
+            and f.get('source_feed') == 'sip')
+        return matches(f) if eligible else None
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+
+
 def prioritize(items, *, now, symbol_of, paper, allow_live, path=None):
     baseline = list(items)
     audit = status(now, paper=paper, allow_live=allow_live)
@@ -86,11 +99,7 @@ def prioritize(items, *, now, symbol_of, paper, allow_live, path=None):
             try:
                 value = json.loads(encoded)
                 f,s = value['features'],value['session']
-                eligible = (s['date'] == now.astimezone(NY).date().isoformat()
-                    and f['symbol'] == symbol and f['evidence_day'] < s['date']
-                    and utc(f['available_after']) <= utc(value['prepared_at']) < utc(s['open']) <= now < utc(s['close'])
-                    and f.get('source_feed') == 'sip')
-                match = matches(f) if eligible else None
+                match = snapshot_match(value, symbol, now)
                 if match is True:
                     preferred[symbol] = dict(symbol=symbol, evidence_day=f['evidence_day'],
                         available_after=f['available_after'], prepared_at=value['prepared_at'],

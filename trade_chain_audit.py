@@ -54,7 +54,20 @@ def inspect_trade(trade,entry,exits,orders,decision):
         order=orders.get(order_id)
         if order is None: unknown.append('EXIT_ORDER_SNAPSHOT_MISSING'); continue
         if order.get('symbol')!=trade['symbol'] or str(order.get('side')).upper()!='SELL': findings.append('EXIT_ORDER_IDENTITY_MISMATCH')
-        if number(order.get('filled_quantity'))!=quantity: findings.append('EXIT_CUMULATIVE_QUANTITY_DIFF')
+        saved_quantity=number(order.get('filled_quantity'))
+        order_metadata=obj(order.get('metadata_json'))
+        # Legacy stop rows can still describe submission, before any execution.
+        # Their default zero is not a cumulative execution observation. Never
+        # reconstruct a broker snapshot from the ledger we are auditing.
+        submission_only=(saved_quantity==0 and order.get('filled_price') is None
+            and not order.get('filled_at')
+            and str(order.get('status')).upper() in {'NEW','SUBMITTED','ACCEPTED'}
+            and not order_metadata.get('reconciled')
+            and 'broker_filled_qty' not in order_metadata
+            and order_metadata.get('source')!='PROTECTIVE_STOP_RECONCILIATION')
+        if submission_only: unknown.append('EXIT_EXECUTION_SNAPSHOT_NOT_SAVED')
+        elif saved_quantity is None: unknown.append('EXIT_CUMULATIVE_QUANTITY_UNAVAILABLE')
+        elif saved_quantity!=quantity: findings.append('EXIT_CUMULATIVE_QUANTITY_DIFF')
         broker_average=number(order.get('filled_price'))
         if broker_average is None or broker_average<=0: unknown.append('EXIT_AVERAGE_PRICE_UNAVAILABLE')
         elif abs(broker_average-notionals[order_id]/quantity)>1e-6: findings.append('EXIT_AVERAGE_PRICE_SNAPSHOT_DIFF')

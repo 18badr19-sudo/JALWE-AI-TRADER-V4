@@ -28,6 +28,8 @@ Validation covers malformed evidence rejection, prefix invariance, intentionally
 
 ## Follow-up from real saved evidence
 
+Submission-only exit snapshots (NEW/SUBMITTED/ACCEPTED, zero default filled quantity, no fill price/time and no reconciliation evidence) now report `EXIT_EXECUTION_SNAPSHOT_NOT_SAVED` as incomplete evidence, rather than claiming a cumulative execution mismatch. Missing quantities likewise remain unknown. Terminal or reconciled zero quantities and positive quantity differences still produce review findings. This does not certify broker execution, repair historical rows, or change the independently calculated exit ledger/PnL.
+
 The first production audit found complete exit-ledger quantities for seven closed trades, but older broker stop-order rows still held submission-time quantities/prices. Future validated protective-stop fill snapshots are now persisted with the realized ledger event and managed position in the same SQLite transaction. A persistence failure rolls all three back; repeated cumulative snapshots do not add realized PnL twice. Zero-new-fill terminal observations also refresh the saved order snapshot. Historical snapshots are not fabricated or rewritten by the auditor.
 
 The saved top-level research report timestamp occurs after orchestration, so it is not used as decision start time. Timing uses the recorded native entry-quote check when available, plus broker submission/fill timestamps. Missing timing stays unavailable.

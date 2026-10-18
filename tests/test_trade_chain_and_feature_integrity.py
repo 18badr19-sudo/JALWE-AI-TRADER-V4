@@ -124,6 +124,38 @@ class TradeChainTests(unittest.TestCase):
         self.assertIn('EXACT_ENTRY_DECISION_LINK_MISSING',t['unknown'])
         self.assertIsNone(t['decision_reason']);self.assertEqual(t['realized_pnl_before_broker_fees'],-2.)
 
+    def test_submission_only_exit_is_missing_evidence_not_a_quantity_mismatch(self):
+        with self.db.connection() as conn:
+            conn.execute("UPDATE broker_orders SET status='ACCEPTED',filled_quantity=0,filled_price=NULL,filled_at=NULL WHERE order_id='SELL1'")
+        before=self.path.read_bytes()
+        t=audit.audit(self.path)['trades'][0]
+        self.assertEqual(t['state'],'INCOMPLETE_EVIDENCE')
+        self.assertIn('EXIT_EXECUTION_SNAPSHOT_NOT_SAVED',t['unknown'])
+        self.assertNotIn('EXIT_CUMULATIVE_QUANTITY_DIFF',t['findings'])
+        self.assertTrue(t['ledger_complete'])
+        self.assertEqual(t['realized_pnl_before_broker_fees'],-2.)
+        self.assertEqual(before,self.path.read_bytes())
+
+    def test_observed_zero_or_terminal_exit_still_reports_difference(self):
+        cases=[('FILLED',{}),('CANCELED',{}),('ACCEPTED',{'reconciled':True}),
+            ('ACCEPTED',{'broker_filled_qty':0}),
+            ('ACCEPTED',{'source':'PROTECTIVE_STOP_RECONCILIATION'})]
+        for status,metadata in cases:
+            with self.subTest(status=status,metadata=metadata):
+                order=dict(self.exit,status=status,filled_quantity=0,filled_price=None,
+                    filled_at=None,metadata_json=json.dumps(metadata))
+                t=audit.inspect_trade(self.trade,self.entry,self.ledger,{'SELL1':order},self.decision)
+                self.assertIn('EXIT_CUMULATIVE_QUANTITY_DIFF',t['findings'])
+
+    def test_absent_quantity_is_unknown_but_positive_quantity_mismatch_is_not_hidden(self):
+        for quantity in (None,9):
+            order=dict(self.exit,filled_quantity=quantity,filled_price=None)
+            t=audit.inspect_trade(self.trade,self.entry,self.ledger,{'SELL1':order},self.decision)
+            if quantity is None:
+                self.assertIn('EXIT_CUMULATIVE_QUANTITY_UNAVAILABLE',t['unknown'])
+                self.assertNotIn('EXIT_CUMULATIVE_QUANTITY_DIFF',t['findings'])
+            else:self.assertIn('EXIT_CUMULATIVE_QUANTITY_DIFF',t['findings'])
+
     def test_open_stop_floor_and_protection_are_saved_state_findings_only(self):
         t=copy.deepcopy(self.trade);t.update(remaining_quantity=5,stage='T2_HIT',t2_completed=1,current_stop=10.5)
         t['metadata_json']=json.dumps(dict(protective_stop_active=True,protective_stop_quantity=4,protective_stop_price=10.))

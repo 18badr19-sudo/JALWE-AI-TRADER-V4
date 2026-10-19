@@ -13,3 +13,19 @@ Archive the exact credential-free provider request body, prompt/schema fingerpri
 `/sma_study` displays a fixed SPY daily SMA20/SMA50 long/cash study. The independent research worker reads up to 252 completed provider sessions plus warmup in the same bounded window (first 51 sessions precede the test). Requires unique valid OHLCV for every calendar session; missing/invalid days stay unknown. Signals use only closed daily bars; a fresh crossing executes at the next session's open, never that signal day's price. Whole synthetic $100 allocation, fractional units, no leverage, shorts or stop. Assumed 10/25 basis points per side. Exit is the opposite crossing. Open positions remain marked separately from closed-trade PnL; no forced last-close fill. Buy/hold uses the same test start and end and corresponding entry cost. Both ending values mark remaining holdings without hypothetical liquidation costs. Split-adjusted data exclude cash dividends; not total-return evidence. Drawdown uses daily closes and can miss intraday drawdown.
 
 One SPY read and calendar read daily; failed reads back off one hour. No same-period strategy tuning, promotion, changes to native gates/risk/targets, or actual broker orders. Result is a retrospective single-symbol comparison, not statistical proof of superiority or realized profit.
+## Native enrichment capture repair
+
+The bounded replay codec explicitly supports native `NewsAnalysis`/`NewsItem`
+and `OptionsFlowAnalysis`/`OptionContractSnapshot` results, including calendar
+expiration dates. These providers previously returned dataclasses absent from
+the codec registry, causing `UNSUPPORTED_DATACLASS` and losing the transcript
+while the original decision continued. Regression tests now exercise the actual
+`apply_to_features` implementations with saved provider results and verify
+offline replay, unavailable scores, and nested results. Unknown classes and
+sensitive fields remain rejected. The source manifest includes these modules.
+
+Stale-feature logs now include the latest timestamp actually returned by the
+bar provider, numeric rows removed, and completed-bar filtering evidence.
+These observations distinguish provider response coverage from local filtering;
+they do not establish why the provider omitted a bar. No synthetic bars, alternate
+feed, relaxed freshness threshold, or extra provider request is introduced.

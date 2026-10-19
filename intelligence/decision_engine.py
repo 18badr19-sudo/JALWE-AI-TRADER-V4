@@ -1191,7 +1191,9 @@ class DecisionEngine:
                 "feed": base_metadata.get("decision_data_feed", "unknown"),
                 "bar_timestamp": getattr(features, "timestamp", None),
                 "latest_bar_age_minutes": feature_diagnostics.get("latest_bar_age_minutes"),
-                "max_bar_age_minutes": feature_diagnostics.get("max_bar_age_minutes")}, default=str))
+                "max_bar_age_minutes": feature_diagnostics.get("max_bar_age_minutes"),
+                "fetch": bars.attrs.get("bar_fetch_diagnostics", {}),
+                "completion": bars.attrs.get("completed_bar_diagnostics", {})}, default=str))
 
         # Freeze the evidence available at this decision, including failed quality
         # checks. Outcome research must never substitute a later feature snapshot.

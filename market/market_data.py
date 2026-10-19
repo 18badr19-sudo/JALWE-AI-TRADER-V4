@@ -339,6 +339,13 @@ class MarketData:
         # API returned newest -> oldest because Sort.DESC.
         # JALWE indicators require chronological order.
         df = df.sort_index().copy()
+        provider_times = pd.to_datetime(df.index, utc=True, errors="coerce")
+        latest_returned = provider_times.max()
+        fetch_evidence = {
+            "requested_as_of": end.isoformat(),
+            "provider_rows": len(df),
+            "provider_latest_bar_start": latest_returned.isoformat() if pd.notna(latest_returned) else None,
+        }
 
         required_columns = {
             "open",
@@ -393,11 +400,13 @@ class MarketData:
                 f"Invalid market bars for {symbol}"
             )
 
+        fetch_evidence["numeric_rows_removed"] = fetch_evidence["provider_rows"] - len(df)
         # Defensive final limit.
         df = completed_intraday_bars(df, timeframe, end)
         if df.empty:
             raise MarketDataError(f"No completed market bars returned for {symbol}")
         df.attrs["data_feed"] = self.get_feed_name()
+        df.attrs["bar_fetch_diagnostics"] = fetch_evidence
         return df.tail(limit)
 
     def get_observation_bars(

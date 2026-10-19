@@ -82,6 +82,21 @@ class CompletedBarTests(unittest.TestCase):
         self.assertEqual(result.index[-1], pd.Timestamp("2026-09-30T14:05:00Z"))
         self.assertTrue(result.attrs["completed_bar_diagnostics"]["completed_intraday_only"])
         self.assertEqual(result.attrs["data_feed"], "iex")
+        self.assertEqual(result.attrs['bar_fetch_diagnostics']['provider_latest_bar_start'], '2026-09-30T14:10:00+00:00')
+        self.assertEqual(result.attrs['bar_fetch_diagnostics']['numeric_rows_removed'], 0)
+        # A bad newest numeric row remains distinguishable from a provider
+        # response which genuinely ends at an old timestamp; neither is filled.
+        bad=self.bars();bad.loc[bad.index[-1],'close']=float('nan')
+        client.get_stock_bars.return_value=SimpleNamespace(df=bad)
+        result=ns['get_bars'](fake,'TEST','5m',51)
+        self.assertEqual(result.attrs['bar_fetch_diagnostics']['numeric_rows_removed'],1)
+        self.assertEqual(result.attrs['completed_bar_diagnostics']['excluded_rows'],0)
+        self.assertEqual(result.index[-1],pd.Timestamp('2026-09-30T14:05:00Z'))
+        old=self.bars();old.index=old.index-timedelta(days=3)
+        client.get_stock_bars.return_value=SimpleNamespace(df=old)
+        result=ns['get_bars'](fake,'TEST','5m',51)
+        self.assertEqual(result.attrs['bar_fetch_diagnostics']['provider_latest_bar_start'],'2026-09-27T14:10:00+00:00')
+        self.assertEqual(result.index[-1],old.index[-1])
         client.get_stock_bars.return_value = SimpleNamespace(df=self.bars().iloc[-1:])
         with self.assertRaisesRegex(RuntimeError, "No completed"):
             ns["get_bars"](fake, "TEST", "5m", 51)

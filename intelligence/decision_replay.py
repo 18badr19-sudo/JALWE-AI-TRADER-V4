@@ -8,7 +8,7 @@ are never backfilled from today's data. No pickle, saved-code execution or eval.
 from contextvars import ContextVar
 from contextlib import contextmanager,closing
 from dataclasses import fields, is_dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from functools import lru_cache
 import hashlib
@@ -37,7 +37,8 @@ MODULES=('core.models','intelligence.ai_engine','intelligence.opportunity_engine
     'intelligence.strategy_router','market.market_regime',
     'intelligence.session_strategy_engine','intelligence.trigger_engine',
     'intelligence.breakout_confirmation_engine','intelligence.external_research_bridge',
-    'market.market_context','market.session_features','intelligence.decision_engine')
+    'market.market_context','market.session_features','intelligence.decision_engine',
+    'intelligence.news_engine','intelligence.options_flow_engine')
 COMPONENTS=('market_data','feature_engine','news_engine','options_engine','ai_engine',
     'opportunity_engine','market_context_engine','strategy_router','session_feature_engine',
     'session_strategy_engine','trigger_engine','breakout_engine','risk_engine','external_research_bridge')
@@ -98,6 +99,7 @@ class Codec:
         if value is pd.NA: return {'@':'pd_na'}
         if isinstance(value,np.generic): return enc(value.item())
         if isinstance(value,datetime): return {'@':'datetime','value':value.isoformat()}
+        if type(value) is date: return {'@':'date','value':value.isoformat()}
         if isinstance(value,timedelta): return {'@':'timedelta','value':value.total_seconds()}
         if isinstance(value,pd.DataFrame):
             if len(value)>10000 or len(value.columns)>80 or not isinstance(value.index,pd.DatetimeIndex):
@@ -138,6 +140,7 @@ class Codec:
             return float(value['value'])
         if kind=='pd_na': return pd.NA
         if kind=='datetime': return datetime.fromisoformat(value['value'])
+        if kind=='date': return date.fromisoformat(value['value'])
         if kind=='timedelta': return timedelta(seconds=value['value'])
         if kind=='dict': return {dec(k):dec(v) for k,v in value['items']}
         if kind in {'list','tuple'}:

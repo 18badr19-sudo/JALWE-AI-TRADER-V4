@@ -1,7 +1,7 @@
 import copy
 from contextlib import nullcontext
-from dataclasses import fields, MISSING
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass, fields, MISSING
+from datetime import date, datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
@@ -24,6 +24,8 @@ from intelligence.breakout_confirmation_engine import BreakoutConfirmation, Brea
 from market.market_regime import MarketRegime, MarketRegimeResult
 from market.session_features import SessionFeatures
 from intelligence import decision_replay as audit
+from intelligence.news_engine import NewsEngine, NewsAnalysis, NewsItem
+from intelligence.options_flow_engine import OptionsFlowEngine, OptionsFlowAnalysis, OptionContractSnapshot
 
 
 class ReplayTests(unittest.TestCase):
@@ -118,6 +120,54 @@ class ReplayTests(unittest.TestCase):
             for method in vars(getattr(engine,component)).values():
                 if isinstance(method,Mock): method.side_effect=AssertionError('must not re-enter native dependency')
         self.assertEqual(audit.replay(capsule)['state'],'MATCH')
+
+    def test_native_news_options_results_with_nested_articles_and_contract_dates_replay(self):
+        engine=self.engine()
+        news=NewsAnalysis('TEST',True,41.,True,'EARNINGS',1,'Quarterly results',
+            articles=[NewsItem('article','Quarterly results','Public release',self.now,symbols=['TEST'])])
+        contract=OptionContractSnapshot('TEST261120C00010000','call',date(2026,11,20),10.,30)
+        options=OptionsFlowAnalysis('TEST',True,55.,'BULLISH',10.2,1,1,1,0,100,0,0.,55.,0.,top_calls=[contract])
+        engine.news_engine=NewsEngine.__new__(NewsEngine)
+        engine.news_engine.analyze=Mock(return_value=news)
+        engine.options_engine=OptionsFlowEngine.__new__(OptionsFlowEngine)
+        engine.options_engine.analyze=Mock(return_value=options)
+        decision=self.capture(engine)
+        self.assertEqual(decision.state,DecisionState.READY_FOR_PAPER_EXECUTION)
+        self.assertEqual(len(self.capsules),1)
+        engine.news_engine.analyze.assert_called_once_with('TEST')
+        engine.options_engine.analyze.assert_called_once_with('TEST')
+        capsule=self.capsules[0]; codec=audit.Codec(capsule['blobs'])
+        outputs={e['label']:codec.decode(e['output']) for e in capsule['events']}
+        self.assertEqual(outputs['news_engine.apply_to_features'],news)
+        self.assertEqual(outputs['options_engine.apply_to_features'],options)
+        engine.news_engine.analyze.side_effect=AssertionError('no provider calls during replay')
+        engine.options_engine.analyze.side_effect=AssertionError('no provider calls during replay')
+        with patch('socket.create_connection',side_effect=AssertionError('no network')):
+            self.assertEqual(audit.replay(capsule)['state'],'MATCH')
+
+    def test_unavailable_native_enrichment_is_replayable_without_inventing_scores(self):
+        engine=self.engine()
+        engine.news_engine=NewsEngine.__new__(NewsEngine)
+        engine.news_engine.analyze=Mock(return_value=NewsAnalysis('TEST',False,None,False,None,0,None))
+        engine.options_engine=OptionsFlowEngine.__new__(OptionsFlowEngine)
+        engine.options_engine.analyze=Mock(return_value=OptionsFlowAnalysis('TEST',False,None,'UNKNOWN',None,0,0,0,0,0,0,None,0.,0.))
+        self.capture(engine)
+        self.assertEqual(len(self.capsules),1)
+        features=engine.feature_engine.build.return_value
+        self.assertIsNone(features.news_score);self.assertIsNone(features.options_flow_score)
+        self.assertEqual(audit.replay(self.capsules[0])['state'],'MATCH')
+
+    def test_enrichment_support_keeps_unknown_classes_and_sensitive_fields_blocked(self):
+        @dataclass
+        class Unknown:
+            value:str
+        codec=audit.Codec()
+        with self.assertRaisesRegex(audit.CaptureUnavailable,'UNSUPPORTED_DATACLASS'):
+            codec.encode(Unknown('unapproved'))
+        with self.assertRaisesRegex(audit.ReplayAbort,'UNAPPROVED_CLASS'):
+            codec.decode({'@':'dataclass','type':__name__+'.Unknown','fields':{}})
+        options=OptionsFlowAnalysis('TEST',False,None,'UNKNOWN',None,0,0,0,0,0,0,None,0.,0.,metadata={'api_key':'do-not-save'})
+        with self.assertRaisesRegex(audit.CaptureUnavailable,'SENSITIVE_FIELD'):codec.encode(options)
 
     def test_waiting_latch_creation_and_recheck_are_replayed_with_recorded_clock_and_state(self):
         engine=self.engine('LATCH'); self.capture(engine)

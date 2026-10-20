@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 import logging
 import math
 import re
+import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any, Optional
@@ -162,6 +165,9 @@ class OptionsFlowEngine:
         r"(\d{8})$"
     )
 
+    INVALID_UNDERLYING_TTL_SECONDS = 3600
+    INVALID_UNDERLYING_CACHE_SIZE = 256
+
     def __init__(
         self,
         min_dte: int = 7,
@@ -195,6 +201,8 @@ class OptionsFlowEngine:
         self.max_spread_pct = (
             max_spread_pct
         )
+
+        self._invalid_underlyings: OrderedDict[str, float] = OrderedDict()
 
         if not settings.ALPACA_API_KEY:
             raise RuntimeError(
@@ -239,6 +247,31 @@ class OptionsFlowEngine:
             )
 
         return normalized
+
+    @staticmethod
+    def _is_invalid_underlying(exc: Exception, symbol: str) -> bool:
+        """Only cache an explicit provider rejection of this exact underlying."""
+        if getattr(exc, "status_code", None) != 400:
+            return False
+        try:
+            payload = json.loads(str(exc))
+        except (TypeError, ValueError):
+            return False
+        return (isinstance(payload, dict)
+                and str(payload.get("message", "")).strip().casefold()
+                == f"invalid underlying symbol: {symbol}".casefold())
+
+    @staticmethod
+    def _unsupported_underlying(symbol: str, *, cached: bool) -> OptionsFlowAnalysis:
+        return OptionsFlowAnalysis(
+            symbol=symbol, available=False, score=None, bias="UNAVAILABLE",
+            underlying_price=None, contract_count=0, usable_contract_count=0,
+            call_count=0, put_count=0, call_open_interest=0, put_open_interest=0,
+            put_call_oi_ratio=None, call_strength=0.0, put_strength=0.0,
+            warnings=["Option chain unavailable: provider rejected this underlying symbol."],
+            metadata={"unavailable_reason": "PROVIDER_INVALID_UNDERLYING",
+                      "cached": cached},
+        )
 
     @staticmethod
     def _safe_float(
@@ -954,6 +987,12 @@ class OptionsFlowEngine:
             symbol
         )
 
+        expires = self._invalid_underlyings.get(symbol)
+        if expires is not None:
+            if time.monotonic() < expires:
+                return self._unsupported_underlying(symbol, cached=True)
+            self._invalid_underlyings.pop(symbol, None)
+
         try:
             underlying_price = (
                 get_market_data()
@@ -1053,6 +1092,16 @@ class OptionsFlowEngine:
             )
 
         except Exception as exc:
+
+            if self._is_invalid_underlying(exc, symbol):
+                self._invalid_underlyings[symbol] = (
+                    time.monotonic() + self.INVALID_UNDERLYING_TTL_SECONDS
+                )
+                while len(self._invalid_underlyings) > self.INVALID_UNDERLYING_CACHE_SIZE:
+                    self._invalid_underlyings.popitem(last=False)
+                logger.info("OPTIONS_UNDERLYING_UNSUPPORTED symbol=%s reason=PROVIDER_INVALID_UNDERLYING",
+                            symbol)
+                return self._unsupported_underlying(symbol, cached=False)
 
             logger.exception(
                 "Option chain request failed | symbol=%s",

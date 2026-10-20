@@ -39,6 +39,9 @@ class DelayedSipResearch:
     BATCH_SIZE = 4
     GRACE_MINUTES = 10
     BACKFILL_DAYS = 7
+    RECHECK_LIMIT = 3
+    RECHECK_HOURS = 48
+    RECHECK_INTERVAL_MINUTES = 60
 
     def __init__(self, db, market_data=None):
         self.db, self.market_data = db, market_data
@@ -55,8 +58,56 @@ class DelayedSipResearch:
                 ON delayed_sip_research(source_kind, source_key)""")
             conn.execute("""CREATE INDEX IF NOT EXISTS idx_delayed_sip_due
                 ON delayed_sip_research(status, window_end, last_checked_at)""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS delayed_sip_recheck_history (
+                recheck_key TEXT PRIMARY KEY, observation_key TEXT NOT NULL,
+                checked_at TEXT NOT NULL, previous_status TEXT NOT NULL,
+                previous_result_json TEXT, new_status TEXT NOT NULL,
+                new_result_json TEXT NOT NULL
+            )""")
+            conn.execute("""CREATE INDEX IF NOT EXISTS idx_delayed_sip_recheck_history
+                ON delayed_sip_recheck_history(observation_key, checked_at)""")
         logger.info("DELAYED_SIP_RESEARCH_INIT delay_minutes=%s research_only=true",
                     SIP_RESEARCH_DELAY_MINUTES)
+        # Bounded replay of saved current-day evidence, not a new market evaluation.
+        try:
+            audit = self.completed_audit_for_ny_date(
+                datetime.now(ZoneInfo("America/New_York")).date().isoformat())
+            for record in audit["records"]:
+                logger.info("DELAYED_SIP_RESEARCH_SAVED_OUTCOME %s", json.dumps(record))
+            logger.info("DELAYED_SIP_RESEARCH_SAVED_AUDIT %s", json.dumps({
+                "date": audit["date"], "count": len(audit["records"]),
+                "truncated": audit["truncated"], "scope": "SAVED_RESULTS_NOT_NEW_EVALUATION"}))
+        except Exception as exc:
+            logger.warning("DELAYED_SIP_RESEARCH_SAVED_AUDIT_UNAVAILABLE type=%s", type(exc).__name__)
+
+    @staticmethod
+    def _audit_record(row, result, checked_at):
+        decision = json.loads(row["decision_json"])
+        return {"scope": "HISTORICAL_RESEARCH_NOT_EXECUTED_PNL",
+                "source_kind": row["source_kind"], "source_key": row["source_key"],
+                "symbol": row["symbol"], "decided_at": row["decided_at"],
+                "checked_at": checked_at, "decision_state": decision.get("state"),
+                "decision_reason": decision.get("reason"),
+                "decision_feed": row["decision_feed"], "observation_feed": "sip",
+                "window_start": row["window_start"], "window_end": row["window_end"],
+                "levels": result.get("levels", {}),
+                "execution_feasibility": "NOT_ESTABLISHED_FROM_BARS"}
+
+    def completed_audit_for_ny_date(self, date_value, limit=1000):
+        """Read existing results without fetching prices or altering decisions."""
+        day = datetime.fromisoformat(str(date_value)).date()
+        start = datetime(day.year, day.month, day.day, tzinfo=ZoneInfo("America/New_York"))
+        end = start + timedelta(days=1)
+        limit = max(1, min(int(limit), 1000))
+        with self.db.connection() as conn:
+            rows = [dict(r) for r in conn.execute("""SELECT * FROM delayed_sip_research
+                WHERE decided_at >= ? AND decided_at < ? AND status = 'COMPLETE'
+                ORDER BY decided_at, observation_key LIMIT ?""",
+                (start.astimezone(timezone.utc).isoformat(),
+                 end.astimezone(timezone.utc).isoformat(), limit + 1)).fetchall()]
+        return {"date": day.isoformat(), "truncated": len(rows) > limit,
+                "records": [self._audit_record(r, json.loads(r["result_json"]),
+                                                r["last_checked_at"]) for r in rows[:limit]]}
 
     def _sync_sources(self, now):
         cutoff = (now - timedelta(days=self.BACKFILL_DAYS)).isoformat()
@@ -112,6 +163,19 @@ class DelayedSipResearch:
                 ORDER BY last_checked_at IS NOT NULL, source_kind = 'OPPORTUNITY' DESC,
                          last_checked_at, window_end DESC
                 LIMIT ?""", (cutoff, self.BATCH_SIZE)).fetchall()]
+            # One extra read per cycle; fresh observations retain their full budget.
+            # COMPLETE and UNOBSERVABLE records can never enter this queue.
+            retries = [dict(row) for row in conn.execute("""SELECT r.* FROM delayed_sip_research r
+                WHERE r.status IN ('PARTIAL_DATA', 'DATA_UNAVAILABLE')
+                  AND r.window_end >= ? AND r.window_end <= ?
+                  AND r.last_checked_at <= ?
+                  AND (SELECT COUNT(*) FROM delayed_sip_recheck_history h
+                       WHERE h.observation_key = r.observation_key) < ?
+                ORDER BY r.last_checked_at, r.observation_key LIMIT 1""",
+                ((now - timedelta(hours=self.RECHECK_HOURS)).isoformat(), cutoff,
+                 (now - timedelta(minutes=self.RECHECK_INTERVAL_MINUTES)).isoformat(),
+                 self.RECHECK_LIMIT)).fetchall()]
+            rows.extend(retries)
         if not rows:
             return 0
         if self.market_data is None:
@@ -146,16 +210,29 @@ class DelayedSipResearch:
                 result.update(data_diagnostics=diagnostics, complete_path=False)
                 status = "DATA_UNAVAILABLE" if terminal else "PENDING"
             with self.db.connection() as conn:
-                conn.execute("""UPDATE delayed_sip_research SET status = ?, result_json = ?,
+                changed = conn.execute("""UPDATE delayed_sip_research SET status = ?, result_json = ?,
                     last_checked_at = ?, check_count = check_count + 1
-                    WHERE observation_key = ? AND status = 'PENDING'""",
-                    (status, json.dumps(result), now.isoformat(), row["observation_key"]))
+                    WHERE observation_key = ? AND status = ? AND check_count = ?""",
+                    (status, json.dumps(result), now.isoformat(), row["observation_key"],
+                     row["status"], row["check_count"]))
+                if changed.rowcount != 1:
+                    continue
+                if row["status"] in {"PARTIAL_DATA", "DATA_UNAVAILABLE"}:
+                    conn.execute("""INSERT INTO delayed_sip_recheck_history
+                        (recheck_key, observation_key, checked_at, previous_status,
+                         previous_result_json, new_status, new_result_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (f"{row['observation_key']}:{row['check_count']}", row["observation_key"],
+                         now.isoformat(), row["status"], row["result_json"], status, json.dumps(result)))
             previous = json.loads(row.get("result_json") or "{}")
             if status != "PENDING" or previous.get("data_diagnostics") != diagnostics:
                 logger.info("DELAYED_SIP_RESEARCH_DATA %s", json.dumps({
                     "symbol": row["symbol"], "source_kind": row["source_kind"],
                     "source_key": row["source_key"], "status": status, "feed": "sip",
                     "decision_feed": row["decision_feed"], **diagnostics}))
+            if status == "COMPLETE":
+                logger.info("DELAYED_SIP_RESEARCH_OUTCOME %s", json.dumps(
+                    self._audit_record(row, result, now.isoformat())))
         return len(rows)
 
     def report_for_ny_date(self, date_value):
@@ -179,6 +256,10 @@ class DelayedSipResearch:
             if completed:
                 first = lambda name: sum((r.get("levels") or {}).get("outcome") == name for r in completed)
                 lines.append(f"  هدف أولًا {first('TARGET_FIRST')} | وقف أولًا {first('STOP_FIRST')} | ترتيب غير محسوم {first('AMBIGUOUS_STOP_TARGET')} | لم تتفعل {first('NOT_ACTIVATED')}")
+                known = {"TARGET_FIRST", "STOP_FIRST", "AMBIGUOUS_STOP_TARGET", "NOT_ACTIVATED",
+                         "NO_LEVEL", "ACTIVATION_PAST_TARGET", "NO_VALID_SETUP_LEVELS"}
+                other = sum((r.get("levels") or {}).get("outcome") not in known for r in completed)
+                lines.append(f"  لم يبلغ الهدف أو الوقف {first('NO_LEVEL')} | التفعيل عند/بعد الهدف {first('ACTIVATION_PAST_TARGET')} | مستويات غير صالحة {first('NO_VALID_SETUP_LEVELS')} | تصنيف آخر/غير مسجل {other}")
                 lines.append(f"  MFE {sum(r['mfe_pct'] for r in completed) / len(completed):+.2f}% | MAE {sum(r['mae_pct'] for r in completed) / len(completed):+.2f}%")
         reasons = diagnostic_text(diagnostic_counts(rows, "result_json"))
         if reasons:
@@ -189,3 +270,4 @@ class DelayedSipResearch:
         lines.append("بحث إضافي فقط؛ لا يغيّر قرار الدخول أو تفضيلات الاستراتيجيات، ولا يثبت بيعًا لحظيًا خارج الجلسة.")
         lines.append("الحركة من المرجع الأصلي؛ هدف 2R افتراضي عند غياب T1. قد يتكرر السهم بين السجلات.")
         return "\n".join(lines)
+

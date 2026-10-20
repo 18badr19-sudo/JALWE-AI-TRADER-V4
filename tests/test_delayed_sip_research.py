@@ -195,6 +195,95 @@ class DelayedSipResearchTests(unittest.TestCase):
         self.assertTrue(all(json.loads(r[0])["mfe_pct"] < 6. for r in complete))
 
 
+    def test_recheck_recovers_same_window_and_preserves_prior_evidence(self):
+        before, _ = self.observe(self.frame(59))
+        self.market.get_research_observation_bars.reset_mock()
+        self.market.get_research_observation_bars.return_value = self.frame()
+        self.assertEqual(self.research.update_due(now=self.end + timedelta(minutes=89)), 0)
+        self.assertEqual(self.research.update_due(now=self.end + timedelta(minutes=90)), 1)
+        self.assertEqual(self.row()["status"], "COMPLETE")
+        with self.db.connection() as conn:
+            history = dict(conn.execute("SELECT * FROM delayed_sip_recheck_history").fetchone())
+        self.assertEqual(history["previous_result_json"], before["result_json"])
+        self.market.get_research_observation_bars.assert_called_once_with(
+            "TEST", self.start, self.end, as_of=self.end + timedelta(minutes=90))
+        self.assertEqual(self.research.update_due(now=self.end + timedelta(hours=3)), 0)
+
+    def test_rechecks_bounded_across_restart(self):
+        self.observe(self.frame(59))
+        for minutes in (90, 150, 210):
+            restarted = DelayedSipResearch(self.db, self.market)
+            self.assertEqual(restarted.update_due(now=self.end + timedelta(minutes=minutes)), 1)
+        self.assertEqual(self.research.update_due(now=self.end + timedelta(minutes=270)), 0)
+        self.assertEqual(self.row()["status"], "PARTIAL_DATA")
+        self.assertEqual(self.row()["check_count"], 4)
+
+    def test_expired_recheck_does_not_read(self):
+        self.observe(self.frame(59))
+        self.market.get_research_observation_bars.reset_mock()
+        self.assertEqual(self.research.update_due(now=self.end + timedelta(hours=48, seconds=1)), 0)
+        self.market.get_research_observation_bars.assert_not_called()
+
+    def test_failed_recheck_preserves_history_and_never_calls_preferences(self):
+        before, _ = self.observe(self.frame(59))
+        self.market.get_research_observation_bars.side_effect = TimeoutError("SECRET")
+        self.memory.experiments.observe = Mock(side_effect=AssertionError("preferences changed"))
+        self.research.update_due(now=self.end + timedelta(minutes=90))
+        self.assertEqual(self.row()["status"], "DATA_UNAVAILABLE")
+        self.assertNotIn("SECRET", self.row()["result_json"])
+        self.memory.experiments.observe.assert_not_called()
+        with self.db.connection() as conn:
+            self.assertEqual(conn.execute("SELECT previous_result_json FROM delayed_sip_recheck_history").fetchone()[0], before["result_json"])
+
+    def test_completed_audit_is_read_only_and_has_original_reason(self):
+        self.observe(self.frame())
+        before = self.row()
+        self.market.reset_mock()
+        audit = self.research.completed_audit_for_ny_date("2026-10-02")
+        self.assertFalse(audit["truncated"])
+        record = audit["records"][0]
+        self.assertEqual(record["decision_reason"], "waiting")
+        self.assertEqual(record["decision_state"], "WATCHING")
+        self.assertEqual(record["levels"]["outcome"], "NO_LEVEL")
+        self.assertEqual(record["source_key"], before["source_key"])
+        self.assertEqual(self.row(), before)
+        self.market.get_research_observation_bars.assert_not_called()
+        self.assertEqual(self.research.completed_audit_for_ny_date("2026-10-01")["records"], [])
+
+    def test_report_includes_previously_hidden_classifications(self):
+        self.observe(self.frame())
+        report = self.research.report_for_ny_date("2026-10-02")
+        self.assertIn("لم يبلغ الهدف أو الوقف 1", report)
+        self.assertIn("التفعيل عند/بعد الهدف 0", report)
+        self.assertIn("مستويات غير صالحة 0", report)
+        self.assertIn("تصنيف آخر/غير مسجل 0", report)
+
+    def test_retry_has_separate_one_window_budget(self):
+        self.observe(self.frame(59))
+        for i in range(5):
+            payload = copy.deepcopy(self.payload)
+            payload["symbol"] = "FRESH" + str(i)
+            self.memory.record(payload, "fresh" + str(i))
+        self.market.get_research_observation_bars.reset_mock()
+        self.market.get_research_observation_bars.return_value = self.frame()
+        self.research.update_due(now=self.end + timedelta(minutes=90))
+        calls = self.market.get_research_observation_bars.call_args_list
+        self.assertEqual(len(calls), 5)
+        self.assertTrue(all(c.args[0].startswith("FRESH") for c in calls[:4]))
+        self.assertEqual(calls[-1].args[0], "TEST")
+
+    def test_all_remaining_outcomes_are_visible_in_report(self):
+        self.observe(self.frame())
+        for outcome, label in (("ACTIVATION_PAST_TARGET", "التفعيل عند/بعد الهدف"),
+                               ("NO_VALID_SETUP_LEVELS", "مستويات غير صالحة"),
+                               ("FUTURE_UNKNOWN", "تصنيف آخر/غير مسجل")):
+            with self.db.connection() as conn:
+                result = json.loads(self.row()["result_json"])
+                result["levels"]["outcome"] = outcome
+                conn.execute("UPDATE delayed_sip_research SET result_json = ?", (json.dumps(result),))
+            self.assertIn(label + " 1", self.research.report_for_ny_date("2026-10-02"))
+
+
 class ResearchReaderTests(unittest.TestCase):
     def test_sip_reader_does_not_change_execution_feed_and_retains_empty_feed(self):
         reader = MarketData.__new__(MarketData)
@@ -230,3 +319,4 @@ class ResearchReaderTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

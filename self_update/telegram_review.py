@@ -8,6 +8,8 @@ import secrets
 import sqlite3
 import time
 import urllib.request
+from urllib.error import HTTPError
+from email.utils import parsedate_to_datetime
 
 from self_update.owner_review import OWNER, REPOSITORY
 
@@ -42,6 +44,7 @@ class ReviewUI:
                 payload TEXT NOT NULL, created REAL NOT NULL, notified INTEGER NOT NULL DEFAULT 0,
                 decision TEXT NOT NULL DEFAULT 'PENDING', decided_by TEXT, UNIQUE(pr,head,base))''')
         self.last_poll = 0
+        self.next_poll_at = 0
 
     @contextmanager
     def connect(self):
@@ -63,9 +66,39 @@ class ReviewUI:
 
     def poll(self, send):
         now = self.clock()
-        if now-self.last_poll < 300:
+        interval = 300 if self.api.token else 900
+        if now < self.next_poll_at or now-self.last_poll < interval:
             return
         self.last_poll = now
+        try:
+            self._poll(send, now)
+        except HTTPError as exc:
+            headers = exc.headers or {}
+            limited = exc.code == 429 or (exc.code == 403 and headers.get('X-RateLimit-Remaining') == '0')
+            if limited:
+                # Respect both primary and secondary GitHub rate limits. Never
+                # log URLs, response bodies, or authentication headers.
+                deadlines = [now + 60]
+                for name in ('Retry-After', 'X-RateLimit-Reset'):
+                    raw = headers.get(name)
+                    if raw is None:
+                        continue
+                    try:
+                        value = float(raw)
+                        deadline = now + value if name == 'Retry-After' else value
+                    except (ValueError, TypeError):
+                        try:
+                            deadline = parsedate_to_datetime(raw).timestamp() if name == 'Retry-After' else now
+                        except (ValueError, TypeError, OverflowError):
+                            continue
+                    if now < deadline <= now + 86400:
+                        deadlines.append(deadline)
+                self.next_poll_at = max(deadlines) if len(deadlines) > 1 else now + 3600
+            elif exc.code in (401, 403):
+                self.next_poll_at = now + 3600
+            raise
+
+    def _poll(self, send, now):
         pulls = self.api.request('GET','/pulls?state=open&per_page=20')
         if not isinstance(pulls,list):
             raise ValueError('Unavailable PR listing')
@@ -101,7 +134,8 @@ class ReviewUI:
                                    (pull['number'],head,main)).fetchone()
             if row['decision']!='PENDING' or row['notified'] or now-row['created']>86400:
                 continue
-            send(self.prompt(row))
+            if send(self.prompt(row)) is False:
+                continue
             with self.connect() as conn:
                 conn.execute('UPDATE code_owner_reviews SET notified=1 WHERE request_id=?',(row['request_id'],))
 

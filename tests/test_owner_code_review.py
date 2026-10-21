@@ -105,6 +105,18 @@ class TelegramReviewTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.callback(actor='other')
         self.assertFalse(any(m=='POST' for m,_,_ in self.api.calls))
 
+    def test_failed_notification_remains_pending_for_next_poll(self):
+        with self.ui.connect() as conn:
+            conn.execute('UPDATE code_owner_reviews SET notified=0')
+        self.ui.clock=lambda:2000.
+        self.ui.poll(lambda message: False)
+        with self.ui.connect() as conn:
+            self.assertEqual(conn.execute('SELECT notified FROM code_owner_reviews').fetchone()[0],0)
+        self.ui.clock=lambda:3000.
+        self.ui.poll(self.sent.append)
+        with self.ui.connect() as conn:
+            self.assertEqual(conn.execute('SELECT notified FROM code_owner_reviews').fetchone()[0],1)
+
     def test_approval_posts_exact_head_review_and_repeat_does_not_post_again(self):
         self.assertIn('ستعاد الاختبارات',self.callback())
         self.callback()

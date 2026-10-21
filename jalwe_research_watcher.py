@@ -1717,10 +1717,8 @@ def send_telegram(
 
     try:
 
-        with urllib.request.urlopen(
-            request,
-            timeout=15,
-        ) as response:
+        from core.telegram_transport import open_telegram
+        with open_telegram(request, timeout=15, opener=urllib.request.urlopen) as response:
 
             body = response.read()
 

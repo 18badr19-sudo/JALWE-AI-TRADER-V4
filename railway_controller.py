@@ -598,10 +598,8 @@ def tg_call(
     )
 
     try:
-        with urllib.request.urlopen(
-            req,
-            timeout=timeout,
-        ) as response:
+        from core.telegram_transport import open_telegram
+        with open_telegram(req, timeout=timeout, opener=urllib.request.urlopen) as response:
             body = response.read().decode(
                 "utf-8",
                 errors="replace",
@@ -676,6 +674,7 @@ class TelegramPollHealth:
         # the provider's description. Keep authentication errors visible.
         message = str(exc).lower()
         return any(term in message for term in (
+            "telegram rate limited", "too many requests",
             "bad gateway", "gateway timeout", "service unavailable",
             "http 500", "http 502", "http 503", "http 504",
             "read operation timed out", "timed out",
@@ -3035,6 +3034,7 @@ def main() -> None:
     telegram_poll_health = TelegramPollHealth(
         float(os.getenv("JALWE_TELEGRAM_POLL_ALERT_AFTER_SECONDS", "90"))
     )
+    telegram_poll_resume_at = 0.0
     telegram_conflict_alert_after_seconds = max(
         30,
         int(
@@ -3051,6 +3051,12 @@ def main() -> None:
         maybe_send_scheduled_reports()
         maybe_run_learning_cycle()
         poll_code_review_requests()
+
+        # Keep child monitoring and reporting alive while a long poll is deferred.
+        remaining = telegram_poll_resume_at - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(5.0, remaining))
+            continue
 
         try:
             polling_updates = True
@@ -3085,6 +3091,13 @@ def main() -> None:
 
         except Exception as exc:
             error_text = str(exc)
+
+            from core.telegram_transport import TelegramRateLimit
+            if polling_updates and isinstance(exc, TelegramRateLimit):
+                telegram_poll_resume_at = time.monotonic() + exc.retry_after
+                print(f'TELEGRAM_POLL_RATE_LIMIT retry_after={exc.retry_after:g}', flush=True)
+                # Do not send another Telegram request to report its own quota.
+                continue
 
             if polling_updates and telegram_poll_health.is_transient(exc):
                 telegram_conflict_started_at = None

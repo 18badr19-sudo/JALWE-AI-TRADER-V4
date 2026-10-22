@@ -17,6 +17,8 @@ def _quantity(value):
 
 def apply_protective_stop_snapshot(database, trade_id, trade, raw):
     metadata = dict(trade.metadata or {})
+    original_metadata = dict(metadata)
+    original_stage = trade.stage
     order_id = str(metadata.get('protective_stop_order_id') or '').strip()
     if not order_id:
         raise ValueError('Protective stop has no persisted broker identity.')
@@ -98,7 +100,10 @@ def apply_protective_stop_snapshot(database, trade_id, trade, raw):
             metadata={'source': 'PROTECTIVE_STOP_RECONCILIATION', 'protective_stop': True},
         )
     else:
-        database.save_managed_trade(trade_id, trade)
+        # An unchanged, unfilled stop is read on every management tick. Avoid
+        # rewriting the same position while retaining validation on every read.
+        if metadata != original_metadata or trade.stage != original_stage:
+            database.save_managed_trade(trade_id, trade)
         if filled>0 or raw_status in TERMINAL_STATUSES:
             database.save_broker_order(snapshot)
     return dict(checked=True, active=active, filled=raw_status == 'filled',

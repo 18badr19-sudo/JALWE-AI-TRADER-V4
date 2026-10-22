@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
@@ -58,11 +59,13 @@ class Database:
     @contextmanager
     def connection(
         self,
+        *,
+        timeout_seconds: float = 30,
     ) -> Iterator[sqlite3.Connection]:
 
         conn = sqlite3.connect(
             self.database_path,
-            timeout=30,
+            timeout=timeout_seconds,
         )
 
         conn.row_factory = sqlite3.Row
@@ -77,7 +80,7 @@ class Database:
             )
 
             conn.execute(
-                "PRAGMA busy_timeout=30000;"
+                f"PRAGMA busy_timeout={int(timeout_seconds * 1000)};"
             )
 
             yield conn
@@ -781,6 +784,30 @@ class Database:
     # MANAGED TRADE PERSISTENCE
     # ========================================================
 
+    MANAGED_WRITE_ATTEMPTS = 3
+    MANAGED_WRITE_TIMEOUT_SECONDS = 10
+
+    @staticmethod
+    def _is_busy(exc: sqlite3.OperationalError) -> bool:
+        code = getattr(exc, 'sqlite_errorcode', None)
+        if code is not None:
+            return (code & 255) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+        return str(exc).lower() in {'database is locked', 'database table is locked'}
+
+    def _save_managed_trade_with_retry(self, trade_id, trade, entry_order_id, entry_fill_price):
+        # Retry only a rolled-back database upsert. Never replay broker calls or
+        # a caller-owned ledger/fill transaction. Keep the old ~30s total budget.
+        for attempt in range(self.MANAGED_WRITE_ATTEMPTS):
+            try:
+                with self.connection(timeout_seconds=self.MANAGED_WRITE_TIMEOUT_SECONDS) as conn:
+                    self.save_managed_trade(trade_id, trade, entry_order_id,
+                                            entry_fill_price, _connection=conn)
+                return
+            except sqlite3.OperationalError as exc:
+                if not self._is_busy(exc) or attempt + 1 == self.MANAGED_WRITE_ATTEMPTS:
+                    raise
+                time.sleep(.05 * (attempt + 1))
+
     def save_managed_trade(
         self,
         trade_id: str,
@@ -803,6 +830,10 @@ class Database:
             raise ValueError(
                 "trade_id cannot be empty."
             )
+
+        if _connection is None:
+            self._save_managed_trade_with_retry(trade_id, trade, entry_order_id, entry_fill_price)
+            return
 
         metadata_json = json.dumps(
             trade.metadata or {},

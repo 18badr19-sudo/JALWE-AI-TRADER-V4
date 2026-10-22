@@ -2110,7 +2110,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 
 def extended_exit_status_text() -> str:
-    if not _env_bool('JALWE_EXTENDED_EXIT_ENABLED', True):
+    if not _env_bool('JALWE_EXTENDED_EXIT_ENABLED', False):
         return '🌙 البيع خارج الجلسة: معطّل بالإعدادات'
     try:
         with database.connection() as conn:

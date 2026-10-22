@@ -162,7 +162,7 @@ def _looks_like_real_secret(
 
 @dataclass(frozen=True)
 class Settings:
-    EXTENDED_EXIT_ENABLED: bool = _get_bool('JALWE_EXTENDED_EXIT_ENABLED', True)
+    EXTENDED_EXIT_ENABLED: bool = _get_bool('JALWE_EXTENDED_EXIT_ENABLED', False)
     MAX_EXIT_SLIPPAGE_PCT: float = _get_float('JALWE_MAX_EXIT_SLIPPAGE_PCT', 0.35)
 
 

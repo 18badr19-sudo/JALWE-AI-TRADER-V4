@@ -51,6 +51,8 @@ SCHEMA['properties']['roles'] = {'type': 'array', 'items': {'type': 'object',
         'evidence_refs': {'type': 'array', 'items': {'type': 'string'}}},
     'required': ['role', 'assessment', 'reason_ar', 'evidence_refs']}}
 SCHEMA['required'].append('roles')
+SCHEMA['properties']['scenarios'].update(minItems=3, maxItems=3)
+SCHEMA['properties']['roles'].update(minItems=3, maxItems=3)
 INSTRUCTIONS = '''Review a recorded JALWE PAPER decision using only the supplied facts.
 You are an independent shadow analyst, with no tools or trading authority.
 Explain in Arabic what supports or contradicts the native decision. Distinguish
@@ -95,6 +97,51 @@ def request_body(config, evidence):
         'input': content, 'store': False, 'reasoning': {'effort': 'low'}, 'max_output_tokens': 2000,
         'text': {'format': {'type': 'json_schema', 'name': 'jalwe_shadow_review',
                             'schema': SCHEMA, 'strict': True}}}
+
+
+# Persist only our fixed validation codes, never arbitrary provider error text.
+REVIEW_ERROR_CODES = frozenset({
+    'DUPLICATED_ROLES',
+    'DUPLICATED_SCENARIOS',
+    'GEMINI_CONFIGURATION_NOT_APPROVED',
+    'GEMINI_REFUSAL_OR_MISSING_OUTPUT',
+    'INCOMPLETE_GEMINI_RESPONSE',
+    'INCOMPLETE_MODEL_RESPONSE',
+    'INVALID_AGREEMENT',
+    'INVALID_MISSING_EVIDENCE',
+    'INVALID_MODEL_JSON',
+    'INVALID_PROVIDER_HTTP_STATUS',
+    'INVALID_REVIEW_FIELDS',
+    'INVALID_REVIEW_TEXT',
+    'INVALID_ROLE',
+    'INVALID_ROLE_FIELDS',
+    'INVALID_ROLE_REASON',
+    'INVALID_SCENARIO',
+    'INVALID_SCENARIO_FIELDS',
+    'INVALID_SCENARIO_REASON',
+    'MISSING_ROLES',
+    'MISSING_SCENARIOS',
+    'MODEL_REFUSAL_OR_MISSING_OUTPUT',
+    'NO_VERIFIED_CATALYST_INPUT',
+    'OPENAI_CONFIGURATION_NOT_APPROVED',
+    'OVERSIZED_GEMINI_RESPONSE',
+    'OVERSIZED_MODEL_RESPONSE',
+    'RECORDED_REQUEST_MISMATCH',
+    'ROLE_SUPPORTED_WITHOUT_EVIDENCE',
+    'SUPPORTED_WITHOUT_EVIDENCE',
+    'UNSUPPORTED_EVIDENCE_REFERENCE',
+    'UNSUPPORTED_ROLE_EVIDENCE',
+})
+
+
+def review_error_kind(exc):
+    if type(exc) is ProviderHTTPError:
+        return exc.kind
+    if isinstance(exc, ReviewParseError):
+        return 'INVALID_MODEL_JSON'
+    if type(exc) is ValueError and str(exc) in REVIEW_ERROR_CODES:
+        return str(exc)
+    return type(exc).__name__
 
 
 def bounded_int(value, default, ceiling):
@@ -407,12 +454,15 @@ class ShadowAdvisor:
             conn.execute("UPDATE shadow_reviews SET state='RUNNING' WHERE id=?", (row['id'],))
         evidence = json.loads(row['evidence'])
         raw_output=None
+        error_stage = 'REQUEST_INTEGRITY'
         try:
             if json.loads(row['request_json'])!=request_body(self.config,evidence):
                 raise ValueError('RECORDED_REQUEST_MISMATCH')
+            error_stage = 'PROVIDER_RESPONSE'
             result, usage = self.client.review(evidence)
             raw_output=usage.get('_raw_output') if isinstance(usage.get('_raw_output'),str) else json.dumps(result,ensure_ascii=False)
             raw_output=raw_output[:65536]
+            error_stage = 'EVIDENCE_VALIDATION'
             validate_review(result, evidence)
             # Keep only accounting fields; arbitrary provider content never enters logs.
             usage = {k: v for k, v in usage.items() if k in {'input_tokens', 'output_tokens', 'total_tokens'} and type(v) is int}
@@ -426,13 +476,13 @@ class ShadowAdvisor:
         except Exception as exc:
             if isinstance(exc,ReviewParseError) and isinstance(exc.raw_output,str):
                 raw_output=exc.raw_output[:65536]
-            error = exc.kind if type(exc) is ProviderHTTPError else type(exc).__name__
+            error = review_error_kind(exc)
             result, usage, state = None, {}, 'FAILED'
         with self.connect() as conn:
             conn.execute('UPDATE shadow_reviews SET state=?,result=?,usage=?,error_kind=?,finished=?,raw_output=? WHERE id=?',
                 (state,json.dumps(result,ensure_ascii=False),json.dumps(usage),error,self.clock(),raw_output,row['id']))
         LOGGER.info('SHADOW_AI_REVIEW %s', json.dumps({'id': row['id'], 'symbol': row['symbol'],
-            'state': state, 'error_kind': error, 'provider': row['provider'], 'model': row['model'], 'execution_authority': False}))
+            'state': state, 'error_kind': error, 'error_stage': error_stage if error else None, 'provider': row['provider'], 'model': row['model'], 'execution_authority': False}))
         return True
 
     def start(self):
@@ -519,6 +569,8 @@ def advisor_status_text(symbol=None):
             json.loads(row['evidence'])['facts']['feature_timestamp']]
         if row['state'] == 'FAILED' and re.fullmatch(r'(?:GEMINI|OPENAI)_HTTP_[1-5][0-9]{2}', str(row['error_kind'])):
             lines.append('رمز خطأ الاتصال: ' + row['error_kind'])
+        if row['state'] == 'FAILED' and row['error_kind'] in REVIEW_ERROR_CODES:
+            lines.append('سبب رفض التحليل: ' + row['error_kind'])
         if row['state'] == 'ANALYZED':
             result = json.loads(row['result'])
             lines += [result['agreement'], result['summary_ar']]

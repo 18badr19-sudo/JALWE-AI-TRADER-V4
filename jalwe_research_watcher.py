@@ -3091,6 +3091,9 @@ def _cancel_protective_stop(trade_id, trade, execution_engine):
         raise
 
 
+_protective_stop_observed_at: dict[str, float] = {}
+
+
 def _sync_protective_stop(trade_id: str, trade: Any, execution_engine: Any) -> dict[str, Any]:
     if not bool(settings.BROKER_PROTECTIVE_STOP_ENABLED):
         return {'enabled': False, 'active': False, 'reason': 'DISABLED'}
@@ -3120,8 +3123,20 @@ def _sync_protective_stop(trade_id: str, trade: Any, execution_engine: Any) -> d
             unfilled_qty = stored_qty - int(snapshot['filled_quantity'])
             if active and unfilled_qty == quantity and (abs(stored_stop - desired_stop) <= 0.0001):
                 metadata['protective_stop_active'] = True
-                metadata['protective_stop_status'] = status
+                metadata['protective_stop_status'] = snapshot['status']
                 trade.metadata = metadata
+                observed_at = time.monotonic()
+                last_observed = _protective_stop_observed_at.get(trade_id)
+                if last_observed is None or observed_at - last_observed >= 900:
+                    logger.info('BROKER_PROTECTION_OBSERVED %s', json.dumps({
+                        'trade_id': trade_id, 'symbol': trade.symbol, 'order_id': order_id,
+                        'source': 'BROKER_GET_ORDER', 'checked_at': utc_now_iso(),
+                        'status': status, 'broker_quantity': str(getattr(raw, 'qty', '')),
+                        'filled_quantity': snapshot['filled_quantity'],
+                        'local_remaining_quantity': quantity,
+                        'broker_stop_price': str(getattr(raw, 'stop_price', '')),
+                    }))
+                    _protective_stop_observed_at[trade_id] = observed_at
                 return {'enabled': True, 'active': True, 'order_id': order_id, 'quantity': quantity, 'stop_price': desired_stop, 'status': status, 'changed': False}
             if status == 'filled':
                 metadata['protective_stop_active'] = False
@@ -3302,12 +3317,15 @@ def _management_trade_scan_start(
 
 def _defer_extended_exit(trade_id, trade, execution_engine, reason):
     """Keep broker protection and persist a bounded, restart-safe diagnostic."""
+    # Inspect/reconcile the broker stop before an optional diagnostic write can
+    # contend with another writer. Fills still require atomic persistence.
+    _sync_protective_stop(trade_id, trade, execution_engine)
     metadata = trade.metadata if isinstance(trade.metadata, dict) else {}
     changed = metadata.get('extended_exit_data_blocked') != reason
-    metadata['extended_exit_data_blocked'] = reason
-    trade.metadata = metadata
-    database.save_managed_trade(trade_id, trade)
-    _sync_protective_stop(trade_id, trade, execution_engine)
+    if changed:
+        metadata['extended_exit_data_blocked'] = reason
+        trade.metadata = metadata
+        database.save_managed_trade(trade_id, trade)
     checkpoint(database, trade_id, trade)
     if changed:
         logger.warning('Extended exit deferred | symbol=%s reason=%s', trade.symbol, reason)
@@ -4305,6 +4323,10 @@ def main() -> None:
     print("DECISION_OUTCOME_MEMORY: ENABLED | horizon=60m | all decisions | research only", flush=True)
     print("STRATEGY_EXPERIMENTS: ENABLED | six native candidates | paired chronological validation | PAPER preference only", flush=True)
     print("STRATEGY_POLICY_GUARD: ENABLED | forward simulated monitoring | durable versions | 7d rollback cooldown", flush=True)
+    print('EXIT_SESSION_POLICY ' + json.dumps({
+        'extended_exit_enabled': bool(settings.EXTENDED_EXIT_ENABLED),
+        'closed_session_behavior': 'RECONCILE_PROTECTION_ONLY',
+    }), flush=True)
     if settings.EXTENDED_EXIT_ENABLED:
         extended_exit_data_access()
 

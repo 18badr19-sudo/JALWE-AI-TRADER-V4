@@ -63,7 +63,15 @@ def simulate(data,session):
         cost_model='ASSUMED_ALL_IN_SPREAD_SLIPPAGE_FEES_NOT_MEASURED',cost_bps_per_side=list(COST_BPS))
     quality=observe_session(data,session)
     if quality['status']!='COMPLETE': return dict(base,state='UNKNOWN_DATA',scenarios={},missing_minutes=quality.get('missing_minutes'))
-    bars=data.loc[(data.index>=utc(session['open']))&(data.index<utc(session['close']))]
+    # The coverage validator sorts/coerces a copy. Use the same canonical
+    # expected minutes for modelling, rather than the unvalidated raw order.
+    import pandas as pd
+    expected=pd.date_range(utc(session['open']),utc(session['close']),freq='min',inclusive='left')
+    bars=data.loc[data.index.isin(expected),['open','high','low','close','volume']].copy()
+    if bars.map(lambda v:type(v).__name__ in {'bool','bool_'}).any().any():
+        return dict(base,state='UNKNOWN_DATA',scenarios={},reason='BOOLEAN_OHLCV')
+    bars.index=pd.to_datetime(bars.index,utc=True)
+    bars=bars.apply(pd.to_numeric,errors='coerce').sort_index()
     if len(bars)<17: return dict(base,state='INSUFFICIENT_SESSION',scenarios={})
     trigger,stop=float(bars.high.iloc[:15].max()),float(bars.low.iloc[:15].min())
     base.update(trigger=trigger,stop=stop,opening_range_end=(utc(session['open'])+timedelta(minutes=15)).isoformat())

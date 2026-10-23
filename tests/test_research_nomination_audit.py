@@ -34,7 +34,7 @@ class NominationAuditTests(unittest.TestCase):
 
     def test_late_missing_or_tampered_evidence_cannot_explain_an_exclusion(self):
         published=packet(('OTHER',)); candidate=record()
-        for snapshot in (None,dict(candidate,prepared_at=SESSION['open'])):
+        for snapshot in (None,dict(candidate,prepared_at=SESSION['open']),record('WRONG')):
             text='\n'.join(nomination_text('MATCH',SESSION['date'],published,dict(snapshot=snapshot)))
             self.assertIn('سبب عدم الترشيح غير محسوم',text)
             self.assertNotIn('لم يجتز',text)

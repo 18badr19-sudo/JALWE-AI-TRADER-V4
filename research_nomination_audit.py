@@ -124,7 +124,9 @@ def nomination_text(symbol,day,packet,local):
     if nominated:
         lines.append('الشروط الأصلية للترشيح مجتازة؛ وجوده بالقائمة لا يثبت وصوله إلى APEX أو شراءه.')
         return lines
-    record=local.get('snapshot'); result=checks(record,packet['session'],packet['frozen_at'])
+    record=local.get('snapshot')
+    if record and record.get('features',{}).get('symbol')!=symbol:record=None
+    result=checks(record,packet['session'],packet['frozen_at'])
     if result['state'] in {'MISSING_SNAPSHOT','SNAPSHOT_NOT_AVAILABLE_AT_FREEZE','INVALID_SNAPSHOT_TIMING'}:
         lines.append('مدخلات السهم المتاحة عند تجميد القائمة غير محفوظة أو غير صالحة؛ سبب عدم الترشيح غير محسوم.')
         return lines

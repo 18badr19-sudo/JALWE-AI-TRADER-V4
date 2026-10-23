@@ -212,6 +212,7 @@ class MoveResearchWorker:
         now = now or datetime.now(timezone.utc)
         health = {'state':'STARTING'}
         try:
+            self.store.prune_retained_evidence(now)
             # Process-unique worker and durable run markers protect restart deduplication.
             sessions = self.provider.calendar(now)
             symbols = self.store.state('universe_cache')
@@ -246,6 +247,7 @@ class MoveResearchWorker:
             prefetched_count = len(frames)
             checked_frames = set()
             for row in selected:
+                evidence = self.store.retained_evidence(row['episode_key'],now)
                 try:
                     frame_key = (row['symbol'],row['session']['open'],row['session']['close'])
                     if frame_key not in checked_frames:
@@ -257,8 +259,18 @@ class MoveResearchWorker:
                             raw = recheck_absent_bars(self.provider,row['symbol'],raw,row['session'],initial,now)
                         frames[frame_key] = raw
                         checked_frames.add(frame_key)
-                    data = frames[frame_key]
+                    raw = frames[frame_key]
+                    latest = observe_session(raw,row['session'])
+                    from market.retained_research_bars import merge_session_evidence
+                    data, evidence = merge_session_evidence(raw,evidence,symbol=row['symbol'],
+                        start=utc(row['session']['open']),end=utc(row['session']['close']),checked_at=now)
                     result = observe_session(data,row['session'])
+                    result['latest_read_coverage'] = {k:latest.get(k) for k in (
+                        'status','observed_minutes','missing_minutes','duplicates','data_diagnostics')}
+                    result['evidence_recovery'] = dict(protocol=evidence['protocol'],
+                        combined_valid_minutes=result.get('observed_minutes',0),
+                        latest_valid_minutes=latest.get('observed_minutes',0),
+                        scope='SAME_SYMBOL_SPLIT_SIP_SESSION_ONLY_NOT_EXECUTED_PNL')
                     if row['role']=='ENTRY_STUDY':
                         from prior_day_entry_study import simulate as simulate_entry
                         result['entry_study']=simulate_entry(data,row['session'])
@@ -294,7 +306,8 @@ class MoveResearchWorker:
                     from market.research_diagnostics import error_diagnostics
                     result = dict(status='DATA_UNAVAILABLE',outcome=None,error_type=type(exc).__name__,
                                   diagnostic_version=VERSION,data_diagnostics=error_diagnostics(exc))
-                if self.store.settle(row['episode_key'],result,now,retry=row['status'] != 'PENDING'):
+                if self.store.settle(row['episode_key'],result,now,retry=row['status'] != 'PENDING',
+                                     expected_attempts=row['attempts'],bar_evidence=evidence):
                     processed_count += 1
                 if row['role']=='JUMP_CASE':
                     path = result.get('jump_path',{})
@@ -327,6 +340,8 @@ class MoveResearchWorker:
             patterns = {'state':'UNAVAILABLE','error_type':type(exc).__name__}
             logger.warning('MARKET_MOVE_PATTERNS_UNAVAILABLE %s',type(exc).__name__)
         key, packet = self.store.publish(published_at,health,patterns=patterns)
+        logger.info('MARKET_RESEARCH_FINDINGS %s',json.dumps(packet.get('findings',{}),
+            sort_keys=True,allow_nan=False))
         logger.info('MARKET_NEWS_STATISTICS %s',json.dumps(packet.get('news_statistics',{}),
             sort_keys=True,allow_nan=False))
         try:

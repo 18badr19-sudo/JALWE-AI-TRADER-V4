@@ -256,6 +256,9 @@ class MoveStore:
                 CREATE TABLE IF NOT EXISTS move_packets (
                     packet_id TEXT PRIMARY KEY, published_at TEXT NOT NULL, payload_json TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS move_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS move_minute_evidence (
+                    episode_key TEXT PRIMARY KEY, expires_at TEXT NOT NULL, evidence_json TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS idx_move_evidence_expiry ON move_minute_evidence(expires_at);
                 CREATE TABLE IF NOT EXISTS move_pattern_features (
                     session_day TEXT NOT NULL, symbol TEXT NOT NULL, payload_json TEXT NOT NULL,
                     PRIMARY KEY(session_day,symbol));
@@ -389,12 +392,27 @@ class MoveStore:
             conn.execute('DELETE FROM move_pattern_features WHERE session_day < ?',(session['date'],))
         return True
 
-    def settle(self, key, result, now, *, retry=False):
+    def retained_evidence(self, key, now):
+        with self.connect() as conn:
+            row = conn.execute('SELECT evidence_json FROM move_minute_evidence WHERE episode_key=? AND expires_at>=?',
+                               (key,now.isoformat())).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def prune_retained_evidence(self, now):
+        # Bound each cleanup transaction; raw retry evidence is not kept for 90 days.
+        with self.connect() as conn:
+            return conn.execute('''DELETE FROM move_minute_evidence WHERE episode_key IN
+                (SELECT episode_key FROM move_minute_evidence WHERE expires_at<? LIMIT 1000)''',
+                (now.isoformat(),)).rowcount
+
+    def settle(self, key, result, now, *, retry=False, expected_attempts=None, bar_evidence=None):
         if result['status'] not in {'COMPLETE', 'PARTIAL_DATA', 'DATA_UNAVAILABLE'}:
             raise ValueError('Invalid observation status')
         with self.connect() as conn:
             row = conn.execute('SELECT * FROM move_episodes WHERE episode_key=?', (key,)).fetchone()
             if row is None:
+                return False
+            if expected_attempts is not None and row['attempts'] != expected_attempts:
                 return False
             if row['status'] != 'PENDING':
                 from market_move_diagnostics import observation_due
@@ -407,6 +425,15 @@ class MoveStore:
                 WHERE episode_key=? AND status=? AND attempts=?''',
                 (result['status'], json.dumps(result, allow_nan=False), now.isoformat(), key,
                  row['status'], row['attempts'])).rowcount
+            if changed:
+                from market_move_diagnostics import MAX_ATTEMPTS, RETRY_HORIZON
+                anchor = utc(row['frozen_at']) if row['role']=='JUMP_CASE' else utc(json.loads(row['session_json'])['close'])
+                expires = anchor+RETRY_HORIZON
+                if result['status']=='COMPLETE' or row['attempts']+1>=MAX_ATTEMPTS or expires<now:
+                    conn.execute('DELETE FROM move_minute_evidence WHERE episode_key=?',(key,))
+                elif bar_evidence is not None:
+                    conn.execute('INSERT OR REPLACE INTO move_minute_evidence VALUES (?,?,?)',
+                                 (key,expires.isoformat(),json.dumps(bar_evidence,allow_nan=False)))
         return bool(changed)
 
     def state(self, key, value=None):
@@ -489,6 +516,8 @@ class MoveStore:
                     'Missing minutes remain inconclusive', 'News failures remain unavailable, never neutral scores',
                     'Retrospective SIP context was not necessarily available live',
                     'Research thresholds 8% up/3% down are not trading targets or stops'])
+        from market_research_findings import findings
+        packet['findings'] = findings(packet)
         key = hashlib.sha256(json.dumps(packet, sort_keys=True).encode()).hexdigest()
         with self.connect() as conn:
             conn.execute('INSERT OR IGNORE INTO move_packets VALUES (?,?,?)',
@@ -532,6 +561,7 @@ def read_packet(symbol=None, *, now=None, path=None):
         result['cases'] = [c for c in packet['latest_cases'] if symbol is None or c['symbol'] == symbol]
         result['diagnostics'] = packet.get('diagnostics', {})
         result['patterns'] = packet.get('patterns', {})
+        result['findings'] = packet.get('findings', {})
         result['factor_benchmark'] = packet.get('factor_benchmark', {})
         result['news_statistics'] = packet.get('news_statistics', {})
         result['priority_link'] = packet.get('priority_link', {})
@@ -568,6 +598,12 @@ def report_text(packet):
         f"عينات مجمدة قبل الجلسة: {packet['prospective_episodes']} | دراسات صعود لاحقة: {packet['hot_case_episodes']}",
         f"مكتملة: {counts.get('COMPLETE', 0)} | تنتظر: {counts.get('PENDING', 0)} | ناقصة/غير متاحة: {counts.get('PARTIAL_DATA',0)+counts.get('DATA_UNAVAILABLE',0)}",
         f"مقارنات مستقبلية مكتملة: {comp['complete_pairs']} على {comp['unique_days']} أيام | {comparisons.get(comp['state'], 'غير متاح')}"]
+    knowledge=packet.get('findings',{}).get('selected_jump_group',{})
+    if knowledge.get('cases'):
+        lines.append(f"🧠 صفات مشتركة بين {knowledge['cases']} قفزة مكتملة ≥{knowledge['min_rise_pct']}%:")
+        for fact in knowledge.get('factors',[]):
+            lines.append(f"  {fact['label']}: {fact['present']}/{fact['known']} | مجهول {fact['unknown']}")
+        lines.append('نسبة ظهور بين قافزين مختارين، وليست نسبة نجاح شراء. التفاصيل: /research_findings')
     jumps = packet.get('historical_jumps',{})
     batch = health.get('study_batch',{})
     if batch:

@@ -48,7 +48,8 @@ def findings(packet):
             forward=packet.get('factor_benchmark',{}).get('forward',{}).get('evidence',{}).get('rules',{}).get('ALL_THREE',{})),
         pipeline=dict(priority=packet.get('priority_link',{}),trace=packet.get('priority_trace',{}),
             native=native,native_pnl_available=native.get('state')=='NATIVE_RECONCILED_EXITS'),
-        simulation=packet.get('entry_study',{}),automatic_application=False,execution_authority=False)
+        simulation=packet.get('entry_study',{}),archive_simulation=packet.get('archive_study',{}),
+        automatic_application=False,execution_authority=False)
 
 
 def findings_text(packet):
@@ -90,6 +91,9 @@ def findings_text(packet):
                 lines.append(f"تكلفة مفترضة {int(bps)/100:.2f}% لكل جانب: متوسط {mean:+.2f}R من {cost.get('simulated_exits',0)} مخرج؛ محاكاة وليست أرباح PAPER.")
         lines.append('نموذج نطاق أول 15 دقيقة: دخول افتتاح الدقيقة التالية للتأكيد، وقف قاع النطاق وهدف 2R؛ العينة الصغيرة لا تثبت أفضلية.')
     native=value['pipeline']['native']
+    archive=value['archive_simulation']
+    if archive.get('total'):
+        lines.append(f"إعادة اختبار الأرشيف مستقلة: {archive['total']} سهم/جلسة | أزواج بمسارات مكتملة {archive.get('pairs_complete_paths',0)}/{archive.get('pairs_selected',0)}؛ التفاصيل /research_archive.")
     if value['pipeline']['native_pnl_available']:
         lines.append(f"PAPER المرتبط: {native.get('unique_trades',0)} صفقة لها مخارج مسجلة؛ المحقق قبل رسوم الوسيط ${native['realized_pnl_before_broker_fees']:+.2f}.")
     else: lines.append('PAPER المرتبط: لم يتوفر دليل خروج مرتبط؛ الربح غير معلوم وليس صفرًا.')

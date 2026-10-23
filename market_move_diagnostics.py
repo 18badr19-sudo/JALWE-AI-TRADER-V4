@@ -18,7 +18,7 @@ def observation_due(row, now):
         return False
     if row['status'] == 'PENDING':
         return True
-    anchor = utc(row['frozen_at']) if row['role'] == 'JUMP_CASE' else close
+    anchor = utc(row['frozen_at']) if row['role'] in {'JUMP_CASE','ARCHIVE_STUDY'} else close
     if (row['status'] not in {'PARTIAL_DATA', 'DATA_UNAVAILABLE'}
             or row['attempts'] >= MAX_ATTEMPTS or now > anchor+RETRY_HORIZON):
         return False

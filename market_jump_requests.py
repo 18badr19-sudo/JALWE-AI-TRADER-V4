@@ -83,7 +83,7 @@ def schedule_studies(rows, keys, limit=12, *, bounds=None, discovery_bounds=None
         # because its low collapsed. No chronology is inferred from daily bars.
         upward = valid_bound((discovery_bounds or {}).get(r['symbol']+'|'+r['session_day'])) if r['role']=='JUMP_CASE' else 0.
         return (r['status']!='PENDING',upward<25,-upward if upward>=25 else 0,*rank(r)[1:])
-    other = sorted((r for r in rows if not r['prospective'] and r['role']!='ENTRY_STUDY' and not
+    other = sorted((r for r in rows if not r['prospective'] and r['role'] not in {'ENTRY_STUDY','ARCHIVE_STUDY'} and not
                     (r['role']=='JUMP_CASE' and (r['symbol'],r['session_day']) in keys)),key=discovery_rank)
     selected = forward[:limit]
     take = min(8,max(0,limit-len(selected)))
@@ -92,6 +92,12 @@ def schedule_studies(rows, keys, limit=12, *, bounds=None, discovery_bounds=None
     # cohorts and explicit requests retain priority. Total provider budget stays fixed.
     entry=sorted((r for r in rows if r['role']=='ENTRY_STUDY'),key=rank)
     selected+=entry[:min(4,max(0,limit-len(selected)))]
+    # Retrospective factor/control studies use the same fixed read budget.
+    # Existing frozen forward/entry cohorts and explicit path requests stay first.
+    archive=sorted((r for r in rows if r['role']=='ARCHIVE_STUDY'),key=lambda r:(
+        r.get('features',{}).get('archive_group')!='FOCUS',
+        r['status']=='PENDING',r.get('frozen_at',''),*rank(r)[1:]))
+    selected+=archive[:min(8,max(0,limit-len(selected)))]
     remaining = max(0,limit-len(selected))
     retries = [r for r in other if r['status'] != 'PENDING']
     if len(other) > remaining and retries and remaining:

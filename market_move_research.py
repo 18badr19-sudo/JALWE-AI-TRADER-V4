@@ -279,8 +279,14 @@ class MoveStore:
     def _episode_values(features, session, role, pair_key, now, *, prospective):
         if prospective and not (utc(features['available_after']) <= now < utc(session['open'])):
             raise ValueError('Prospective evidence was unavailable or cohort froze after open')
-        if role not in {'ACTIVITY', 'CONTROL', 'HOT_CASE', 'JUMP_CASE','ENTRY_STUDY'} or (role in {'HOT_CASE','JUMP_CASE','ENTRY_STUDY'} and prospective):
+        if role not in {'ACTIVITY', 'CONTROL', 'HOT_CASE', 'JUMP_CASE','ENTRY_STUDY','ARCHIVE_STUDY'} or (role in {'HOT_CASE','JUMP_CASE','ENTRY_STUDY','ARCHIVE_STUDY'} and prospective):
             raise ValueError('Invalid study role')
+        if role=='ARCHIVE_STUDY':
+            from archival_entry_research import PROTOCOL as ARCHIVE_PROTOCOL
+            if (features.get('archive_protocol')!=ARCHIVE_PROTOCOL
+                    or features.get('archive_group') not in {'MATCH','CONTROL','FOCUS'}
+                    or now<utc(session['close'])+timedelta(minutes=16)):
+                raise ValueError('Archive study requires a completed historical session')
         if role=='ENTRY_STUDY' and not (features.get('entry_protocol')=='prior-day-orb-execution-study-v1'
                 and utc(features['available_after'])<=utc(features['snapshot_prepared_at'])<=now<utc(session['open'])):
             raise ValueError('Entry study was not frozen before open')
@@ -430,7 +436,7 @@ class MoveStore:
                  row['status'], row['attempts'])).rowcount
             if changed:
                 from market_move_diagnostics import MAX_ATTEMPTS, RETRY_HORIZON
-                anchor = utc(row['frozen_at']) if row['role']=='JUMP_CASE' else utc(json.loads(row['session_json'])['close'])
+                anchor = utc(row['frozen_at']) if row['role'] in {'JUMP_CASE','ARCHIVE_STUDY'} else utc(json.loads(row['session_json'])['close'])
                 expires = anchor+RETRY_HORIZON
                 if result['status']=='COMPLETE' or row['attempts']+1>=MAX_ATTEMPTS or expires<now:
                     conn.execute('DELETE FROM move_minute_evidence WHERE episode_key=?',(key,))
@@ -467,6 +473,7 @@ class MoveStore:
 
     def publish(self, now, health, *, patterns=None):
         from prior_day_entry_study import summary as entry_summary
+        from archival_entry_research import summary as archive_summary
         from market_factor_statistics import news_summary
         cutoff = (now.astimezone(NY).date()-timedelta(days=90)).isoformat()
         with self.connect() as conn:
@@ -486,6 +493,7 @@ class MoveStore:
             key=lambda r:(-r['result']['jump_path']['observed_rise_pct'],r['symbol'],r['session_day']))[:6]
         day = health.get('completed_session')
         examples = [r for r in rows if r['session_day'] <= day] if day else [r for r in rows if r['status'] != 'PENDING']
+        examples = [r for r in examples if r['role']!='ARCHIVE_STUDY']
         cases = sorted(examples, key=lambda r: (r['session_day'], {'JUMP_CASE':2,'HOT_CASE':1}.get(r['role'],0),
             {'COMPLETE':3,'PARTIAL_DATA':2,'DATA_UNAVAILABLE':1,'PENDING':0}.get(r['status'],0),
             r['episode_key']), reverse=True)[:12]
@@ -509,6 +517,7 @@ class MoveStore:
             news_statistics=news_summary(rows),
             priority_link=self.state('prior_day_bus_status') or {},
             entry_study=entry_summary(rows),
+            archive_study=archive_summary(rows),
             priority_trace=self.state('prior_day_trace_summary') or {},
             priority_native_outcomes=self.state('prior_day_native_outcomes') or {},
             forward_cohort=[dict(symbol=r['symbol'], role=r['role'], session_day=r['session_day'],
@@ -569,6 +578,7 @@ def read_packet(symbol=None, *, now=None, path=None):
         result['news_statistics'] = packet.get('news_statistics', {})
         result['priority_link'] = packet.get('priority_link', {})
         result['entry_study'] = packet.get('entry_study', {})
+        result['archive_study'] = packet.get('archive_study', {})
         result['priority_trace'] = packet.get('priority_trace', {})
         result['priority_native_outcomes'] = packet.get('priority_native_outcomes', {})
         result['historical_jumps'] = packet.get('historical_jumps', {})

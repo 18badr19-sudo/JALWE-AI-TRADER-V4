@@ -50,6 +50,17 @@ class FindingsTests(unittest.TestCase):
         self.assertNotIn('None%',text)
         self.assertIn('لا توجد حزمة',findings_text(None))
 
+    def test_prospective_cost_results_show_missing_paths_and_never_become_paper_profit(self):
+        data=packet(); data['entry_study']=dict(total=20,
+            states=dict(SIMULATED_EXIT=2,UNKNOWN_DATA=14,NO_ENTRY=3,PENDING=1),
+            costs={'10':dict(simulated_exits=2,mean_net_r=-.2),
+                   '25':dict(simulated_exits=2,mean_net_r=-.3)})
+        text=findings_text(data)
+        self.assertIn('بلا دخول 3 | ناقصة/ملتبسة 14',text)
+        self.assertIn('متوسط -0.20R من 2',text)
+        self.assertIn('متوسط -0.30R من 2',text)
+        self.assertIn('الربح غير معلوم وليس صفرًا',text)
+
     def test_saved_stock_report_reads_all_studies_not_only_packet_examples(self):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/'moves.db'; store=MoveStore(path)
@@ -90,7 +101,12 @@ class StockTraceTests(unittest.TestCase):
     def query(self,events,exits):
         connection=MagicMock(); connection.__enter__.return_value=connection
         cursor=MagicMock(); connection.cursor.return_value.__enter__.return_value=cursor
-        cursor.fetchall.return_value=[(json.dumps(r),) for r in events]
+        cursor.fetchone.return_value=None
+        latest={r['stage']:r for r in events}
+        cursor.fetchall.side_effect=[
+            [(stage,1,'2026-10-12T14:00Z','2026-10-12T14:00Z') for stage in latest],
+            [(json.dumps(r),) for r in latest.values()],
+            [(json.dumps(r),) for r in events if r['stage']=='JALWE_EXECUTION']]
         with (patch('prior_day_priority_bus.connect',return_value=connection),
               patch('prior_day_entry_study.native_ledger_rows',return_value=exits) as ledger,
               patch('prior_day_entry_study.events',side_effect=AssertionError('audit write'))):

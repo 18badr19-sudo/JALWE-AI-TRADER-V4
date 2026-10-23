@@ -16,7 +16,10 @@ COST_BPS=(10,25)
 def prepare(store,now,*,paper,allow_live=False,clock=None):
     if not paper or allow_live: return dict(state='PAPER_ONLY')
     with store.connect() as conn:
-        rows=conn.execute('SELECT payload_json FROM move_pattern_features ORDER BY session_day,symbol').fetchall()
+        from prior_day_priority_bus import NY
+        rows=conn.execute('''SELECT payload_json FROM move_pattern_features
+            WHERE session_day>=? ORDER BY session_day,symbol''',
+            (now.astimezone(NY).date().isoformat(),)).fetchall()
     groups={}
     for encoded, in rows:
         value=json.loads(encoded); session=value['session']
@@ -44,6 +47,11 @@ def prepare(store,now,*,paper,allow_live=False,clock=None):
             if clock and clock()>=utc(session['open']):
                 conn.rollback(); continue
         audit=publish(packet,paper=paper,allow_live=allow_live,clock=clock)
+        from research_nomination_audit import audit_snapshot
+        audit['snapshot_audit']=audit_snapshot(records,session,audit)
+        import logging
+        logging.getLogger(__name__).info('RESEARCH_NOMINATION_AUDIT %s',
+            json.dumps(audit['snapshot_audit'],sort_keys=True,allow_nan=False))
         audit.update(queued=queued,eligible=len(packet['signals']),session_day=session['date'])
         store.state('prior_day_bus_status',audit)
     return audit
@@ -191,46 +199,79 @@ def collect_realized(*,dsn=None,database_path=None):
         return dict(state='UNAVAILABLE',error_type=type(exc).__name__)
 
 
-def stock_trace_text(symbol,day,*,dsn=None,database_path=None):
+def stock_trace_text(symbol,day,*,dsn=None,database_path=None,research_path=None):
     """Read one exact frozen signal and its native ledger; never write events."""
     from market_research_findings import SYMBOL
     from prior_day_priority_bus import connect
     from core.config import settings
     import os
+    from research_nomination_audit import local_evidence,nomination_text,study_text,saudi,reason_text
     symbol=str(symbol).strip().upper()
     try:
         if not SYMBOL.fullmatch(symbol) or datetime.strptime(day,'%Y-%m-%d').date().isoformat()!=day:
             return 'رمز السهم أو التاريخ غير صالح.'
     except (ValueError,TypeError):return 'رمز السهم أو التاريخ غير صالح.'
+    local=local_evidence(symbol,day,path=research_path)
+    lines=[f'🔗 سلسلة الترشيح {symbol} — {day} (أدلة محفوظة)']
+    model=study_text(symbol,day,local)
     if not (dsn or os.getenv('DATABASE_URL','')):
-        return 'ربط PAPER للسهم: قاعدة تتبع الترشيح غير متاحة؛ النتيجة غير معلومة.'
+        return '\n'.join(lines+['قاعدة تتبع الترشيح غير متاحة؛ وصوله إلى APEX غير معلوم.']+model)
     try:
         identity=signal_id(symbol,day)
         with connect(dsn) as conn:
             conn.set_session(readonly=True)
             with conn.cursor() as cur:
+                cur.execute('''SELECT payload_json FROM jalwe_prior_day_packets
+                    WHERE protocol=%s AND session_day=%s''',(BUS_PROTOCOL,day))
+                saved=cur.fetchone()
+                packet=json.loads(saved[0]) if saved else None
+                # Aggregate the full available history, not the last batch.
+                cur.execute('''SELECT stage,COUNT(*),MIN(created_at),MAX(created_at)
+                    FROM jalwe_prior_day_events WHERE signal_id=%s GROUP BY stage
+                    ORDER BY stage LIMIT 21''',(identity,))
+                timeline=cur.fetchall()
+                cur.execute('''SELECT payload_json FROM (
+                    SELECT DISTINCT ON (stage) stage,payload_json,created_at,event_id
+                    FROM jalwe_prior_day_events WHERE signal_id=%s
+                    ORDER BY stage,created_at DESC,event_id DESC) latest
+                    ORDER BY stage LIMIT 21''',(identity,))
+                latest_rows=cur.fetchall()
                 cur.execute('''SELECT payload_json FROM jalwe_prior_day_events
-                    WHERE signal_id=%s ORDER BY created_at DESC LIMIT 201''',(identity,))
+                    WHERE signal_id=%s AND stage='JALWE_EXECUTION'
+                    ORDER BY created_at DESC,event_id DESC LIMIT 1001''',(identity,))
                 raw=cur.fetchall()
-        rows=[json.loads(r[0]) for r in raw[:200]]
+        lines.extend(nomination_text(symbol,day,packet,local))
+        rows=[json.loads(r[0]) for r in latest_rows[:20]]
         rows=[r for r in rows if r.get('signal_id')==identity and r.get('symbol')==symbol]
-        stages=Counter(r.get('stage') for r in rows)
-        lines=[f'🔗 سلسلة الترشيح {symbol} — {day} (أدلة محفوظة)']
-        if not rows:return '\n'.join(lines+['لا توجد أحداث ربط متاحة؛ هذا لا يثبت أن السهم رُفض أو لم يُتداول.'])
-        lines.append('المراحل: '+' | '.join(f'{stage}: {count}' for stage,count in sorted(stages.items()) if stage))
+        by_stage={r['stage']:r for r in rows}
+        labels={'APEX_RADAR':'رادار APEX','APEX_PRE':'الفحص الأولي','APEX_DEEP':'التحليل العميق',
+                'APEX_RESEARCH':'نتيجة البحث','APEX_BRIDGE':'الإرسال إلى JALWE',
+                'JALWE_DECISION':'قرار JALWE','JALWE_EXECUTION':'إرسال أمر PAPER'}
+        for stage,count,first,last in timeline[:20]:
+            if stage not in by_stage:continue
+            latest=by_stage[stage]
+            lines.append(f"• {labels.get(stage,stage)}: {count} حدث | أول {saudi(first)} | آخر {saudi(last)} السعودية.")
+            lines.append('  آخر حالة/سبب محفوظ: '+str(latest.get('state') or '')+' '+reason_text(latest))
+        if not timeline:lines.append('لا توجد أحداث ربط متاحة؛ هذا لا يثبت أن السهم رُفض أو لم يُتداول.')
+        elif not any(r.get('stage')=='APEX_RADAR' for r in rows):
+            lines.append('أول وصول إلى رادار APEX غير مثبت في الأحداث المقروءة.')
         decisions=[r for r in rows if r.get('stage')=='JALWE_DECISION']
         if decisions:
             latest=decisions[0]
             lines.append('آخر قرار محفوظ: '+str(latest.get('state','غير معلوم'))+' — '+str(latest.get('reason','غير معلوم'))[:300])
-        mappings=[r for r in rows if r.get('stage')=='JALWE_EXECUTION']
+        mappings=[json.loads(r[0]) for r in raw[:1000]]
+        mappings=[r for r in mappings if r.get('signal_id')==identity and r.get('symbol')==symbol
+                  and r.get('stage')=='JALWE_EXECUTION']
         exits=native_ledger_rows(mappings,database_path or settings.DATABASE_PATH)
         exits=[r for r in exits if r['signal_id']==identity and r['symbol']==symbol]
         if exits:
             lines.append(f"مخارج PAPER مؤكدة بالسجل: {len(exits)} تنفيذ، {sum(r['quantity'] for r in exits)} سهم؛ المحقق قبل رسوم الوسيط ${sum(r['realized_pnl_before_broker_fees'] for r in exits):+.2f}.")
             lines.append('قد تكون مخارج جزئية؛ لا يثبت ذلك إغلاق كامل المركز. رسوم الوسيط غير محسومة هنا.')
         else:lines.append('لا يوجد دليل خروج PAPER مرتبط في السجل المقروء؛ أمر الشراء المرسل وحده ليس تنفيذًا، والربح غير معلوم.')
-        if len(raw)>200:lines.append('القراءة محدودة بآخر 200 حدث؛ التغطية غير كاملة.')
+        if len(raw)>1000 or len(timeline)>20 or len(latest_rows)>20:
+            lines.append('وصلت القراءة حد مراحل أو أوامر الربط؛ التغطية غير كاملة.')
+        lines.append('التوقيت يغطي أول وآخر حدث محفوظ لكل مرحلة؛ غياب مرحلة لا يثبت الرفض. قد تكون أحداث أقدم من مدة الاحتفاظ غير متاحة.')
         lines.append('أحداث الفحص ليست صفقات؛ لا تتضمن نتائج المحاكاة في الربح المحقق.')
-        return '\n'.join(lines)
+        return '\n'.join(lines+model)
     except Exception as exc:
-        return 'ربط PAPER للسهم: تعذرت قراءة الأدلة ('+type(exc).__name__+')؛ النتيجة غير معلومة.'
+        return '\n'.join(lines+['ربط PAPER للسهم: تعذرت قراءة الأدلة ('+type(exc).__name__+')؛ النتيجة غير معلومة.']+model)

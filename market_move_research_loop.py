@@ -100,6 +100,12 @@ class MoveResearchWorker:
             self.store.state('daily_cache',cache)
         else:
             daily = cache['rows']
+        try:
+            from archival_entry_research import prepare as prepare_archive
+            logger.info('ARCHIVE_ENTRY_PREPARED %s',json.dumps(
+                prepare_archive(self.store,daily,sessions,now),sort_keys=True,allow_nan=False))
+        except Exception as exc:
+            logger.warning('ARCHIVE_ENTRY_UNAVAILABLE %s',type(exc).__name__)
         logger.info('MARKET_JUMP_HISTORY_LOADED %s',json.dumps(dict(
             latest_session=latest['date'],daily_symbols=len(daily),lookback_days=LOOKBACK_DAYS)))
         # This scheduling-only overlay repairs requests seeded without daily
@@ -277,6 +283,16 @@ class MoveResearchWorker:
                         logger.info('PRIOR_DAY_ENTRY_STUDY_RESULT %s',json.dumps(dict(
                             signal_id=row['features'].get('priority_signal_id'),symbol=row['symbol'],
                             session_day=row['session_day'],result=result['entry_study']),sort_keys=True))
+                    if row['role']=='ARCHIVE_STUDY':
+                        from archival_entry_research import run_model
+                        result['archive_entry']=run_model(data,row['session'])
+                        logger.info('ARCHIVE_ENTRY_RESULT %s',json.dumps(dict(
+                            symbol=row['symbol'],session_day=row['session_day'],
+                            group=row['features'].get('archive_group'),
+                            prior_inputs={k:row['features'].get(k) for k in (
+                                'close','dollar_volume','range_pct','volume_ratio_previous_day',
+                                'daily_return_pct','evidence_day','source_feed')},result=result['archive_entry']),
+                            sort_keys=True,allow_nan=False))
                     if row['role'] == 'JUMP_CASE':
                         result['jump_path'] = jump_path(data,row['session'],
                                                        full_session_complete=result['status']=='COMPLETE')
@@ -286,7 +302,7 @@ class MoveResearchWorker:
                         cached.update({minute:value for (symbol,minute),value in samples.items() if symbol==row['symbol']})
                         probed = diagnose_gaps(self.provider,row['symbol'],result,now,cached=cached)
                         samples.update({(row['symbol'],s['minute']):s for s in probed if s.get('complete') and s.get('minute')})
-                    if result['status'] == 'COMPLETE' and row['role']!='ENTRY_STUDY':
+                    if result['status'] == 'COMPLETE' and row['role'] not in {'ENTRY_STUDY','ARCHIVE_STUDY'}:
                         path = result.get('jump_path',{})
                         cutoff = utc(path['start_at']) if path.get('start_at') else (
                             utc(result['up_at']) if result.get('up_at') else utc(row['session']['open']))
@@ -341,6 +357,8 @@ class MoveResearchWorker:
             logger.warning('MARKET_MOVE_PATTERNS_UNAVAILABLE %s',type(exc).__name__)
         key, packet = self.store.publish(published_at,health,patterns=patterns)
         logger.info('MARKET_RESEARCH_FINDINGS %s',json.dumps(packet.get('findings',{}),
+            sort_keys=True,allow_nan=False))
+        logger.info('ARCHIVE_ENTRY_SUMMARY %s',json.dumps(packet.get('archive_study',{}),
             sort_keys=True,allow_nan=False))
         logger.info('MARKET_NEWS_STATISTICS %s',json.dumps(packet.get('news_statistics',{}),
             sort_keys=True,allow_nan=False))

@@ -2703,6 +2703,7 @@ def help_text() -> str:
         "/storage - فحص التخزين الدائم /app/data\n"
         "/why_no_trade - تشخيص سبب عدم وجود صفقة\n"
         "/research_findings - خلاصة العوامل وما اجتاز الاختبار\n"
+        "/research_archive - اختبار الأرشيف والعوامل مقابل أسهم المقارنة\n"
         "/research_stock SYMBOL YYYY-MM-DD - دراسة سهم وربطه بنتائج PAPER\n"
         "/rejections - أسباب الرفض والانتظار اليوم (تاريخ NY اختياري)\n"
         "/help - عرض الأوامر\n\n"
@@ -2724,6 +2725,12 @@ def handle(text: str, requested_by=None) -> Any:
         from market_research_findings import findings_text
         return findings_text(read_packet())
 
+    if low == '/research_archive':
+        from market_move_research import read_packet
+        from archival_entry_research import summary_text
+        packet=read_packet()
+        return summary_text(packet['archive_study']) if packet and packet.get('archive_study') else 'اختبار الأرشيف: لا توجد نتائج حديثة متاحة؛ النتيجة غير معلومة.'
+
     if low.split(' ',1)[0] == '/research_stock':
         from market_research_findings import stock_research_text
         from prior_day_entry_study import stock_trace_text
@@ -2733,6 +2740,9 @@ def handle(text: str, requested_by=None) -> Any:
         details=stock_research_text(args[1],args[2] if len(args)==3 else None)
         if len(args)==3:
             details += '\n\n'+stock_trace_text(args[1],args[2])
+            from archival_entry_research import stock_text as archive_stock_text
+            archive=archive_stock_text(args[1],args[2])
+            if archive:details+='\n\n'+archive
         return details
 
     if low.split(' ',1)[0] == '/trade_audit':

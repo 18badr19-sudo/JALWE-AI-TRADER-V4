@@ -72,6 +72,7 @@ def findings_text(packet):
     lines.append(f"التعلم: {labels.get(training['state'],training['state'])}. شرط التدريب لكل قاعدة: {training['required_pairs']} زوجًا، {training['required_days']} أيام، وتغطية ≥{training['required_coverage']:.0%}.")
     for code,row in training['candidates'].items():
         lines.append(f"  {code}: أزواج مؤثرة {row.get('matched_pairs',0)} | أيام {row.get('matched_days',0)} | تغطية {row.get('complete_pair_coverage',0):.1%}")
+    lines.append(f"بعد اجتياز التدريب: اختبار على {training['required_validation_sessions']} جلسة جديدة؛ المسجلة حتى الآن {training['validation_sessions_seen']}. اكتمالها وحده لا يضمن اجتياز التقييم.")
     for key,label in (('retrospective','المقارنة اليومية التاريخية'),('forward','المقارنة اليومية المستقبلية')):
         pairs=value['daily_control_comparison'][key].get('pairs',{})
         complete=pairs.get('complete',0)
@@ -132,11 +133,16 @@ def stock_research_text(symbol, day=None, *, path=None):
         before=profile.get('before_context',{})
         lines.append(f"سياق العشرين دقيقة قبل البداية: {before.get('status','UNAVAILABLE')}.")
         if before.get('status') in {'RAW_20M_COMPLETE','SAVED_DERIVED_CONTEXT_ONLY'}:
-            for key,label,suffix in (('return_pct','تغير السعر','%'),('volume_acceleration','تسارع الحجم','×')):
+            for key,label,suffix in (('return_pct','تغير السعر','%'),('volume_acceleration','تسارع الحجم','×'),('range_pct','نطاق الحركة','%')):
                 v=before.get(key)
                 if type(v) in (float,int) and math.isfinite(v):lines.append(f'• {label}: {v:.2f}{suffix}')
+            above=before.get('close_above_vwap')
+            lines.append('• الإغلاق فوق/عند VWAP السياق: '+('نعم' if above is True else 'لا' if above is False else 'غير معلوم'))
         news=result.get('pre_move_news',{})
         lines.append('الأخبار: '+(f"{len(news.get('articles',[]))} خبر ضمن نافذة المصدر المحفوظة." if news.get('status')=='AVAILABLE' else 'غير متاحة.'))
+        if news.get('status')=='AVAILABLE':
+            keywords=sorted({word for article in news.get('articles',[]) for word in article.get('keywords',[]) if isinstance(word,str)})
+            lines.append('الكلمات الوصفية المحفوظة: '+(', '.join(keywords) if keywords else 'لا كلمات مصنفة في نافذة المصدر.'))
         lines.append('البداية اختيرت بعد مشاهدة الحركة؛ هذه صفات مرصودة وليست أسبابًا مثبتة. الدراسة الناقصة لا تدخل إثبات أفضلية.')
         return '\n'.join(lines)
     except (sqlite3.Error,ValueError,TypeError,KeyError,OverflowError):

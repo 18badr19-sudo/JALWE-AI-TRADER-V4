@@ -36,6 +36,7 @@ class FindingsTests(unittest.TestCase):
         self.assertIn('ليست احتمال قفزة',text)
         self.assertIn('2/72',text)
         self.assertIn('40 زوجًا، 10 أيام',text)
+        self.assertIn('اختبار على 20 جلسة جديدة',text)
         self.assertIn('للمطابقة 30/100، وللضابطة 8/100',text)
         self.assertFalse(result['pipeline']['native_pnl_available'])
         self.assertIn('الربح غير معلوم وليس صفرًا',text)

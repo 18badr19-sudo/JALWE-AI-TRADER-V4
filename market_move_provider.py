@@ -129,9 +129,11 @@ class MoveProvider:
     def _minute_frame(rows):
         data = pd.DataFrame(rows)
         if data.empty:
-            return pd.DataFrame(columns=['open','high','low','close','volume'],index=pd.DatetimeIndex([],tz='UTC'))
-        data = data.rename(columns={'o':'open','h':'high','l':'low','c':'close','v':'volume'})
-        data.index = pd.to_datetime(data.pop('t'),utc=True,errors='coerce')
+            data = pd.DataFrame(columns=['open','high','low','close','volume'],index=pd.DatetimeIndex([],tz='UTC'))
+        else:
+            data = data.rename(columns={'o':'open','h':'high','l':'low','c':'close','v':'volume'})
+            data.index = pd.to_datetime(data.pop('t'),utc=True,errors='coerce')
+        data.attrs.update(data_feed='sip', adjustment='split')
         return data
 
     def intraday_many(self, symbols, session, now):

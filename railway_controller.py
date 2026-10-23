@@ -2702,6 +2702,8 @@ def help_text() -> str:
         "/bridge - فحص الربط\n"
         "/storage - فحص التخزين الدائم /app/data\n"
         "/why_no_trade - تشخيص سبب عدم وجود صفقة\n"
+        "/research_findings - خلاصة العوامل وما اجتاز الاختبار\n"
+        "/research_stock SYMBOL YYYY-MM-DD - دراسة سهم وربطه بنتائج PAPER\n"
         "/rejections - أسباب الرفض والانتظار اليوم (تاريخ NY اختياري)\n"
         "/help - عرض الأوامر\n\n"
         "🔔 سيرسل البوت تلقائيًا تنبيهًا عند كل "
@@ -2716,6 +2718,22 @@ def help_text() -> str:
 def handle(text: str, requested_by=None) -> Any:
     cmd = str(text or "").strip()
     low = cmd.lower()
+
+    if low == '/research_findings':
+        from market_move_research import read_packet
+        from market_research_findings import findings_text
+        return findings_text(read_packet())
+
+    if low.split(' ',1)[0] == '/research_stock':
+        from market_research_findings import stock_research_text
+        from prior_day_entry_study import stock_trace_text
+        args=cmd.split()
+        if not 2<=len(args)<=3:
+            return 'اكتب: /research_stock SHFS 2026-10-22'
+        details=stock_research_text(args[1],args[2] if len(args)==3 else None)
+        if len(args)==3:
+            details += '\n\n'+stock_trace_text(args[1],args[2])
+        return details
 
     if low.split(' ',1)[0] == '/trade_audit':
         from trade_chain_audit import status_text as trade_audit_text

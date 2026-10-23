@@ -189,3 +189,48 @@ def collect_realized(*,dsn=None,database_path=None):
             mapping_limit_reached=len(mappings)==1000,simulation_included=False)
     except Exception as exc:
         return dict(state='UNAVAILABLE',error_type=type(exc).__name__)
+
+
+def stock_trace_text(symbol,day,*,dsn=None,database_path=None):
+    """Read one exact frozen signal and its native ledger; never write events."""
+    from market_research_findings import SYMBOL
+    from prior_day_priority_bus import connect
+    from core.config import settings
+    import os
+    symbol=str(symbol).strip().upper()
+    try:
+        if not SYMBOL.fullmatch(symbol) or datetime.strptime(day,'%Y-%m-%d').date().isoformat()!=day:
+            return 'رمز السهم أو التاريخ غير صالح.'
+    except (ValueError,TypeError):return 'رمز السهم أو التاريخ غير صالح.'
+    if not (dsn or os.getenv('DATABASE_URL','')):
+        return 'ربط PAPER للسهم: قاعدة تتبع الترشيح غير متاحة؛ النتيجة غير معلومة.'
+    try:
+        identity=signal_id(symbol,day)
+        with connect(dsn) as conn:
+            conn.set_session(readonly=True)
+            with conn.cursor() as cur:
+                cur.execute('''SELECT payload_json FROM jalwe_prior_day_events
+                    WHERE signal_id=%s ORDER BY created_at DESC LIMIT 201''',(identity,))
+                raw=cur.fetchall()
+        rows=[json.loads(r[0]) for r in raw[:200]]
+        rows=[r for r in rows if r.get('signal_id')==identity and r.get('symbol')==symbol]
+        stages=Counter(r.get('stage') for r in rows)
+        lines=[f'🔗 سلسلة الترشيح {symbol} — {day} (أدلة محفوظة)']
+        if not rows:return '\n'.join(lines+['لا توجد أحداث ربط متاحة؛ هذا لا يثبت أن السهم رُفض أو لم يُتداول.'])
+        lines.append('المراحل: '+' | '.join(f'{stage}: {count}' for stage,count in sorted(stages.items()) if stage))
+        decisions=[r for r in rows if r.get('stage')=='JALWE_DECISION']
+        if decisions:
+            latest=decisions[0]
+            lines.append('آخر قرار محفوظ: '+str(latest.get('state','غير معلوم'))+' — '+str(latest.get('reason','غير معلوم'))[:300])
+        mappings=[r for r in rows if r.get('stage')=='JALWE_EXECUTION']
+        exits=native_ledger_rows(mappings,database_path or settings.DATABASE_PATH)
+        exits=[r for r in exits if r['signal_id']==identity and r['symbol']==symbol]
+        if exits:
+            lines.append(f"مخارج PAPER مؤكدة بالسجل: {len(exits)} تنفيذ، {sum(r['quantity'] for r in exits)} سهم؛ المحقق قبل رسوم الوسيط ${sum(r['realized_pnl_before_broker_fees'] for r in exits):+.2f}.")
+            lines.append('قد تكون مخارج جزئية؛ لا يثبت ذلك إغلاق كامل المركز. رسوم الوسيط غير محسومة هنا.')
+        else:lines.append('لا يوجد دليل خروج PAPER مرتبط في السجل المقروء؛ أمر الشراء المرسل وحده ليس تنفيذًا، والربح غير معلوم.')
+        if len(raw)>200:lines.append('القراءة محدودة بآخر 200 حدث؛ التغطية غير كاملة.')
+        lines.append('أحداث الفحص ليست صفقات؛ لا تتضمن نتائج المحاكاة في الربح المحقق.')
+        return '\n'.join(lines)
+    except Exception as exc:
+        return 'ربط PAPER للسهم: تعذرت قراءة الأدلة ('+type(exc).__name__+')؛ النتيجة غير معلومة.'

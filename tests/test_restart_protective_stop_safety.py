@@ -439,6 +439,49 @@ class RestartAndProtectiveStopSafetyTests(
                              for call in fake_database.save_broker_order.call_args_list),1)
         fake_database.save_managed_trade.assert_called()
 
+    def test_t2_floor_survives_restart_and_replaces_stop_for_remaining_shares(self):
+        manager = TradeManager()
+        trade = manager.create_trade('TEST', 10., 8, 9., 11., 12., 13.)
+        self._fill_exit(manager, trade, manager.evaluate(trade, 11.), 11., 'T1')
+        self.assertEqual(trade.current_stop, 10.)
+        t1_remaining = trade.remaining_quantity
+        trade.metadata.update(protective_stop_order_id='OLD-T1-STOP',
+            protective_stop_client_order_id='JALWE-STOP-OLD',
+            protective_stop_quantity=t1_remaining, protective_stop_price=10.,
+            protective_stop_status='accepted', protective_stop_active=True,
+            protective_stop_applied_qty=0, protective_stop_applied_notional=0.)
+        self._fill_exit(manager, trade, manager.evaluate(trade, 12.), 12., 'T2')
+        remaining = trade.remaining_quantity
+        self.assertGreater(remaining, 0)
+        self.assertLess(remaining, t1_remaining)
+        self.assertEqual(trade.current_stop, 11.)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / 'ladder.db')
+            Database(path).save_managed_trade('t', trade)
+            db = Database(path)
+            restored = db.load_managed_trade('t')
+            self.assertEqual(restored.current_stop, 11.)
+            self.assertTrue(restored.t2_completed)
+            new_stop = BrokerOrder(symbol='TEST', side=TradeSide.SELL, quantity=remaining,
+                order_id='NEW-T2-STOP', client_order_id='JALWE-STOP-NEW',
+                status=OrderStatus.ACCEPTED, requested_price=11., filled_quantity=0)
+            def snapshot(status):
+                return SimpleNamespace(id='OLD-T1-STOP', client_order_id='JALWE-STOP-OLD',
+                    symbol='TEST', side='sell', qty=str(t1_remaining), filled_qty='0',
+                    filled_avg_price=None, stop_price='10', status=status)
+            execution = SimpleNamespace(
+                broker=SimpleNamespace(get_order=Mock(side_effect=[
+                    snapshot('new'), snapshot('new'), snapshot('canceled')])),
+                cancel_protective_stop=Mock(), submit_protective_stop=Mock(return_value=new_stop))
+            with (patch.object(watcher, 'settings', SimpleNamespace(BROKER_PROTECTIVE_STOP_ENABLED=True)),
+                  patch.object(watcher, 'database', db), patch.object(watcher.time, 'sleep')):
+                watcher._sync_protective_stop('t', restored, execution)
+            execution.cancel_protective_stop.assert_called_once_with('OLD-T1-STOP')
+            execution.submit_protective_stop.assert_called_once_with(symbol='TEST',
+                quantity=remaining, stop_price=11., client_order_id=ANY, before_submit=ANY)
+            self.assertEqual(restored.remaining_quantity, remaining)
+
+
     def test_filled_protective_stop_wins_race_without_second_sell(
         self,
     ) -> None:

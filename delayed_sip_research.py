@@ -15,6 +15,7 @@ from market.research_diagnostics import (
     SIP_RESEARCH_DELAY_MINUTES, coverage_diagnostics, diagnostic_counts,
     diagnostic_text, coverage_text, error_diagnostics,
 )
+from market.retained_research_bars import merge_evidence
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +92,7 @@ class DelayedSipResearch:
                 "decision_feed": row["decision_feed"], "observation_feed": "sip",
                 "window_start": row["window_start"], "window_end": row["window_end"],
                 "levels": result.get("levels", {}),
+                "evidence_recovery": result.get("evidence_recovery"),
                 "execution_feasibility": "NOT_ESTABLISHED_FROM_BARS"}
 
     def completed_audit_for_ny_date(self, date_value, limit=1000):
@@ -184,18 +186,34 @@ class DelayedSipResearch:
         from decision_outcome_memory import DecisionOutcomeMemory
         for row in rows:
             start, end = _utc(row["window_start"]), _utc(row["window_end"])
+            previous = json.loads(row.get("result_json") or "{}")
             terminal = now >= end + timedelta(minutes=SIP_RESEARCH_DELAY_MINUTES + self.GRACE_MINUTES)
             result = {"protocol": self.PROTOCOL, "scope": "HISTORICAL_RESEARCH_NOT_EXECUTED_PNL",
                       "decision_feed": row["decision_feed"], "observation_feed": "sip",
                       "window_start": start.isoformat(), "window_end": end.isoformat(),
                       "minimum_delay_minutes": SIP_RESEARCH_DELAY_MINUTES}
+            # Keep saved bars even if the next request fails. An error still
+            # yields DATA_UNAVAILABLE/PENDING, never success from stale metrics.
+            if previous.get("bar_evidence") is not None:
+                result["bar_evidence"] = previous["bar_evidence"]
             try:
                 frame = self.market_data.get_research_observation_bars(
                     row["symbol"], start, end, as_of=now)
                 if frame.attrs.get("data_feed") != "sip":
                     raise ValueError("Research observation feed mismatch")
+                latest_bars = DecisionOutcomeMemory._valid_bars(frame, start, end)
+                result["latest_read_diagnostics"] = coverage_diagnostics(frame, latest_bars, start, end)
+                frame, evidence = merge_evidence(frame, previous.get("bar_evidence"),
+                    symbol=row["symbol"], start=start, end=end, checked_at=now)
+                result["bar_evidence"] = evidence
                 bars = DecisionOutcomeMemory._valid_bars(frame, start, end)
                 diagnostics = coverage_diagnostics(frame, bars, start, end)
+                result["evidence_recovery"] = {
+                    "protocol": evidence["protocol"], "latest_read_minutes": len(latest_bars),
+                    "retained_minutes": len(bars.index.difference(latest_bars.index)),
+                    "combined_valid_minutes": len(bars),
+                    "conflicting_minutes": sum(len(v["copies"]) > 1 for v in evidence["minutes"].values()),
+                    "scope": "SAME_SYMBOL_SIP_FIXED_WINDOW_NOT_EXECUTION_EVIDENCE"}
                 complete = diagnostics["missing_minutes"] == 0 and len(bars) == 60
                 baseline = float(row["reference_price"])
                 result.update(data_diagnostics=diagnostics, complete_path=complete,
@@ -224,12 +242,12 @@ class DelayedSipResearch:
                         VALUES (?, ?, ?, ?, ?, ?, ?)""",
                         (f"{row['observation_key']}:{row['check_count']}", row["observation_key"],
                          now.isoformat(), row["status"], row["result_json"], status, json.dumps(result)))
-            previous = json.loads(row.get("result_json") or "{}")
             if status != "PENDING" or previous.get("data_diagnostics") != diagnostics:
                 logger.info("DELAYED_SIP_RESEARCH_DATA %s", json.dumps({
                     "symbol": row["symbol"], "source_kind": row["source_kind"],
                     "source_key": row["source_key"], "status": status, "feed": "sip",
-                    "decision_feed": row["decision_feed"], **diagnostics}))
+                    "decision_feed": row["decision_feed"],
+                    "evidence_recovery": result.get("evidence_recovery"), **diagnostics}))
             if status == "COMPLETE":
                 logger.info("DELAYED_SIP_RESEARCH_OUTCOME %s", json.dumps(
                     self._audit_record(row, result, now.isoformat())))
@@ -267,6 +285,13 @@ class DelayedSipResearch:
         coverage = coverage_text(rows, "result_json")
         if coverage:
             lines.append(coverage)
+        recovered = [(row, json.loads(row.get("result_json") or "{}")) for row in rows]
+        recovered = [(row, result) for row, result in recovered
+                     if (result.get("evidence_recovery") or {}).get("retained_minutes", 0) > 0]
+        if recovered:
+            completed_recovered = sum(row["status"] == "COMPLETE" for row, _ in recovered)
+            lines.append(f"تغطية بقراءات SIP محفوظة: {len(recovered)} نافذة | مكتملة منها {completed_recovered}. "
+                         "شموع فعلية لنفس السهم والنافذة فقط؛ الدقائق المتعارضة مستبعدة، والغائبة تبقى ناقصة.")
         lines.append("بحث إضافي فقط؛ لا يغيّر قرار الدخول أو تفضيلات الاستراتيجيات، ولا يثبت بيعًا لحظيًا خارج الجلسة.")
         lines.append("الحركة من المرجع الأصلي؛ هدف 2R افتراضي عند غياب T1. قد يتكرر السهم بين السجلات.")
         return "\n".join(lines)

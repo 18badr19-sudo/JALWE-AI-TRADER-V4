@@ -389,7 +389,10 @@ class MoveStore:
             if clock and clock() >= utc(session['open']):
                 conn.rollback()
                 return False
-            conn.execute('DELETE FROM move_pattern_features WHERE session_day < ?',(session['date'],))
+            # Keep immutable pre-open inputs for nomination audits after the
+            # next snapshot is prepared. Consumers still select exact days.
+            cutoff=(utc(session['open'])-timedelta(days=30)).date().isoformat()
+            conn.execute('DELETE FROM move_pattern_features WHERE session_day < ?',(cutoff,))
         return True
 
     def retained_evidence(self, key, now):

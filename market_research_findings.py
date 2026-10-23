@@ -78,6 +78,17 @@ def findings_text(packet):
         complete=pairs.get('complete',0)
         if complete:
             lines.append(f"{label} للشروط الثلاثة: بلغ أعلى اليوم +8% للمطابقة {pairs['matching_reached']}/{complete}، وللضابطة {pairs['control_reached']}/{complete}. ليست ترتيب وقف/هدف أو ربح صفقة.")
+    simulation=value['simulation']; states=simulation.get('states',{})
+    if simulation:
+        no_entry=sum(v for k,v in states.items() if k.startswith('NO_') or k=='INVALIDATED_BEFORE_ENTRY')
+        unknown=sum(v for k,v in states.items() if k not in {'PENDING','SIMULATED_EXIT','INVALIDATED_BEFORE_ENTRY'} and not k.startswith('NO_'))
+        lines.append(f"اختبار دخول مسبق مستقل: {simulation.get('total',0)} عينة | مخارج محاكاة {states.get('SIMULATED_EXIT',0)} | بلا دخول {no_entry} | ناقصة/ملتبسة {unknown} | تنتظر {states.get('PENDING',0)}.")
+        for bps in ('10','25'):
+            cost=simulation.get('costs',{}).get(bps,{})
+            mean=cost.get('mean_net_r')
+            if type(mean) in (int,float) and math.isfinite(mean):
+                lines.append(f"تكلفة مفترضة {int(bps)/100:.2f}% لكل جانب: متوسط {mean:+.2f}R من {cost.get('simulated_exits',0)} مخرج؛ محاكاة وليست أرباح PAPER.")
+        lines.append('نموذج نطاق أول 15 دقيقة: دخول افتتاح الدقيقة التالية للتأكيد، وقف قاع النطاق وهدف 2R؛ العينة الصغيرة لا تثبت أفضلية.')
     native=value['pipeline']['native']
     if value['pipeline']['native_pnl_available']:
         lines.append(f"PAPER المرتبط: {native.get('unique_trades',0)} صفقة لها مخارج مسجلة؛ المحقق قبل رسوم الوسيط ${native['realized_pnl_before_broker_fees']:+.2f}.")

@@ -123,7 +123,8 @@ def freeze_next(store, now, defined_at, *, clock=None):
     """Copy only already-sealed pre-open inputs; immutable independent membership."""
     with store.connect() as conn:
         conn.execute('BEGIN IMMEDIATE')
-        days = [r[0] for r in conn.execute('SELECT DISTINCT session_day FROM move_pattern_features')]
+        days = [r[0] for r in conn.execute('''SELECT DISTINCT session_day FROM move_pattern_features
+            WHERE session_day>=?''',(now.astimezone(NY).date().isoformat(),))]
         for day in days:
             key = PREFIX+day
             if conn.execute('SELECT 1 FROM move_state WHERE key=?',(key,)).fetchone():

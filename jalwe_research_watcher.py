@@ -3102,26 +3102,32 @@ def _sync_protective_stop(trade_id: str, trade: Any, execution_engine: Any) -> d
     quantity = int(trade.remaining_quantity)
     if quantity <= 0:
         return {'enabled': True, 'active': False, 'reason': 'NO_REMAINING_POSITION'}
-    desired_stop = float(trade.current_stop)
+    from broker.stop_pricing import normalize_stop_price, observed_stop_price
+    # Validate the rounded replacement before any broker inspection/cancellation.
+    desired_stop = normalize_stop_price(trade.current_stop)
     metadata = trade.metadata if isinstance(trade.metadata, dict) else {}
     if metadata.get('protective_stop_submission_uncertain'):
         raise RuntimeError('Protective stop submission requires broker recovery before another stop.')
     order_id = str(metadata.get('protective_stop_order_id', '') or '').strip()
     stored_qty = int(metadata.get('protective_stop_quantity', 0) or 0)
-    try:
-        stored_stop = float(metadata.get('protective_stop_price', 0.0) or 0.0)
-    except (TypeError, ValueError):
-        stored_stop = 0.0
     if order_id:
         try:
             raw = execution_engine.broker.get_order(order_id)
+            raw_status = getattr(raw, 'status', '')
+            raw_status = str(getattr(raw_status, 'value', raw_status) or '').lower()
+            active_statuses = {'new', 'accepted', 'pending_new', 'accepted_for_bidding', 'held', 'partially_filled', 'pending_replace', 'pending_cancel', 'done_for_day'}
+            # Missing/invalid active price evidence must preserve the existing
+            # stop and fail closed, not fall back to the local metadata price.
+            actual_stop = observed_stop_price(getattr(raw, 'stop_price', None)) if raw_status in active_statuses else None
             snapshot = apply_protective_stop_snapshot(database, trade_id, trade, raw)
             status = snapshot['raw_status']
             metadata = trade.metadata
             quantity = int(trade.remaining_quantity)
-            active = status in {'new', 'accepted', 'pending_new', 'accepted_for_bidding', 'held', 'partially_filled', 'pending_replace', 'pending_cancel', 'done_for_day'}
+            active = status in active_statuses
             unfilled_qty = stored_qty - int(snapshot['filled_quantity'])
-            if active and unfilled_qty == quantity and (abs(stored_stop - desired_stop) <= 0.0001):
+            # A stronger existing SELL stop is preserved; never loosen it to
+            # the internal floor merely because the prices differ.
+            if active and unfilled_qty == quantity and actual_stop >= desired_stop - 1e-10:
                 metadata['protective_stop_active'] = True
                 metadata['protective_stop_status'] = snapshot['status']
                 trade.metadata = metadata
@@ -3137,13 +3143,16 @@ def _sync_protective_stop(trade_id: str, trade: Any, execution_engine: Any) -> d
                         'broker_stop_price': str(getattr(raw, 'stop_price', '')),
                     }))
                     _protective_stop_observed_at[trade_id] = observed_at
-                return {'enabled': True, 'active': True, 'order_id': order_id, 'quantity': quantity, 'stop_price': desired_stop, 'status': status, 'changed': False}
+                return {'enabled': True, 'active': True, 'order_id': order_id, 'quantity': quantity, 'stop_price': actual_stop, 'requested_stop_price': desired_stop, 'status': status, 'changed': False}
             if status == 'filled':
                 metadata['protective_stop_active'] = False
                 metadata['protective_stop_status'] = 'filled'
                 trade.metadata = metadata
                 database.save_managed_trade(trade_id, trade)
                 return {'enabled': True, 'active': False, 'filled': True, 'order_id': order_id}
+            if active:
+                # Quantity-only replacement must retain a stronger broker floor.
+                desired_stop = max(desired_stop, actual_stop)
         except Exception:
             logger.exception('Unable to inspect protective stop | trade_id=%s symbol=%s', trade_id, trade.symbol)
             raise

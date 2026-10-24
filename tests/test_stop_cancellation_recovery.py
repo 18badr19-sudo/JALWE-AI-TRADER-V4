@@ -32,7 +32,7 @@ class StopCancellationRecoveryTests(unittest.TestCase):
 
     def snapshot(self, status='canceled', quantity=2):
         return NS(id='old-stop', symbol='TEST', side='sell', status=status,
-                  filled_qty=str(quantity), filled_avg_price='9', filled_at=None)
+                  filled_qty=str(quantity), filled_avg_price='9', filled_at=None, stop_price='9')
 
     def test_partial_stop_fill_is_committed_before_cancel_returns(self):
         with tempfile.TemporaryDirectory() as temp:

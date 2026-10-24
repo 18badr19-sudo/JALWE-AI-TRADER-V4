@@ -693,9 +693,8 @@ class AlpacaClient:
             quantity
         )
 
-        stop_price = float(
-            stop_price
-        )
+        from broker.stop_pricing import normalize_stop_price
+        stop_price = normalize_stop_price(stop_price)
 
         if quantity <= 0:
             raise ValueError(
@@ -706,15 +705,6 @@ class AlpacaClient:
             raise ValueError(
                 "Stop price must be positive."
             )
-
-        # Alpaca equity stop-price precision:
-        # >= $1: 2 decimals, < $1: 4 decimals.
-        stop_price = round(
-            stop_price,
-            2
-            if stop_price >= 1.0
-            else 4,
-        )
 
         normalized_client_order_id = None
 

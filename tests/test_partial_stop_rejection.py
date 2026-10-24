@@ -36,7 +36,7 @@ class PartialStopRejectionTests(unittest.TestCase):
         self.db.save_managed_trade('t', self.trade)
         execution = Mock()
         execution.broker.get_order.return_value = NS(id='original', symbol='TEST',
-            side='sell', status='partially_filled', filled_qty='2', filled_avg_price='9')
+            side='sell', status='partially_filled', filled_qty='2', filled_avg_price='9', stop_price='9')
         with patch.object(watcher, 'database', self.db):
             for _ in range(2):
                 result = watcher._sync_protective_stop('t', self.trade, execution)

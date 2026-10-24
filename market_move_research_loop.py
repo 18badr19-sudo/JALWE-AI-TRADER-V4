@@ -33,11 +33,17 @@ def session_backlog(rows, day):
 
 
 class MoveResearchWorker:
-    def __init__(self, store, provider, *, study_limit=12, batch_reads=False):
+    def __init__(self, store, provider, *, study_limit=12, batch_reads=False, focused_collection=False):
         if type(study_limit) is not int or not 1 <= study_limit <= PRODUCTION_STUDY_LIMIT:
             raise ValueError('INVALID_STUDY_LIMIT')
         self.store, self.provider = store, provider
         self.study_limit, self.batch_reads = study_limit, bool(batch_reads)
+        self.focus = None
+        if focused_collection:
+            if study_limit < 12:
+                raise ValueError('FOCUSED_COLLECTION_REQUIRES_12_SEATS')
+            from focused_research_collection import FocusedCollector
+            self.focus = FocusedCollector(store,provider)
 
     def prefetch(self, selected, now):
         """Deduplicate symbol/session reads without changing any episode evidence."""
@@ -206,6 +212,8 @@ class MoveResearchWorker:
             self.store.state('prior_day_trace_summary',trace_summary())
         except Exception as exc:
             logger.warning('PRIOR_DAY_PREPARATION_UNAVAILABLE %s',type(exc).__name__)
+        if self.focus and future is not None:
+            self.focus.freeze(future,clock() if clock else now,clock=clock)
         return dict(state='READY',universe_count=len(symbols),daily_symbols=len(daily),
                     completed_session=latest['date'],eligible_prior_features=len(features_latest),
                     historical_bars_delayed=True,selection_scope='ALPACA_ACTIVE_US_EQUITY_CATALOG',
@@ -217,10 +225,17 @@ class MoveResearchWorker:
         supplied_now = now is not None
         now = now or datetime.now(timezone.utc)
         health = {'state':'STARTING'}
+        focused, focused_frames = {}, {}
         try:
             self.store.prune_retained_evidence(now)
             # Process-unique worker and durable run markers protect restart deduplication.
             sessions = self.provider.calendar(now)
+            if self.focus:
+                focused,focused_frames = self.focus.capture(now)
+                logger.info('FOCUSED_SIP_CAPTURE %s',json.dumps(focused,sort_keys=True))
+                if focused.get('halt_reads'):
+                    health=dict(state='DATA_UNAVAILABLE',reason=focused['reason'])
+                    raise RuntimeError('FOCUSED_PROVIDER_UNAVAILABLE')
             symbols = self.store.state('universe_cache')
             if (symbols is None or symbols.get('date') != now.date().isoformat()
                     or symbols.get('selection_version') != SCAN_VERSION):
@@ -233,8 +248,15 @@ class MoveResearchWorker:
             # prevent an endless new-case backlog consuming their retry window.
             priority = self.store.state('jump_request_priority') or {}
             discovery = self.store.state('jump_discovery_priority') or {}
+            budget=self.study_limit
+            if self.focus:
+                panel=self.focus.manifest(now)
+                if panel and utc(panel['session']['open'])<=now<utc(panel['session']['close'])+timedelta(minutes=16):
+                    # Preserve provider time for the small forward panel during the session.
+                    budget=min(budget,12)
+                budget=max(0,budget-focused.get('captured_symbols',0))
             selected = schedule_studies(due,requested_keys(sessions,now),bounds=priority.get('bounds',{}),
-                discovery_bounds=discovery.get('bounds',{}),limit=self.study_limit)
+                discovery_bounds=discovery.get('bounds',{}),limit=budget)
             selected_count = len(selected)
             logger.info('MARKET_JUMP_STUDY_BATCH %s',json.dumps(dict(
                 selected=[dict(symbol=r['symbol'],session_day=r['session_day'],role=r['role'],
@@ -249,7 +271,9 @@ class MoveResearchWorker:
             except Exception as exc:
                 profile_daily = {}
                 logger.warning('MARKET_JUMP_CONTEXT_UNAVAILABLE %s',type(exc).__name__)
-            frames, samples = self.prefetch(selected,now), {}
+            # Reuse full-session reads already captured in this cycle.
+            remaining=[r for r in selected if (r['symbol'],r['session']['open'],r['session']['close']) not in focused_frames]
+            frames, samples = {**self.prefetch(remaining,now),**focused_frames}, {}
             prefetched_count = len(frames)
             checked_frames = set()
             for row in selected:
@@ -267,6 +291,12 @@ class MoveResearchWorker:
                         checked_frames.add(frame_key)
                     raw = frames[frame_key]
                     latest = observe_session(raw,row['session'])
+                    if self.focus:
+                        saved_focus=self.focus.evidence(row,now)
+                        if saved_focus:
+                            from market.retained_research_bars import merge_session_evidence
+                            raw,_=merge_session_evidence(raw,saved_focus,symbol=row['symbol'],
+                                start=utc(row['session']['open']),end=utc(row['session']['close']),checked_at=now)
                     from market.retained_research_bars import merge_session_evidence
                     data, evidence = merge_session_evidence(raw,evidence,symbol=row['symbol'],
                         start=utc(row['session']['open']),end=utc(row['session']['close']),checked_at=now)
@@ -337,7 +367,8 @@ class MoveResearchWorker:
         except Exception as exc:
             # Data errors cannot interrupt JALWE or publish false success labels.
             health = dict(state='DATA_UNAVAILABLE',error_type=type(exc).__name__,
-                          reason=str(exc) if str(exc).startswith(('HTTP_','WAITING_')) else 'RESEARCH_READ_FAILED')
+                          reason=(focused['reason'] if str(exc)=='FOCUSED_PROVIDER_UNAVAILABLE' else
+                              str(exc) if str(exc).startswith(('HTTP_','WAITING_')) else 'RESEARCH_READ_FAILED'))
         if health.get('state') == 'READY':
             health.update(session_backlog(self.store.episodes(), health['completed_session']))
         health['study_batch'] = dict(limit=self.study_limit,selected=selected_count,processed=processed_count,
@@ -355,6 +386,11 @@ class MoveResearchWorker:
         except Exception as exc:
             patterns = {'state':'UNAVAILABLE','error_type':type(exc).__name__}
             logger.warning('MARKET_MOVE_PATTERNS_UNAVAILABLE %s',type(exc).__name__)
+        if self.focus:
+            focused_status=self.focus.summary(published_at)
+            focused_status['latest_batch']=focused
+            self.store.state('focused_collection_status',focused_status)
+            logger.info('FOCUSED_COLLECTION_STATUS %s',json.dumps(focused_status,sort_keys=True,allow_nan=False))
         key, packet = self.store.publish(published_at,health,patterns=patterns)
         logger.info('MARKET_RESEARCH_FINDINGS %s',json.dumps(packet.get('findings',{}),
             sort_keys=True,allow_nan=False))
@@ -384,7 +420,7 @@ def main():
         raise RuntimeError('Research worker requires the existing PAPER-only configuration')
     provider = MoveProvider(settings.ALPACA_API_KEY,settings.ALPACA_SECRET_KEY)
     worker = MoveResearchWorker(MoveStore(default_path()),provider,
-                                study_limit=PRODUCTION_STUDY_LIMIT,batch_reads=True)
+                                study_limit=PRODUCTION_STUDY_LIMIT,batch_reads=True,focused_collection=True)
     logger.info('MARKET_MOVE_WORKER_STARTED protocol=%s read_only_provider=true broker_orders=false',PROTOCOL)
     while True:
         started = time.monotonic()

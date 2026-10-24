@@ -107,6 +107,8 @@ def inspect_trade(trade,entry,exits,orders,decision):
         except (ValueError,TypeError): unknown.append('TIMESTAMP_EVIDENCE_INVALID')
     actual_entry=number(trade.get('entry_price'));initial_stop=number(trade.get('initial_stop'))
     risk=(actual_entry-initial_stop)*initial if actual_entry is not None and initial_stop is not None and initial is not None and actual_entry>initial_stop>0 and initial>0 else None
+    from trade_factor_review import extract
+    entry_factors=extract(trade,entry,decision)
     # This is deviation from recorded decision reference, not measured quote/queue slippage.
     return dict(trade_id=trade['trade_id'],symbol=trade['symbol'],stage=trade['stage'],
         created_at=trade.get('created_at'),closed_at=trade.get('closed_at'),
@@ -118,7 +120,7 @@ def inspect_trade(trade,entry,exits,orders,decision):
         entry_fill_price=filled_entry,decision_entry_reference=reference,
         fill_vs_decision_reference_bps=slippage,reference_deviation_is_measured_execution_cost=False,
         decision_state=native.get('state'),decision_reason=native.get('reason'),
-        replay_id=(decision or {}).get('decision_replay_id'),
+        replay_id=(decision or {}).get('decision_replay_id'),entry_factors=entry_factors,
         timing=timing,initial_risk_dollars=risk,
         stop_snapshot=stop,stage_floor_snapshot=floor,exit_actions=sorted({str(r.get('action')) for r in valid}),
         scope='SAVED_SNAPSHOTS_NOT_CURRENT_BROKER_STATE_OR_CAUSAL_LOSS_DIAGNOSIS')
@@ -221,4 +223,6 @@ def status_text(symbol=None,path=None):
 def emit_audit(path):
     result=audit(path,limit=20)
     print('NATIVE_TRADE_CHAIN_AUDIT '+json.dumps(result,ensure_ascii=False,allow_nan=False),flush=True)
+    from trade_factor_review import summarize
+    print('NATIVE_TRADE_FACTOR_REVIEW '+json.dumps(summarize(result),ensure_ascii=False,allow_nan=False),flush=True)
     return result

@@ -5,6 +5,8 @@ import json
 import math
 import logging
 
+REPAIR_PROTOCOL = 'focused-two-minute-repair-v1'
+
 from market_move_research import utc, observe_session
 from market.retained_research_bars import merge_session_evidence, COLUMNS
 from market.research_diagnostics import error_diagnostics
@@ -148,7 +150,7 @@ class FocusedCollector:
             return dict(state='DATA_UNAVAILABLE',captured_symbols=len(symbols),**d,
                         halt_reads=d['reason'] in {'AUTHENTICATION_FAILED','FORBIDDEN','RATE_LIMITED',
                             'PROVIDER_SERVER_ERROR','PROVIDER_TIMEOUT','SUBSCRIPTION_REQUIRED'}),{}
-        completed_frames={};probes=2
+        completed_frames={};probes=0 if full else 2
         for symbol in symbols:
             raw=frames[symbol]
             if raw.attrs.get('data_feed')!='sip' or raw.attrs.get('adjustment')!='split':
@@ -188,14 +190,85 @@ class FocusedCollector:
                 duplicate_or_conflicting_minutes=duplicate_minutes,
                 full_session_complete=full and quality['status']=='COMPLETE',
                 data_diagnostics=diagnostics,gap_samples=list(by_minute.values())[-8:],
+                targeted_bar_rechecks=(json.loads(saved[1]).get('targeted_bar_rechecks',[]) if saved else []),
                 scope='RETRIEVAL_COVERAGE_NOT_TRAINING_SUCCESS_OR_PNL')
             with self.store.connect() as conn:
                 conn.execute('INSERT OR REPLACE INTO focused_collection_bars VALUES (?,?,?,?,?)',
                     (session['date'],symbol,json.dumps(evidence,allow_nan=False),
                      json.dumps(coverage,allow_nan=False),(closing+RETENTION).isoformat()))
             if full: completed_frames[(symbol,session['open'],session['close'])]=raw
+        repair=self._repair_absent(manifest,now) if full else {}
         return dict(state='CAPTURED',captured_symbols=len(symbols),window_end=end.isoformat(),
-                    full_session_available=full),completed_frames
+                    full_session_available=full,**repair),completed_frames
+
+    def _repair_absent(self, manifest, now):
+        """Replace the two post-close trade probes with at most two real bar reads.
+
+        Preselected pairs with fewer coverage gaps get retrieval priority, never
+        price outcomes. Each absent minute is targeted once; three durable post-
+        close capture reservations bound the panel to six such reads in total.
+        """
+        import pandas as pd
+        session=manifest['session'];opening,close=utc(session['open']),utc(session['close'])
+        if now<close+DELAY:return {}
+        expected=pd.date_range(opening,close,freq='min',inclusive='left')
+        with self.store.connect() as conn:
+            rows={r['symbol']:dict(r) for r in conn.execute(
+                'SELECT * FROM focused_collection_bars WHERE session_day=?',(session['date'],))}
+        pool={};costs={}
+        for m in manifest['members']:
+            symbol=m['symbol']
+            if symbol not in rows:continue
+            coverage=json.loads(rows[symbol]['coverage_json'])
+            evidence=json.loads(rows[symbol]['evidence_json'])
+            tried={utc(r['minute']) for r in coverage.get('targeted_bar_rechecks',[])}
+            present={utc(t) for t in evidence['minutes']}
+            absent=[t for t in expected if t not in present and t not in tried]
+            pool[symbol]=(coverage,evidence,absent)
+            if m['prospective']:
+                costs.setdefault(m['pair_key'],{})[symbol]=len(expected)-coverage['observed_minutes']
+        ranked=[]
+        for m in manifest['members']:
+            if m['symbol'] not in pool:continue
+            coverage,evidence,absent=pool[m['symbol']]
+            priority=sum(costs.get(m['pair_key'],{}).values()) if m['prospective'] else 1000+len(absent)
+            ranked.extend((priority,m['pair_key'],m['symbol'],t) for t in absent)
+        attempted=recovered=0;halt=False;reason=None
+        for _,_,symbol,minute in sorted(set(ranked)):
+            if attempted>=2:break
+            coverage,evidence,_=pool[symbol]
+            attempted+=1
+            record=dict(minute=minute.isoformat(),checked_at=now.isoformat(),state='NO_VALID_BAR_RETURNED')
+            window=dict(date=session['date'],open=minute.isoformat(),close=(minute+pd.Timedelta(minutes=1)).isoformat())
+            try:
+                raw=self.provider.intraday(symbol,window,now)
+                if (not isinstance(raw,pd.DataFrame) or raw.attrs.get('data_feed')!='sip'
+                        or raw.attrs.get('adjustment')!='split' or not isinstance(raw.index,pd.DatetimeIndex)
+                        or raw.index.tz is None or not set(COLUMNS)<=set(raw.columns)):
+                    raise ValueError('INVALID_TARGETED_BAR_SOURCE')
+                raw=raw.loc[raw.index==minute].copy()
+                if any(type(v).__name__ in {'bool','bool_'} for row in raw[COLUMNS].itertuples(index=False,name=None) for v in row):
+                    raise ValueError('INVALID_TARGETED_BAR_NUMBER')
+                if observe_session(raw,window)['status']=='COMPLETE':
+                    merged,evidence=merge_session_evidence(raw,evidence,symbol=symbol,start=opening,end=close,checked_at=now)
+                    observed=observe_session(merged,session)
+                    trusted=observe_session(merged.loc[~merged.index.duplicated(keep=False)],session)
+                    coverage.update(as_of=now.isoformat(),observed_minutes=trusted.get('observed_minutes',0),
+                        full_session_complete=observed['status']=='COMPLETE',data_diagnostics=observed.get('data_diagnostics',{}))
+                    recovered+=1;record['state']='RECOVERED_REAL_SIP_BAR'
+            except Exception as exc:
+                d=error_diagnostics(exc);record.update(state='READ_UNAVAILABLE',reason=d['reason'])
+                halt=d['reason'] in {'AUTHENTICATION_FAILED','FORBIDDEN','RATE_LIMITED','PROVIDER_SERVER_ERROR','PROVIDER_TIMEOUT','SUBSCRIPTION_REQUIRED'}
+                reason=d['reason'] if halt else None
+            coverage.setdefault('targeted_bar_rechecks',[]).append(record)
+            coverage['repair_protocol']=REPAIR_PROTOCOL
+            with self.store.connect() as conn:
+                conn.execute('UPDATE focused_collection_bars SET evidence_json=?,coverage_json=? WHERE session_day=? AND symbol=?',
+                    (json.dumps(evidence,allow_nan=False),json.dumps(coverage,allow_nan=False),session['date'],symbol))
+            pool[symbol]=(coverage,evidence,[])
+            if halt:break
+        return dict(repair_protocol=REPAIR_PROTOCOL,targeted_bar_reads=attempted,
+                    targeted_bars_recovered=recovered,halt_reads=halt,**({'reason':reason} if halt else {}))
 
     def summary(self, now):
         manifest=self.manifest(now)
@@ -229,4 +302,6 @@ class FocusedCollector:
             closed_polls=session_row['closed_polls'],max_closed_polls=POST_CLOSE_POLLS,
             oldest_saved_read_at=min((r['as_of'] for r in rows.values()),default=None),
             latest_capture_at=max((r['as_of'] for r in rows.values()),default=None),
+            targeted_bar_reads=sum(len(r.get('targeted_bar_rechecks',[])) for r in rows.values()),
+            targeted_bars_recovered=sum(t.get('state')=='RECOVERED_REAL_SIP_BAR' for r in rows.values() for t in r.get('targeted_bar_rechecks',[])),
             no_price_inference=True,execution_authority=False,training_authority=False)

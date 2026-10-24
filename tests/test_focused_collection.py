@@ -132,7 +132,9 @@ class FocusedCollectionTests(unittest.TestCase):
         self.provider.intraday_prefix_many.side_effect=lambda symbols,s,now:{symbol:changed for symbol in symbols}
         self.collector.capture(now+timedelta(minutes=15))
         self.assertEqual(self.collector.summary(now+timedelta(minutes=15))['complete_paths'],0)
-        self.assertEqual(self.provider.gap_trades.call_count,2)
+        # Post-close: the same two diagnostic seats now request actual missing bars.
+        self.assertEqual(self.provider.intraday.call_count,2)
+        self.provider.gap_trades.assert_not_called()
 
     def test_conflicting_returned_bar_is_not_counted_as_usable_coverage(self):
         self.freeze();now=utc(self.session['close'])+timedelta(minutes=16)

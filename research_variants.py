@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 
 PROTOCOL = "breakout-retest-runner-stop-cost10bps-v1"
+RUNNER_STOP_PROTOCOL = "runner-t1-entry-t2-floor-comparison-v2"
 COST = .001
 
 
@@ -68,7 +69,11 @@ def retest(bars, trigger, stop):
 
 
 def runner_stops(bars, entry, stop, *, entry_fill=None):
-    """One unsold runner unit: T1=2R, T2=3R, T3=4R; no partial-sale PnL."""
+    """One unsold unit: T1 raises to entry; T2 compares T1/T2 floors.
+
+    Subsequent candles can only raise the floor. This is a research comparison,
+    not a replay of broker orders, native quantities or realized trade PnL.
+    """
     if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in (entry, stop)) or not entry > stop > 0:
         return {"protocol": PROTOCOL, "outcome": "INVALID_PLAN"}
     fill = entry * (1 + COST) if entry_fill is None else entry_fill
@@ -90,10 +95,10 @@ def runner_stops(bars, entry, stop, *, entry_fill=None):
                 break
             new_stop = current
             if bar.high >= t1:
-                new_stop = t1
+                new_stop = max(new_stop, entry)
             if bar.high >= t2:
                 reached_t2 = True
-                new_stop = t2 if rule == "T2" else t1
+                new_stop = max(new_stop, t2 if rule == "T2" else t1)
             if bar.high >= t3:
                 # Comparison ends at T3; subsequent trailing rules are out of scope.
                 if bar.low <= new_stop:
@@ -108,6 +113,6 @@ def runner_stops(bars, entry, stop, *, entry_fill=None):
         results[rule] = {"outcome": outcome, "reached_t2": reached_t2, "exit_at": exit_at,
                          "net_r": None if exit_raw is None else
                          (exit_raw * (1 - COST) - fill) / risk}
-    return {"protocol": PROTOCOL, "scope": "RUNNER_UNIT_SIMULATION_NOT_TRADE_PNL",
+    return {"protocol": RUNNER_STOP_PROTOCOL, "scope": "RUNNER_UNIT_SIMULATION_NOT_TRADE_PNL",
             "targets": [t1, t2, t3], "one_way_cost_pct": COST * 100,
             "rules": results, "auto_apply": False}

@@ -2685,6 +2685,7 @@ def help_text() -> str:
         "/ai_system - البوت والذكاء والتدريب في عرض واحد\n"
         "/loss_study - مقارنة توقيت الدخول والوقف دون تداول\n"
         "/trade_factors - عوامل الدخول المشتركة في الصفقات الرابحة والخاسرة\n"
+        "/quality_study - اختبار معايرة الدرجة والسيولة دون تغيير الشراء\n"
         "/ai_case SNAP - ربط أدلة القرار والتفسير المطابق\n"
         "/ai_status - حالة محلل الذكاء الاصطناعي المستقل\n"
         "/ai_review SNAP - أحدث تفسير محفوظ للسهم\n"
@@ -2723,6 +2724,10 @@ def help_text() -> str:
 def handle(text: str, requested_by=None) -> Any:
     cmd = str(text or "").strip()
     low = cmd.lower()
+
+    if low == '/quality_study':
+        from entry_quality_study import read_report as quality_study_text
+        return quality_study_text()
 
     if low == '/trade_factors':
         from trade_factor_review import status_text as trade_factors_text

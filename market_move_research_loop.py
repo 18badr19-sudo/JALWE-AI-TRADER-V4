@@ -399,6 +399,14 @@ class MoveResearchWorker:
             focused_status['latest_batch']=focused
             self.store.state('focused_collection_status',focused_status)
             logger.info('FOCUSED_COLLECTION_STATUS %s',json.dumps(focused_status,sort_keys=True,allow_nan=False))
+            try:
+                from entry_quality_study import refresh as refresh_entry_quality
+                quality=refresh_entry_quality(self.store,published_at)
+                logger.info('ENTRY_QUALITY_STUDY_STATUS %s',json.dumps({k:quality.get(k) for k in (
+                    'protocol','state','defined_at','recorded','available_sessions','required_sessions',
+                    'checked_at','execution_authority','automatic_promotion')},sort_keys=True))
+            except Exception as exc:
+                logger.warning('ENTRY_QUALITY_STUDY_UNAVAILABLE %s',type(exc).__name__)
         key, packet = self.store.publish(published_at,health,patterns=patterns)
         logger.info('MARKET_RESEARCH_FINDINGS %s',json.dumps(packet.get('findings',{}),
             sort_keys=True,allow_nan=False))

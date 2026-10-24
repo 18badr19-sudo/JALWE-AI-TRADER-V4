@@ -87,6 +87,7 @@ def snapshot(*,native_path=None,research_path=None,shadow_path=None,now=None,sym
     out['collection']=read_state(research_path,'focused_collection_status') or {}
     out['pattern_learning']=read_state(research_path,'pattern_policy') or {}
     out['model_lab']=read_state(research_path,'ai_model_lab_status') or {}
+    out['entry_quality_study']=read_state(research_path,'entry_quality_status') or {}
     artifact=out['model_lab'].get('artifact') or {}
     if not isinstance(artifact,dict):artifact={'invalid_structure':True}
     out['artifact_status']='NO_ARTIFACT'
@@ -158,6 +159,9 @@ def status_text(symbol=None,**kwargs):
             lines.append(f"خطأ Brier: النموذج {metrics['candidate_brier']:.4f} | خط أساس ثابت {metrics['constant_baseline_brier']:.4f}؛ الأقل أفضل لهذا الحدث البحثي.")
             lines.append('هذه ليست مقارنة بأرباح البوت ولا اختبارًا لتنبؤات مسجلة قبل النتيجة.')
     lines.append('حالة النموذج المحفوظ: '+value['artifact_status']+'؛ لا صلاحية تنفيذ.')
+    quality=value['entry_quality_study']
+    if quality:
+        lines.append(f"تجربة الدرجة والسيولة: {quality.get('state','UNAVAILABLE')} | مرشحون {quality.get('recorded',0)} | التفاصيل /quality_study")
     case=value.get('case')
     if case:
         lines += [f"السهم {case.get('symbol',symbol)}: {case['state']}"]

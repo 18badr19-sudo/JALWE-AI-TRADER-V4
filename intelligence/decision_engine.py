@@ -1199,6 +1199,9 @@ class DecisionEngine:
         # Freeze the evidence available at this decision, including failed quality
         # checks. Outcome research must never substitute a later feature snapshot.
         base_metadata["decision_features"] = self._decision_feature_evidence(features)
+        from loss_reduction_study import stop_context as loss_stop_context
+        base_metadata['loss_study_stop_context'] = loss_stop_context(
+            bars, getattr(features,'atr',None), timeframe, base_metadata.get('decision_data_feed'))
         base_metadata["research_stop_context"] = {
             "atr": getattr(features, "atr", None), "atr_timeframe": timeframe,
             "model_low": float(bars["low"].tail(5).min()) if features.data_quality_ok and "low" in bars else None,

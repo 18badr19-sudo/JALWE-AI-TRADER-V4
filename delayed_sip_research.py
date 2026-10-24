@@ -46,6 +46,8 @@ class DelayedSipResearch:
 
     def __init__(self, db, market_data=None):
         self.db, self.market_data = db, market_data
+        from loss_reduction_study import LossReductionStudy
+        self.loss_study = LossReductionStudy(db)
         with self.db.connection() as conn:
             conn.execute("""CREATE TABLE IF NOT EXISTS delayed_sip_research (
                 observation_key TEXT PRIMARY KEY, source_kind TEXT NOT NULL,
@@ -196,6 +198,7 @@ class DelayedSipResearch:
             # yields DATA_UNAVAILABLE/PENDING, never success from stale metrics.
             if previous.get("bar_evidence") is not None:
                 result["bar_evidence"] = previous["bar_evidence"]
+            loss_frame = None
             try:
                 frame = self.market_data.get_research_observation_bars(
                     row["symbol"], start, end, as_of=now)
@@ -206,6 +209,7 @@ class DelayedSipResearch:
                 frame, evidence = merge_evidence(frame, previous.get("bar_evidence"),
                     symbol=row["symbol"], start=start, end=end, checked_at=now)
                 result["bar_evidence"] = evidence
+                loss_frame = frame
                 bars = DecisionOutcomeMemory._valid_bars(frame, start, end)
                 diagnostics = coverage_diagnostics(frame, bars, start, end)
                 result["evidence_recovery"] = {
@@ -235,6 +239,10 @@ class DelayedSipResearch:
                      row["status"], row["check_count"]))
                 if changed.rowcount != 1:
                     continue
+                if row['source_kind']=='DECISION':
+                    try:self.loss_study.observe(conn,row['source_key'],loss_frame,'sip',now)
+                    except Exception as exc:
+                        logger.warning('LOSS_STUDY_SIP_UNAVAILABLE type=%s',type(exc).__name__)
                 if row["status"] in {"PARTIAL_DATA", "DATA_UNAVAILABLE"}:
                     conn.execute("""INSERT INTO delayed_sip_recheck_history
                         (recheck_key, observation_key, checked_at, previous_status,

@@ -499,7 +499,7 @@ class MoveStore:
             r['episode_key']), reverse=True)[:12]
         packet = dict(protocol=PROTOCOL, scope='RESEARCH_ONLY_NOT_TRADE_SIGNAL',
             published_at=now.isoformat(), source_feed='sip', automatic_application=False,
-            health=health, counts=dict(counts), prospective_episodes=sum(r['prospective'] for r in rows),
+            health=health, focused_collection=self.state('focused_collection_status') or {}, counts=dict(counts), prospective_episodes=sum(r['prospective'] for r in rows),
             hot_case_episodes=sum(r['role'] == 'HOT_CASE' for r in rows),
             historical_jumps=dict(episodes=len(jumps),counts=dict(Counter(r['status'] for r in jumps)),
                 confirmed=sum(r['status']=='COMPLETE' and r['result'].get('jump_path',{}).get('strong_jump') is True for r in jumps),
@@ -571,6 +571,7 @@ def read_packet(symbol=None, *, now=None, path=None):
         if any(not isinstance(result[k],dict) for k in ('health','counts','comparison')):
             return None
         result['cases'] = [c for c in packet['latest_cases'] if symbol is None or c['symbol'] == symbol]
+        result['focused_collection'] = packet.get('focused_collection', {})
         result['diagnostics'] = packet.get('diagnostics', {})
         result['patterns'] = packet.get('patterns', {})
         result['findings'] = packet.get('findings', {})
@@ -617,6 +618,13 @@ def report_text(packet):
         for fact in knowledge.get('factors',[]):
             lines.append(f"  {fact['label']}: {fact['present']}/{fact['known']} | مجهول {fact['unknown']}")
         lines.append('نسبة ظهور بين قافزين مختارين، وليست نسبة نجاح شراء. التفاصيل: /research_findings')
+    focus=packet.get('focused_collection',{})
+    if focus.get('symbols'):
+        coverage=focus.get('coverage_pct')
+        coverage='ينتظر الدقائق المتاحة' if coverage is None else f"{coverage:.1f}%"
+        lines += [f"🎯 جمع مركز قبل الافتتاح — {focus['session_day']}: {focus['symbols']} سهم | {focus['pairs']} أزواج | مرشحون {focus['nominees']}",
+            f"تغطية محفوظة للدقائق المتاحة: {coverage} | مسارات جلسة كاملة {focus['complete_paths']}/{focus['symbols']} | أزواج مكتملة {focus['complete_pairs']}/{focus['pairs']}",
+            'حفظ SIP متأخر أثناء الجلسة؛ النقص مجهول، ولا يُملأ بسعر مفترض. اكتمال الجمع لا يثبت أفضلية أو نجاح تدريب.']
     jumps = packet.get('historical_jumps',{})
     batch = health.get('study_batch',{})
     if batch:

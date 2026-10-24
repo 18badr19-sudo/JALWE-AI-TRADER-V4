@@ -151,6 +151,22 @@ class MoveProvider:
         # proof that symbols sorted after it have no trades.
         return {symbol:self._minute_frame(rows.get(symbol,[])) for symbol in symbols}
 
+    def intraday_prefix_many(self, symbols, session, now):
+        """Read only whole SIP minutes already delayed 16m, including early closes."""
+        symbols=list(dict.fromkeys(symbols))
+        if not symbols: return {}
+        if len(symbols)>12: raise ResearchReadError('FOCUSED_BATCH_TOO_LARGE')
+        start=utc(session['open'])
+        end=min(utc(session['close']),(now-timedelta(minutes=16)).replace(second=0,microsecond=0))
+        if end<=start: raise ResearchReadError('WAITING_FOR_HISTORICAL_DELAY')
+        rows=self.bars(symbols,start,end,'1Min')
+        result={}
+        for symbol in symbols:
+            frame=self._minute_frame(rows.get(symbol,[]))
+            # End may be inclusive at the API; never retain the next minute.
+            result[symbol]=frame.loc[(frame.index>=start)&(frame.index<end)].copy()
+        return result
+
     def news_before(self, symbol, cutoff):
         articles, token, seen, complete, malformed = [], None, set(), False, 0
         start = cutoff-timedelta(days=1)

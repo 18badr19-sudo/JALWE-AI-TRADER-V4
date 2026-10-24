@@ -3,6 +3,7 @@ from collections import Counter
 from datetime import timedelta
 import json
 import math
+import logging
 
 from market_move_research import utc, observe_session
 from market.retained_research_bars import merge_session_evidence, COLUMNS
@@ -91,6 +92,11 @@ class FocusedCollector:
                          (session['date'],json.dumps(manifest,sort_keys=True,allow_nan=False)))
             if clock and clock()>=utc(session['open']):
                 conn.rollback();return False
+        logging.getLogger(__name__).info('FOCUSED_COLLECTION_FROZEN %s',json.dumps(dict(
+            protocol=PROTOCOL,session_day=session['date'],frozen_at=manifest['frozen_at'],
+            symbols=sorted({m['symbol'] for m in members}),
+            pairs=len({m['pair_key'] for m in members if m['prospective']}),
+            nominees=sum(m['role']=='ENTRY_STUDY' for m in members),execution_authority=False),sort_keys=True))
         return True
 
     def manifest(self, now):
@@ -158,6 +164,12 @@ class FocusedCollector:
             merged,evidence=merge_session_evidence(raw,previous,symbol=symbol,start=opening,end=closing,checked_at=now)
             prefix=dict(date=session['date'],open=opening.isoformat(),close=end.isoformat())
             quality=observe_session(merged,prefix)
+            # Conflicting/duplicate copies can never count as usable coverage,
+            # even when the legacy validator describes one observed price.
+            trusted=merged.loc[~merged.index.duplicated(keep=False)]
+            trusted_quality=observe_session(trusted,prefix)
+            duplicate_minutes=len(merged.index[merged.index.duplicated(keep=False)
+                & (merged.index>=opening) & (merged.index<end)].unique())
             diagnostics=quality.get('data_diagnostics',{})
             samples=(json.loads(saved[1]).get('gap_samples',[]) if saved else [])
             by_minute={s['minute']:s for s in samples if s.get('complete')}
@@ -172,7 +184,8 @@ class FocusedCollector:
             # Keep bounded diagnostic samples; samples do NOT repair missing bars.
             coverage=dict(as_of=now.isoformat(),mature_end=end.isoformat(),
                 mature_expected_minutes=quality.get('expected_minutes',0),
-                observed_minutes=quality.get('observed_minutes',0),
+                observed_minutes=trusted_quality.get('observed_minutes',0),
+                duplicate_or_conflicting_minutes=duplicate_minutes,
                 full_session_complete=full and quality['status']=='COMPLETE',
                 data_diagnostics=diagnostics,gap_samples=list(by_minute.values())[-8:],
                 scope='RETRIEVAL_COVERAGE_NOT_TRAINING_SUCCESS_OR_PNL')
@@ -209,6 +222,8 @@ class FocusedCollector:
             nominees=sum(m['role']=='ENTRY_STUDY' for m in manifest['members']),
             mature_expected_minutes=expected,observed_minutes=observed,
             coverage_pct=round(100*observed/expected,2) if expected else None,
+            missing_mature_minutes=max(0,expected-observed),
+            duplicate_or_conflicting_minutes=sum(r.get('duplicate_or_conflicting_minutes',0) for r in rows.values()),
             complete_paths=len(complete),complete_pairs=sum(len(v)==2 and v<=complete for v in pairs.values()),
             reasons=dict(reasons),gap_sample_classes=dict(samples),polls=session_row['polls'],
             closed_polls=session_row['closed_polls'],max_closed_polls=POST_CLOSE_POLLS,

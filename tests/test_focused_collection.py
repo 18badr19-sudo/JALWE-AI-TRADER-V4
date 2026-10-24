@@ -134,6 +134,20 @@ class FocusedCollectionTests(unittest.TestCase):
         self.assertEqual(self.collector.summary(now+timedelta(minutes=15))['complete_paths'],0)
         self.assertEqual(self.provider.gap_trades.call_count,2)
 
+    def test_conflicting_returned_bar_is_not_counted_as_usable_coverage(self):
+        self.freeze();now=utc(self.session['close'])+timedelta(minutes=16)
+        data=self.frame()
+        self.provider.intraday_prefix_many.side_effect=lambda symbols,s,now:{symbol:data for symbol in symbols}
+        self.collector.capture(now)
+        changed=data.copy();changed.iloc[10,1]=100
+        self.provider.intraday_prefix_many.side_effect=lambda symbols,s,now:{symbol:changed for symbol in symbols}
+        self.collector.capture(now+timedelta(minutes=15))
+        result=self.collector.summary(now+timedelta(minutes=15))
+        self.assertEqual(result['observed_minutes'],778)
+        self.assertEqual(result['duplicate_or_conflicting_minutes'],2)
+        self.assertLess(result['coverage_pct'],100.)
+        self.assertEqual((result['complete_pairs'],result['complete_paths']),(0,0))
+
     def test_empty_success_cannot_erase_real_rows_and_bools_are_invalid(self):
         self.freeze();now=utc(self.session['close'])+timedelta(minutes=16)
         data=self.frame();data['volume']=data.volume.astype(object);data.iloc[0,4]=True

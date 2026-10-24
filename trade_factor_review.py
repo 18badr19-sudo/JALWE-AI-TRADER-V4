@@ -11,7 +11,8 @@ import json,math,sqlite3
 PROTOCOL='native-entry-factors-outcome-description-v1'
 NY=ZoneInfo('America/New_York')
 FEATURES=('rvol','liquidity_score','volume_acceleration','atr','atr_pct','momentum_score',
-          'dollar_volume','rsi','distance_from_vwap_pct')
+          'dollar_volume','rsi','distance_from_vwap_pct','price','ema_9','ema_20','rsi_14',
+          'distance_to_high_20_pct','range_compression','news_score','options_flow_score')
 FLAGS={'iex':'بيانات IEX','grade_a_plus':'درجة A+', 'rvol_ge2':'RVOL عند الدخول ≥2',
     'stop_lt_atr':'الوقف أقل من ATR واحد','stop_lt_1pct':'الوقف أقل من 1%',
     'low_liquidity':'السيولة أقل من 55','above_vwap':'فوق VWAP',

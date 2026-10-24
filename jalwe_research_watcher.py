@@ -3794,6 +3794,8 @@ def process_research(
         try:
             from decision_brain import freeze_context
             payload['decision_brain']=freeze_context(payload)
+            from native_trade_learning import forecast
+            payload['local_model_forecast']=forecast(payload)
         except Exception as exc:
             logger.warning('DECISION_BRAIN_CONTEXT_UNAVAILABLE %s',type(exc).__name__)
 

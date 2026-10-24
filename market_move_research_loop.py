@@ -215,6 +215,14 @@ class MoveResearchWorker:
         if self.focus and future is not None:
             self.focus.freeze(future,clock() if clock else now,clock=clock)
             try:
+                from native_trade_learning import refresh as refresh_native_local
+                local=refresh_native_local(self.store,clock() if clock else now)
+                logger.info('NATIVE_LOCAL_MODEL_STATUS %s',json.dumps(dict(protocol=local['protocol'],
+                    state=local['state'],source_audit=local.get('source_audit'),source_trades=local.get('source_trades'),
+                    known_vectors=local.get('known_vectors'),execution_authority=False),sort_keys=True))
+            except Exception as exc:
+                logger.warning('NATIVE_LOCAL_MODEL_UNAVAILABLE %s',type(exc).__name__)
+            try:
                 from decision_brain import refresh as refresh_brain_memory
                 brain=refresh_brain_memory(self.store,clock() if clock else now)
                 logger.info('DECISION_BRAIN_MEMORY_READY %s',json.dumps(dict(protocol=brain['protocol'],

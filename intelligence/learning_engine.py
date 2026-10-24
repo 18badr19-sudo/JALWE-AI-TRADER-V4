@@ -31,7 +31,7 @@ from core.database import database
 
 
 class LearningEngine:
-    VERSION = "1.0"
+    VERSION = "1.1"
 
     FACTORS = (
         "liquidity",
@@ -202,6 +202,14 @@ class LearningEngine:
                         FROM learning_factor_weights
                         """
                     ).fetchall()
+                    last=conn.execute('SELECT summary_json FROM learning_runs ORDER BY id DESC LIMIT 1').fetchone()
+                from native_trade_learning import SOURCE_PROTOCOL
+                try:valid_source=bool(last and json.loads(last['summary_json']).get('source_protocol')==SOURCE_PROTOCOL)
+                except (ValueError,TypeError):valid_source=False
+                if not valid_source:
+                    self._weights={factor:1.0 for factor in self.FACTORS}
+                    self._cache_loaded_at=now
+                    return
 
                 for row in rows:
                     factor = str(row["factor_name"])
@@ -275,102 +283,11 @@ class LearningEngine:
     # LEARNING DATA
     # ========================================================
 
-    def _load_closed_trade_samples(
-        self,
-    ) -> list[dict[str, Any]]:
-        with database.connection() as conn:
-            rows = conn.execute(
-                """
-                SELECT
-                    mt.trade_id,
-                    NULL AS signal_id,
-                    mt.symbol,
-                    json_extract(
-                        mt.metadata_json,
-                        '$.strategy'
-                    ) AS strategy,
-                    mt.initial_quantity AS quantity,
-                    mt.entry_price,
-                    json_extract(
-                        mt.metadata_json,
-                        '$.realized_pnl'
-                    ) AS realized_pnl,
-                    json_extract(
-                        mt.metadata_json,
-                        '$.realized_pnl_pct'
-                    ) AS realized_pnl_pct,
-                    mt.closed_at,
-                    (
-                        SELECT fs.snapshot_json
-                        FROM feature_snapshots fs
-                        WHERE fs.symbol = mt.symbol
-                          AND julianday(fs.created_at) <= julianday(mt.created_at)
-                          AND julianday(fs.created_at) >= julianday(mt.created_at) - (30.0 / 1440.0)
-                        ORDER BY
-                            julianday(fs.created_at) DESC,
-                            fs.id DESC
-                        LIMIT 1
-                    ) AS snapshot_json
-                FROM managed_trades mt
-                WHERE mt.stage = 'CLOSED'
-                ORDER BY
-                    COALESCE(mt.closed_at, mt.updated_at) DESC
-                LIMIT ?
-                """,
-                (self.max_history,),
-            ).fetchall()
-
-        samples: list[dict[str, Any]] = []
-
-        for row in rows:
-            item = dict(row)
-            raw_snapshot = item.get(
-                "snapshot_json"
-            )
-
-            if not raw_snapshot:
-                continue
-
-            try:
-                snapshot = json.loads(
-                    raw_snapshot
-                )
-            except Exception:
-                continue
-
-            if not isinstance(
-                snapshot,
-                dict,
-            ):
-                continue
-
-            pnl_pct = self._trade_pnl_pct(
-                item
-            )
-
-            if pnl_pct is None:
-                continue
-
-            samples.append(
-                {
-                    "trade_id": item.get(
-                        "trade_id"
-                    ),
-                    "signal_id": item.get(
-                        "signal_id"
-                    ),
-                    "symbol": item.get(
-                        "symbol"
-                    ),
-                    "strategy": item.get(
-                        "strategy"
-                    ),
-                    "pnl_pct": pnl_pct,
-                    "snapshot": snapshot,
-                }
-            )
-
-        return samples
+    def _load_closed_trade_samples(self) -> list[dict[str, Any]]:
+        from native_trade_learning import load_samples
+        report=load_samples(path=getattr(database, 'database_path', None), limit=min(self.max_history,50))
+        self._sample_audit={k:v for k,v in report.items() if k!='samples'}
+        return report['samples']
 
     @staticmethod
     def _safe_float(
@@ -820,7 +737,10 @@ class LearningEngine:
                         ),
                     }
 
+                from native_trade_learning import SOURCE_PROTOCOL
                 summary = {
+                    "source_protocol": SOURCE_PROTOCOL,
+                    "sample_audit": getattr(self,"_sample_audit",{}),
                     "version": self.VERSION,
                     "enabled": self.enabled,
                     "learning_active": (
@@ -902,35 +822,19 @@ class LearningEngine:
                 """
             ).fetchall()
 
-            trade_row = conn.execute(
-                """
-                SELECT COUNT(*) AS total
-                FROM managed_trades
-                WHERE stage = 'CLOSED'
-                  AND EXISTS (
-                      SELECT 1
-                      FROM feature_snapshots fs
-                      WHERE fs.symbol = managed_trades.symbol
-                  )
-                """
-            ).fetchone()
-
-        eligible = int(
-            trade_row["total"]
-            if trade_row
-            else 0
-        )
-
-        active = bool(
-            self.enabled
-            and eligible >= self.min_trades
-        )
+            last = conn.execute("SELECT summary_json FROM learning_runs ORDER BY id DESC LIMIT 1").fetchone()
+        eligible=len(self._load_closed_trade_samples())
+        from native_trade_learning import SOURCE_PROTOCOL
+        try: saved=json.loads(last['summary_json']) if last else {}
+        except (ValueError,TypeError): saved={}
+        active=bool(self.enabled and eligible>=self.min_trades and saved.get('source_protocol')==SOURCE_PROTOCOL and saved.get('learning_active'))
 
         return {
             "version": self.VERSION,
             "enabled": self.enabled,
             "active": active,
             "eligible_trades": eligible,
+            "sample_audit": getattr(self,"_sample_audit",{}),
             "minimum_trades": (
                 self.min_trades
             ),
@@ -949,9 +853,7 @@ class LearningEngine:
                     ],
                     "multiplier": round(
                         float(
-                            row[
-                                "multiplier"
-                            ]
+                            self._weights.get(row['factor_name'],1.0)
                         ),
                         4,
                     ),

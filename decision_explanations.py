@@ -8,6 +8,42 @@ from core.decision_diagnostics import decision_details,saudi_time
 from core.storage import database_path
 
 
+FACTOR_NAMES = {'liquidity':'السيولة', 'rvol':'الحجم النسبي', 'vwap':'VWAP',
+    'trend':'الاتجاه', 'momentum':'الزخم', 'rsi':'RSI', 'breakout':'قرب الاختراق',
+    'compression':'ضيق النطاق', 'news':'درجة الأخبار', 'options_flow':'تدفق الخيارات',
+    'market_regime':'حالة السوق'}
+
+
+def ai_score_details(decision):
+    """Explain only newly recorded native factor evidence, never backfill it."""
+    evidence=(decision.get('metadata') or {}).get('ai_score_evidence')
+    if not isinstance(evidence,dict):
+        return ['تفصيل نقاط الذكاء: غير محفوظ لهذا القرار؛ لا يُعاد اختراعه.']
+    rows=evidence.get('factor_breakdown')
+    if not isinstance(rows,list):
+        return ['تفصيل نقاط الذكاء: غير متاح في الدليل المحفوظ.']
+    lines=[]
+    for side,label in (('bullish','نقاط داعمة'),('bearish','نقاط معاكسة')):
+        totals={}
+        for row in rows:
+            if not isinstance(row,dict) or row.get('side')!=side: continue
+            factor=row.get('factor'); points=row.get('weighted_points')
+            if (factor not in FACTOR_NAMES or type(points) not in (int,float)
+                    or not math.isfinite(points) or points<0): continue
+            totals[factor]=totals.get(factor,0)+points
+        if totals:
+            lines.append(label+': '+' | '.join(FACTOR_NAMES[k]+f' {v:.2f}' for k,v in totals.items()))
+    if lines:
+        lines.append('الدرجة: سقف 100 لكل جانب، ثم طرح 70% من المعاكس؛ الدرجة ليست احتمال ربح.')
+    invalid=evidence.get('invalid_inputs')
+    if isinstance(invalid,list) and invalid:
+        lines.append('مدخلات غير صالحة مستبعدة: '+', '.join(str(x) for x in invalid)[:300])
+    threshold=evidence.get('minimum_buy_score')
+    if type(threshold) in (int,float) and math.isfinite(threshold):
+        lines.append(f'حد BUY المسجل للذكاء: {threshold:.2f}؛ بقية بوابات الشراء مستقلة.')
+    return lines or ['لم تُحسب نقاط عوامل موثوقة في دليل الذكاء المحفوظ.']
+
+
 def explain(symbol,path=None):
     symbol=str(symbol or '').strip().upper()
     if not re.fullmatch(r'[A-Z][A-Z0-9.\-]{0,14}',symbol):
@@ -23,6 +59,7 @@ def explain(symbol,path=None):
         lines=['🧾 شرح آخر قرار محفوظ — '+symbol,saudi_time(row['created_at']),
             'القرار: '+str(d.get('state','غير مسجل')),'السبب المسجل: '+str(d.get('reason','غير مسجل'))]
         lines+=decision_details(d)
+        lines+=ai_score_details(d)
         gates=d.get('gates') or {}
         if isinstance(gates,dict):
             failed=[str(k) for k,v in gates.items() if v is False]

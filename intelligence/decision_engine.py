@@ -855,6 +855,7 @@ class DecisionEngine:
             self._apply_news(features, warnings)
             self._apply_options(features, warnings)
             current_ai = observe('ai_engine.evaluate', self.ai_engine.evaluate, features)
+            latch_metadata["ai_score_evidence"] = dict(getattr(current_ai, "metadata", {}) or {})
             current_opportunity = observe('opportunity_engine.evaluate', self.opportunity_engine.evaluate, features)
             current_routed = observe('strategy_router.route', self.strategy_router.route, current_opportunity, current_market)
             session = observe('session_feature_engine.build', self.session_feature_engine.build, symbol, bars)
@@ -1329,6 +1330,7 @@ class DecisionEngine:
 
         try:
             ai = observe('ai_engine.evaluate', self.ai_engine.evaluate, features)
+            base_metadata["ai_score_evidence"] = dict(getattr(ai, "metadata", {}) or {})
         except Exception as exc:
             return self._reject(
                 symbol=symbol,

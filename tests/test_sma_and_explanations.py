@@ -108,4 +108,25 @@ class ExplanationTests(unittest.TestCase):
             self.assertIn('لا توجد',explanations.explain('SNAP',path)); self.assertFalse(path.exists())
 
 
+
+class AIScoreExplanationTests(unittest.TestCase):
+    def test_saved_factor_evidence_is_shown_without_probability_or_old_score_reconstruction(self):
+        from decision_explanations import ai_score_details
+        self.assertIn('غير محفوظ', '\n'.join(ai_score_details({})))
+        decision={'metadata':{'ai_score_evidence':{
+            'minimum_buy_score':74, 'factor_breakdown':[
+                {'factor':'liquidity','side':'bullish','weighted_points':12},
+                {'factor':'vwap','side':'bullish','weighted_points':14},
+                {'factor':'vwap','side':'bullish','weighted_points':4},
+                {'factor':'news','side':'bearish','weighted_points':8},
+                {'factor':'fake_order','side':'bullish','weighted_points':1000},
+                {'factor':'momentum','side':'bullish','weighted_points':float('nan')}],
+            'invalid_inputs':['rsi_14']}}}
+        text='\n'.join(ai_score_details(decision))
+        self.assertIn('السيولة 12.00',text);self.assertIn('VWAP 18.00',text)
+        self.assertIn('درجة الأخبار 8.00',text);self.assertIn('74.00',text)
+        self.assertIn('rsi_14',text);self.assertNotIn('fake_order',text)
+        self.assertNotIn('nan',text);self.assertIn('ليست احتمال ربح',text)
+
+
 if __name__=='__main__': unittest.main()

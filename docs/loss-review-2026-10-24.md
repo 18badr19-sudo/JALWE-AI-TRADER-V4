@@ -28,8 +28,8 @@ https://docs.alpaca.markets/us/docs/orders-at-alpaca
 ## Confirmed research defect and correction
 
 runner_stops raised the research stop to T1 immediately at T1, contrary to the
-native T1-to-entry policy, and could lower a previously raised floor on a later
-candle. Reproduction: entry10/stop9, T1=12, bars with high12.2 and low11.6 produce
+native T1-to-entry policy. The correction also enforces monotonic floors
+after introducing the entry floor. Reproduction: entry10/stop9, T1=12, bars with high12.2 and low11.6 produce
 AMBIGUOUS_RAISED_STOP even though the true entry stop10 cannot be touched.
 Correct to T1->entry, T2->T1 or the compared T2 floor, and monotonic floors.
 Preserve ambiguity where the new actual floor and target share a candle.

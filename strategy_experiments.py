@@ -130,6 +130,8 @@ class StrategyExperiments:
                 ny_date TEXT PRIMARY KEY, generated_at TEXT NOT NULL
             )""")
         self.guard = StrategyPolicyGuard(db, PROTOCOL)
+        from loss_reduction_study import LossReductionStudy
+        self.loss_study = LossReductionStudy(db)
 
     def record_candidates(self, conn, payload, decision_key, research_version):
         jalwe = payload["jalwe"]
@@ -167,6 +169,8 @@ class StrategyExperiments:
                                             "entry_variant_protocol": ENTRY_VARIANT_PROTOCOL,
                                             "runner_stop_protocol": RUNNER_STOP_PROTOCOL}, default=str), PROTOCOL,
                   "PENDING" if eligible else "INELIGIBLE"))
+            if name == baseline and eligible:
+                self.loss_study.record(conn,key,decision_key,payload,candidate)
         self.guard.record_selection(conn, metadata, episode, decision_key, stamp, ctx, native_ok)
 
     def observe(self, conn, decision_key, bars, status):

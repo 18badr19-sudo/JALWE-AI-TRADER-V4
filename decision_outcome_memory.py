@@ -209,8 +209,10 @@ class DecisionOutcomeMemory:
         for row in rows:
             start, end = utc(row["window_start"]), utc(row["window_end"])
             terminal = now >= end + timedelta(minutes=self.DATA_GRACE_MINUTES)
+            loss_frame = None
             try:
                 frame = self.market_data.get_observation_bars(row["symbol"], start, end)
+                loss_frame = frame
                 observed_feed = frame.attrs.get("data_feed")
                 if observed_feed and row["data_feed"] and observed_feed != row["data_feed"]:
                     raise ValueError("Observation feed differs from decision feed")
@@ -255,6 +257,10 @@ class DecisionOutcomeMemory:
                     check_count = check_count + 1 WHERE decision_key = ? AND status = 'PENDING'
                 """, (status, len(bars), json.dumps(result), now.isoformat(), row["decision_key"]))
                 self.experiments.observe(conn, row["decision_key"], bars, status)
+                try:
+                    self.experiments.loss_study.observe(conn,row['decision_key'],loss_frame,row['data_feed'],now)
+                except Exception as exc:
+                    logger.warning('LOSS_STUDY_OBSERVATION_UNAVAILABLE type=%s',type(exc).__name__)
             updated += 1
         return updated
 

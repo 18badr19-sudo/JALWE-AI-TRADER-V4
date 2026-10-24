@@ -62,30 +62,26 @@ class ReviewRegressionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             RiskEngine._strategy_available_cash(float('nan'), 100, [])
 
-    def test_learning_excludes_future_and_old_snapshots(self):
-        c = sqlite3.connect(':memory:')
-        c.row_factory = sqlite3.Row
-        c.executescript('''
-            CREATE TABLE managed_trades(trade_id, symbol, metadata_json,
-                initial_quantity, entry_price, closed_at, created_at, updated_at, stage);
-            CREATE TABLE feature_snapshots(id INTEGER PRIMARY KEY, symbol, created_at, snapshot_json);
-        ''')
-        c.execute('INSERT INTO managed_trades VALUES (?,?,?,?,?,?,?,?,?)', (
-            't', 'TEST', '{"realized_pnl": 2}', 2, 10,
-            '2026-09-25 15:00:00', '2026-09-25 14:00:00', '2026-09-25 15:00:00', 'CLOSED'))
-        for i, stamp, label in [(1,'13:55:00','before'),(2,'14:00:01','future'),(3,'12:00:00','old')]:
-            c.execute('INSERT INTO feature_snapshots VALUES (?,?,?,?)',
-                (i,'TEST','2026-09-25 '+stamp,json.dumps({'label':label})))
-        @contextmanager
-        def connection():
-            yield c
-        engine = LearningEngine.__new__(LearningEngine)
-        engine.max_history = 100
-        with patch('intelligence.learning_engine.database', SimpleNamespace(connection=connection)):
-            self.assertEqual(engine._load_closed_trade_samples()[0]['snapshot']['label'], 'before')
-            c.execute('DELETE FROM feature_snapshots WHERE id=1')
-            self.assertEqual(engine._load_closed_trade_samples(), [])
-        c.close()
+    def test_learning_requires_exact_entry_evidence_not_a_nearby_snapshot(self):
+        # The old nearby-snapshot fallback is deliberately retired: proximity
+        # is not proof that the native decision used those features.
+        import test_trade_chain_and_feature_integrity as linked
+        case=linked.TradeChainTests();case.setUp();self.addCleanup(case.doCleanups)
+        with case.db.connection() as c:
+            c.execute("INSERT INTO feature_snapshots(symbol,snapshot_json,created_at) VALUES (?,?,?)",
+                ('TEST',json.dumps({'liquidity_score':999.}),'2026-10-16T13:59:00Z'))
+        engine=LearningEngine.__new__(LearningEngine);engine.max_history=100
+        with patch('intelligence.learning_engine.database',case.db):
+            self.assertEqual(engine._load_closed_trade_samples(),[])
+            d=case.decision
+            d['jalwe']['metadata'].update(decision_data_feed='iex',quality_inputs={'timeframe':'5m'},
+                decision_features={'timestamp':'2026-10-16T13:55:00Z','data_quality_ok':True,
+                    'data_is_stale':False,'liquidity_score':80.})
+            with case.db.connection() as c:
+                c.execute('UPDATE system_events SET metadata_json=? WHERE id=1',(json.dumps(d),))
+            self.assertEqual(engine._load_closed_trade_samples()[0]['snapshot']['liquidity_score'],80.)
+            with case.db.connection() as c:c.execute('DELETE FROM feature_snapshots')
+            self.assertEqual(engine._load_closed_trade_samples()[0]['snapshot']['liquidity_score'],80.)
 
     def test_exit_cumulative_average_survives_restart(self):
         manager = TradeManager()

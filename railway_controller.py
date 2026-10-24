@@ -2687,6 +2687,7 @@ def help_text() -> str:
         "/trade_factors - عوامل الدخول المشتركة في الصفقات الرابحة والخاسرة\n"
         "/quality_study - اختبار معايرة الدرجة والسيولة دون تغيير الشراء\n"
         "/brain - ذاكرة عقل JALWE؛ /brain SNAP لرأيه المحفوظ المطابق\n"
+        "/local_ai - نموذج محلي يتعلم العائد من الصفقات الموثقة\n"
         "/ai_case SNAP - ربط أدلة القرار والتفسير المطابق\n"
         "/ai_status - حالة محلل الذكاء الاصطناعي المستقل\n"
         "/ai_review SNAP - أحدث تفسير محفوظ للسهم\n"
@@ -2726,7 +2727,14 @@ def handle(text: str, requested_by=None) -> Any:
     cmd = str(text or "").strip()
     low = cmd.lower()
 
+    if low == '/local_ai':
+        from native_trade_learning import status_text as local_ai_status
+        return local_ai_status()
+
     if low == '/brain' or low.split(' ',1)[0] == '/brain':
+        if os.getenv('JALWE_SHADOW_AI_ENABLED','false').strip().lower()!='true':
+            from native_trade_learning import status_text as local_brain_text
+            return local_brain_text(symbol=cmd.split(' ',1)[1] if ' ' in cmd else None)
         from decision_brain import status_text as brain_text
         return brain_text(cmd.split(' ',1)[1] if ' ' in cmd else None)
 

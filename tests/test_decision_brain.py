@@ -131,7 +131,7 @@ class DecisionBrainTests(unittest.TestCase):
 
     def test_command_never_calls_provider_or_training_or_modifies_a_missing_database(self):
         import railway_controller
-        with patch.object(brain,'status_text',return_value='saved brain') as reader:
+        with patch.dict('os.environ',{'JALWE_SHADOW_AI_ENABLED':'true'}),patch.object(brain,'status_text',return_value='saved brain') as reader:
             self.assertEqual(railway_controller.handle('/brain SNAP'),'saved brain');reader.assert_called_once_with('SNAP')
         missing=self.path.with_name('absent.db')
         with patch.object(brain,'refresh',side_effect=AssertionError('not from reader')):

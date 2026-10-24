@@ -8,6 +8,7 @@ import hashlib
 from pathlib import Path
 import re
 import sqlite3
+import os
 
 from core.storage import data_directory,database_path
 
@@ -78,7 +79,7 @@ def snapshot(*,native_path=None,research_path=None,shadow_path=None,now=None,sym
     shadow_path=shadow_path or data_directory()/'shadow_ai_reviews.db'
     out=dict(protocol=PROTOCOL,checked_at=now.isoformat(),execution_authority=False,
              native_ai_mode='DETERMINISTIC_SCORING_WITH_BOUNDED_CLOSED_TRADE_MULTIPLIERS',
-             gemini_mode='SAVED_SHADOW_REVIEW_ONLY',new_provider_calls=0)
+             gemini_mode='SAVED_SHADOW_REVIEW_ONLY' if os.getenv('JALWE_SHADOW_AI_ENABLED','false').lower()=='true' else 'DISABLED_LOCAL_ONLY',new_provider_calls=0)
     learning=read_rows(native_path,'SELECT * FROM learning_runs ORDER BY id DESC LIMIT 1')
     if learning:
         row=learning[0]
@@ -91,6 +92,7 @@ def snapshot(*,native_path=None,research_path=None,shadow_path=None,now=None,sym
     out['model_lab']=read_state(research_path,'ai_model_lab_status') or {}
     out['entry_quality_study']=read_state(research_path,'entry_quality_status') or {}
     out['brain_memory']=read_state(research_path,'decision_brain_memory') or {}
+    out['native_local_model']=read_state(research_path,'native_local_model') or {}
     artifact=out['model_lab'].get('artifact') or {}
     if not isinstance(artifact,dict):artifact={'invalid_structure':True}
     out['artifact_status']='NO_ARTIFACT'
@@ -142,9 +144,10 @@ def status_text(symbol=None,**kwargs):
         'BLOCKED_INPUT_CONTRACT':'مدخلات غير صالحة؛ لم يُدرّب',
         'BLOCKED_DUPLICATE_EVIDENCE':'بيانات مكررة؛ لم يُدرّب'}
     lines=['🧠 JALWE — البوت والذكاء في عرض واحد',
-        'التنفيذ: بوابات JALWE وإدارة المخاطرة المستقلة. Gemini يفسّر فقط.',
+        'التنفيذ: بوابات JALWE وإدارة المخاطرة المستقلة. النموذج المحلي يتعلم من النتائج الموثقة.',
         'APEX يرشح؛ الباحث يجمع ويختبر؛ لا تصويت بين الأجزاء يسمح بتجاوز بوابة.']
     learning=value['factor_learning']
+    lines.append('المراجع الخارجي: '+value['gemini_mode'])
     if learning.get('eligible_trades') is not None:
         lines.append(f"تعلم أوزان العوامل: {learning['state']} | مؤهلة في آخر تشغيل {learning['eligible_trades']} | {learning['as_of']}")
     else:lines.append('تعلم أوزان العوامل: الدليل المحفوظ غير متاح.')
@@ -163,6 +166,7 @@ def status_text(symbol=None,**kwargs):
             lines.append('هذه ليست مقارنة بأرباح البوت ولا اختبارًا لتنبؤات مسجلة قبل النتيجة.')
     lines.append('حالة النموذج المحفوظ: '+value['artifact_status']+'؛ لا صلاحية تنفيذ.')
     lines.append(f"ذاكرة المراجعة اللغوية: {len(value['brain_memory'].get('rows',[]))} صفقة محفوظة | /brain")
+    lines.append('نموذج التداول المحلي: '+value['native_local_model'].get('state','غير متاح')+' | /local_ai')
     quality=value['entry_quality_study']
     if quality:
         lines.append(f"تجربة الدرجة والسيولة: {quality.get('state','UNAVAILABLE')} | مرشحون {quality.get('recorded',0)} | التفاصيل /quality_study")
@@ -177,6 +181,6 @@ def status_text(symbol=None,**kwargs):
             lines.append('تفسير '+str(review['provider'])+' يطابق الأدلة المجمدة: '+review['agreement'])
         else:lines.append('التفسير المطابق: غير متاح؛ لا نربط تحليلًا آخر بالسهم لمجرد تطابق الرمز.')
         lines.append('تفصيل القرار: /explain '+symbol)
-    lines += ['النواقص: اكتمال البيانات، تحقق مستقبلي ومعايرة، وأخبار موثقة لمحلل الأخبار.',
-              'حد Gemini المجاني محفوظ؛ هذا العرض لا يطلب تحليلًا جديدًا ولا يغيّر الشراء أو الوقف.']
+    lines += ['النواقص: اكتمال البيانات والتحقق المستقبلي من النموذج المحلي.',
+              'هذا العرض يقرأ النتائج المحفوظة فقط؛ لا يستدعي مزود ذكاء اصطناعي ولا يغيّر الشراء أو الوقف.']
     return '\n'.join(lines)[:3800]

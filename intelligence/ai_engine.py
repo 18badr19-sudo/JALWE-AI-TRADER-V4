@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+import math
+from numbers import Real
 from typing import Any, Optional
 
 from core.models import (
@@ -63,7 +65,8 @@ class AIEngine:
     ) -> None:
 
         if not (
-            0
+            self._available(minimum_watch_score)
+            and 0
             <= minimum_watch_score
             <= 100
         ):
@@ -72,7 +75,8 @@ class AIEngine:
             )
 
         if not (
-            0
+            self._available(minimum_buy_score)
+            and 0
             <= minimum_buy_score
             <= 100
         ):
@@ -124,7 +128,7 @@ class AIEngine:
         value: Optional[float],
     ) -> bool:
 
-        return value is not None
+        return isinstance(value, Real) and not isinstance(value, bool) and math.isfinite(value)
 
     # ========================================================
     # EVALUATION
@@ -136,6 +140,48 @@ class AIEngine:
     ) -> AIAnalysis:
 
         symbol = features.symbol.upper()
+
+        # Validate our own contract even when the upstream quality flag is true.
+        # Never change the caller's snapshot or let bool/NaN count as evidence.
+        invalid_inputs = []
+        sanitized = {}
+        domains = {
+            "price": (0, None, True), "vwap": (0, None, True),
+            "ema_9": (0, None, True), "ema_20": (0, None, True),
+            "rvol": (0, None, False), "range_compression": (0, None, False),
+            "distance_from_vwap_pct": (None, None, False),
+            "distance_to_high_20_pct": (None, None, False),
+            **{name: (0, 100, False) for name in (
+                "liquidity_score", "momentum_score", "rsi_14",
+                "news_score", "options_flow_score")},
+        }
+        for name, (low, high, positive) in domains.items():
+            value = getattr(features, name)
+            valid = self._available(value)
+            if valid:
+                valid = ((low is None or value >= low)
+                         and (not positive or value > 0)
+                         and (high is None or value <= high))
+            if value is not None and not valid:
+                invalid_inputs.append(name)
+            sanitized[name] = float(value) if valid else None
+        if type(features.above_vwap) is not bool:
+            sanitized["above_vwap"] = None
+            if features.above_vwap is not None:
+                invalid_inputs.append("above_vwap")
+        features = replace(features, **sanitized)
+        if features.price is None:
+            return AIAnalysis(
+                symbol=symbol, action=SignalAction.REJECT, score=0.0,
+                probability=0.0, confidence=0.0, bullish_score=0.0, bearish_score=0.0,
+                reasons=["A finite positive price is required."],
+                warnings=["Invalid or missing mandatory price."],
+                metadata={"mode": "DETERMINISTIC", "input_validation": "REJECTED",
+                          "invalid_inputs": sorted(set(invalid_inputs + ["price"])),
+                          "probability_kind": "SCORE_PROXY_NOT_CALIBRATED",
+                          "confidence_kind": "FEATURE_COVERAGE",
+                          "evidence_count": 0, "possible_evidence": 10,
+                          "factor_breakdown": []})
 
         reasons: list[str] = []
         warnings: list[str] = []
@@ -151,7 +197,7 @@ class AIEngine:
                 action=SignalAction.REJECT,
                 score=0.0,
                 probability=0.0,
-                confidence=1.0,
+                confidence=0.0,
                 bullish_score=0.0,
                 bearish_score=100.0,
                 reasons=[
@@ -169,7 +215,7 @@ class AIEngine:
                 action=SignalAction.REJECT,
                 score=0.0,
                 probability=0.0,
-                confidence=1.0,
+                confidence=0.0,
                 bullish_score=0.0,
                 bearish_score=100.0,
                 reasons=[
@@ -179,6 +225,18 @@ class AIEngine:
                     "Fresh market data is required."
                 ],
             )
+
+        if invalid_inputs:
+            warnings.append("Invalid optional AI inputs excluded: " + ", ".join(sorted(invalid_inputs)))
+        factor_breakdown = []
+
+        def points(factor, base_points, side):
+            weighted = self.learning.apply(factor, base_points)
+            if not self._available(weighted) or weighted < 0:
+                raise ValueError("Invalid learned factor weight: " + factor)
+            factor_breakdown.append({"factor": factor, "side": side,
+                                     "base_points": base_points, "weighted_points": weighted})
+            return weighted
 
         bullish = 0.0
         bearish = 0.0
@@ -191,18 +249,12 @@ class AIEngine:
         if not isinstance(feature_metadata, dict):
             feature_metadata = {}
 
-        scoring_rvol = max(
-            float(features.rvol)
-            if self._available(features.rvol)
-            else 0.0,
-            float(
-                feature_metadata.get(
-                    "scoring_rvol",
-                    0.0,
-                )
-                or 0.0
-            ),
-        )
+        override = feature_metadata.get("scoring_rvol")
+        if override is not None and (not self._available(override) or override < 0):
+            invalid_inputs.append("metadata.scoring_rvol")
+            warnings.append("Invalid metadata.scoring_rvol excluded.")
+            override = None
+        scoring_rvol = max(features.rvol or 0.0, override or 0.0)
 
         evidence_count = 0
         possible_evidence = 0
@@ -223,19 +275,19 @@ class AIEngine:
             )
 
             if liquidity >= 80:
-                bullish += self.learning.apply("liquidity", 18)
+                bullish += points("liquidity", 18, "bullish")
                 reasons.append(
                     "Strong liquidity conditions."
                 )
 
             elif liquidity >= 60:
-                bullish += self.learning.apply("liquidity", 12)
+                bullish += points("liquidity", 12, "bullish")
                 reasons.append(
                     "Acceptable liquidity."
                 )
 
             elif liquidity < 30:
-                bearish += self.learning.apply("liquidity", 15)
+                bearish += points("liquidity", 15, "bearish")
                 warnings.append(
                     "Weak liquidity."
                 )
@@ -252,25 +304,25 @@ class AIEngine:
             evidence_count += 1
 
             if scoring_rvol >= 3.0:
-                bullish += self.learning.apply("rvol", 18)
+                bullish += points("rvol", 18, "bullish")
                 reasons.append(
                     "Very strong recent relative volume."
                 )
 
             elif scoring_rvol >= 2.0:
-                bullish += self.learning.apply("rvol", 14)
+                bullish += points("rvol", 14, "bullish")
                 reasons.append(
                     "Strong recent relative volume."
                 )
 
             elif scoring_rvol >= 1.5:
-                bullish += self.learning.apply("rvol", 9)
+                bullish += points("rvol", 9, "bullish")
                 reasons.append(
                     "Elevated recent relative volume."
                 )
 
             elif scoring_rvol < 0.8:
-                bearish += self.learning.apply("rvol", 8)
+                bearish += points("rvol", 8, "bearish")
                 warnings.append(
                     "Relative volume is weak."
                 )
@@ -284,12 +336,13 @@ class AIEngine:
         if (
             features.price is not None
             and features.vwap is not None
+            and type(features.above_vwap) is bool
         ):
             evidence_count += 1
 
             if features.above_vwap is True:
 
-                bullish += self.learning.apply("vwap", 14)
+                bullish += points("vwap", 14, "bullish")
 
                 reasons.append(
                     "Price is above session VWAP."
@@ -297,7 +350,7 @@ class AIEngine:
 
             else:
 
-                bearish += self.learning.apply("vwap", 10)
+                bearish += points("vwap", 10, "bearish")
 
                 warnings.append(
                     "Price is below session VWAP."
@@ -314,14 +367,14 @@ class AIEngine:
                     <= distance
                     <= 1.0
                 ):
-                    bullish += self.learning.apply("vwap", 4)
+                    bullish += points("vwap", 4, "bullish")
 
                     reasons.append(
                         "Price is holding close above VWAP."
                     )
 
                 elif distance < -2.0:
-                    bearish += self.learning.apply("vwap", 5)
+                    bearish += points("vwap", 5, "bearish")
 
         # ====================================================
         # 4. TREND STRUCTURE
@@ -341,7 +394,7 @@ class AIEngine:
                 > features.ema_9
                 > features.ema_20
             ):
-                bullish += self.learning.apply("trend", 14)
+                bullish += points("trend", 14, "bullish")
 
                 reasons.append(
                     "Short-term trend structure is bullish."
@@ -352,7 +405,7 @@ class AIEngine:
                 < features.ema_9
                 < features.ema_20
             ):
-                bearish += self.learning.apply("trend", 12)
+                bearish += points("trend", 12, "bearish")
 
                 warnings.append(
                     "Short-term trend structure is bearish."
@@ -374,21 +427,21 @@ class AIEngine:
             )
 
             if momentum >= 80:
-                bullish += self.learning.apply("momentum", 14)
+                bullish += points("momentum", 14, "bullish")
 
                 reasons.append(
                     "Momentum score is very strong."
                 )
 
             elif momentum >= 60:
-                bullish += self.learning.apply("momentum", 10)
+                bullish += points("momentum", 10, "bullish")
 
                 reasons.append(
                     "Momentum is supportive."
                 )
 
             elif momentum < 30:
-                bearish += self.learning.apply("momentum", 8)
+                bearish += points("momentum", 8, "bearish")
 
                 warnings.append(
                     "Momentum is weak."
@@ -409,7 +462,7 @@ class AIEngine:
 
             if 50 <= rsi <= 70:
 
-                bullish += self.learning.apply("rsi", 8)
+                bullish += points("rsi", 8, "bullish")
 
                 reasons.append(
                     "RSI supports bullish momentum."
@@ -417,11 +470,11 @@ class AIEngine:
 
             elif 40 <= rsi < 50:
 
-                bullish += self.learning.apply("rsi", 3)
+                bullish += points("rsi", 3, "bullish")
 
             elif rsi > 80:
 
-                bearish += self.learning.apply("rsi", 5)
+                bearish += points("rsi", 5, "bearish")
 
                 warnings.append(
                     "RSI is extremely extended."
@@ -429,7 +482,7 @@ class AIEngine:
 
             elif rsi < 30:
 
-                bearish += self.learning.apply("rsi", 4)
+                bearish += points("rsi", 4, "bearish")
 
                 warnings.append(
                     "RSI shows strong downside pressure."
@@ -455,7 +508,7 @@ class AIEngine:
                 <= distance
                 <= 1.0
             ):
-                bullish += self.learning.apply("breakout", 8)
+                bullish += points("breakout", 8, "bullish")
 
                 reasons.append(
                     "Price is near the 20-bar breakout level."
@@ -463,7 +516,7 @@ class AIEngine:
 
             elif distance > 5.0:
 
-                bearish += self.learning.apply("breakout", 3)
+                bearish += points("breakout", 3, "bearish")
 
         # ====================================================
         # 8. COMPRESSION
@@ -482,7 +535,7 @@ class AIEngine:
 
             if compression <= 0.35:
 
-                bullish += self.learning.apply("compression", 6)
+                bullish += points("compression", 6, "bullish")
 
                 reasons.append(
                     "Price range is compressed before potential expansion."
@@ -504,14 +557,14 @@ class AIEngine:
             )
 
             if news_score >= 70:
-                bullish += self.learning.apply("news", 8)
+                bullish += points("news", 8, "bullish")
 
                 reasons.append(
                     "News catalyst is supportive."
                 )
 
             elif news_score <= 30:
-                bearish += self.learning.apply("news", 8)
+                bearish += points("news", 8, "bearish")
 
                 warnings.append(
                     "News catalyst is negative."
@@ -534,7 +587,7 @@ class AIEngine:
 
             if options_score >= 75:
 
-                bullish += self.learning.apply("options_flow", 10)
+                bullish += points("options_flow", 10, "bullish")
 
                 reasons.append(
                     "Options flow is strongly supportive."
@@ -542,7 +595,7 @@ class AIEngine:
 
             elif options_score <= 25:
 
-                bearish += self.learning.apply("options_flow", 8)
+                bearish += points("options_flow", 8, "bearish")
 
                 warnings.append(
                     "Options flow is bearish."
@@ -556,7 +609,7 @@ class AIEngine:
 
         if regime == MarketRegime.BULL_TREND:
 
-            bullish += self.learning.apply("market_regime", 5)
+            bullish += points("market_regime", 5, "bullish")
 
             reasons.append(
                 "Broad market regime is bullish."
@@ -564,7 +617,7 @@ class AIEngine:
 
         elif regime == MarketRegime.BEAR_TREND:
 
-            bearish += self.learning.apply("market_regime", 5)
+            bearish += points("market_regime", 5, "bearish")
 
             warnings.append(
                 "Broad market regime is bearish."
@@ -572,7 +625,7 @@ class AIEngine:
 
         elif regime == MarketRegime.HIGH_VOLATILITY:
 
-            bearish += self.learning.apply("market_regime", 7)
+            bearish += points("market_regime", 7, "bearish")
 
             warnings.append(
                 "Market volatility is elevated."
@@ -583,7 +636,7 @@ class AIEngine:
             MarketRegime.RISK_OFF,
         }:
 
-            bearish += self.learning.apply("market_regime", 20)
+            bearish += points("market_regime", 20, "bearish")
 
             warnings.append(
                 "Market regime is risk-off."
@@ -592,6 +645,8 @@ class AIEngine:
         # ====================================================
         # FINAL SCORE
         # ====================================================
+
+        raw_bullish, raw_bearish = bullish, bearish
 
         bullish = self._clamp(
             bullish
@@ -686,6 +741,14 @@ class AIEngine:
             warnings=warnings,
 
             metadata={
+                "input_validation": "VALIDATED",
+                "invalid_inputs": sorted(invalid_inputs),
+                "factor_breakdown": factor_breakdown,
+                "score_formula": "clamp(clamp(bullish,0,100)-0.70*clamp(bearish,0,100),0,100)",
+                "raw_bullish_score": raw_bullish,
+                "raw_bearish_score": raw_bearish,
+                "minimum_buy_score": self.minimum_buy_score,
+                "minimum_watch_score": self.minimum_watch_score,
                 "engine": "JALWE_V4_AI",
                 "mode": "DETERMINISTIC",
                 "probability_kind": "SCORE_PROXY_NOT_CALIBRATED",

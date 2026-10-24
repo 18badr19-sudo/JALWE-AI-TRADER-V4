@@ -160,6 +160,7 @@ class AdvisorConfig:
     daily_limit: int = 10
     provider: str = 'openai'
     free_tier_confirmed: bool = False
+    spread_reviews: bool = True
 
     @classmethod
     def environment(cls):
@@ -436,6 +437,29 @@ class ShadowAdvisor:
             count = conn.execute('SELECT COUNT(*) FROM shadow_reviews WHERE session=?', (session,)).fetchone()[0]
             if count >= min(30, max(1, self.config.daily_limit)):
                 return 'DAILY_LIMIT'
+            if self.config.provider == 'gemini' and self.config.spread_reviews:
+                # Only selection changes; these are sampling windows, NOT a market
+                # calendar or trading authorization. No carry-over or catch-up burst.
+                local = datetime.fromtimestamp(now, ZoneInfo('America/New_York'))
+                minute = local.hour*60 + local.minute
+                boundaries = (570, 700, 830, 960)  # 09:30, 11:40, 13:50, 16:00 NY
+                if local.weekday() >= 5 or not boundaries[0] <= minute < boundaries[-1]:
+                    return 'OUTSIDE_REVIEW_WINDOW'
+                slot = next(i for i in range(3) if minute < boundaries[i+1])
+                limit = min(30, max(1, self.config.daily_limit))
+                # Allocate remainders to early windows; a limit of 3 gives 1/1/1.
+                capacity = limit//3 + (slot < limit%3)
+                start = local.replace(hour=boundaries[slot]//60,
+                                      minute=boundaries[slot]%60, second=0, microsecond=0).timestamp()
+                end = local.replace(hour=boundaries[slot+1]//60,
+                                    minute=boundaries[slot+1]%60, second=0, microsecond=0).timestamp()
+                used = conn.execute('SELECT COUNT(*) FROM shadow_reviews WHERE session=? AND created>=? AND created<?',
+                                    (session, start, end)).fetchone()[0]
+                if used >= capacity:
+                    return 'REVIEW_WINDOW_LIMIT'
+                if conn.execute('SELECT 1 FROM shadow_reviews WHERE session=? AND symbol=? LIMIT 1',
+                                (session, evidence['symbol'])).fetchone():
+                    return 'SYMBOL_ALREADY_SAMPLED'
             conn.execute('INSERT INTO shadow_reviews (id,symbol,session,created,state,evidence,provider,model,prompt_spec,request_json) VALUES (?,?,?,?,?,?,?,?,?,?)',
                 (key,evidence['symbol'],session,now,'PENDING',content,self.config.provider,self.config.model,PROMPT_SPEC,request))
         return 'QUEUED'
@@ -511,6 +535,7 @@ class ShadowAdvisor:
         return {'protocol': PROTOCOL, 'mode': self.mode(), 'key_present': bool(self.config.api_key),
             'prompt_spec':PROMPT_SPEC,'roles':ROLES,'roles_scope':'THREE_VIEWS_ONE_MODEL_NOT_INDEPENDENT',
             'cache_hits':self.cache_hits(),
+            'sampling_policy': 'NY_REGULAR_THIRDS_DISTINCT_SYMBOLS' if self.config.provider == 'gemini' and self.config.spread_reviews else 'DAILY_LIMIT',
             'provider': self.config.provider, 'free_tier_confirmed': self.config.free_tier_confirmed,
             'quota_pause_until': self.quota_pause_until() if self.config.provider == 'gemini' else None,
             'model': self.config.model, 'daily_limit': min(30, max(1, self.config.daily_limit)),

@@ -15,8 +15,9 @@ from test_shadow_advisor import NOW, payload, review
 
 
 def config(**changes):
+    # Transport/cache fixtures opt out; production spreading is tested separately.
     return replace(AdvisorConfig(True, True, 'gemini-test-key', GEMINI_FREE_MODEL, 3,
-                                 'gemini', True), **changes)
+                                 'gemini', True, spread_reviews=False), **changes)
 
 
 def response():

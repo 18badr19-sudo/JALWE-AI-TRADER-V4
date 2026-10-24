@@ -111,6 +111,16 @@ class ReplayTests(unittest.TestCase):
                 self.assertFalse(result['execution_authority'])
                 self.assertEqual(decision.replay_id,self.capsules[0]['id'])
 
+    def test_score_factor_evidence_survives_ready_watch_reject_and_replay(self):
+        for kind in ('READY','WATCHING','OPP_REJECT','RISK_REJECT'):
+            engine=self.engine(kind)
+            evidence={'mode':'DETERMINISTIC','minimum_buy_score':74.,
+                'factor_breakdown':[{'factor':'rvol','side':'bullish','base_points':18,'weighted_points':18.}]}
+            engine.ai_engine.evaluate.return_value.metadata=copy.deepcopy(evidence)
+            decision=self.capture(engine)
+            self.assertEqual(decision.metadata['ai_score_evidence'],evidence)
+            self.assertEqual(audit.replay(self.capsules[-1])['state'],'MATCH')
+
     def test_news_and_options_mutations_survive_replay_without_requesting_them_again(self):
         engine=self.engine(); self.capture(engine); capsule=self.capsules[0]
         changed=[e for e in capsule['events'] if e['mutations']]

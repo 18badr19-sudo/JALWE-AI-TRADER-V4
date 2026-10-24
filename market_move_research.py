@@ -625,6 +625,8 @@ def report_text(packet):
         lines += [f"🎯 جمع مركز قبل الافتتاح — {focus['session_day']}: {focus['symbols']} سهم | {focus['pairs']} أزواج | مرشحون {focus['nominees']}",
             f"تغطية محفوظة للدقائق المتاحة: {coverage} | مسارات جلسة كاملة {focus['complete_paths']}/{focus['symbols']} | أزواج مكتملة {focus['complete_pairs']}/{focus['pairs']}",
             'حفظ SIP متأخر أثناء الجلسة؛ النقص مجهول، ولا يُملأ بسعر مفترض. اكتمال الجمع لا يثبت أفضلية أو نجاح تدريب.']
+        if focus.get('targeted_bar_reads'):
+            lines.append(f"استرجاع دقائق فعلية: {focus.get('targeted_bars_recovered',0)} من {focus['targeted_bar_reads']} محاولة؛ الغائب يبقى ناقصًا.")
         if focus.get('reasons'):
             labels={'MISSING_PROVIDER_MINUTES':'دقائق غير مرجعة','EMPTY_PROVIDER_WINDOW':'نافذة فارغة',
                     'INVALID_OR_DUPLICATE_BARS':'شموع غير صالحة أو متعارضة','COMPLETE':'الدقائق المتاحة مكتملة'}

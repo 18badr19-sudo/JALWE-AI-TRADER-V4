@@ -76,6 +76,17 @@ These are three views of ONE model, not independent experts or calibrated votes.
 Keep summary under 100 characters, each scenario reason under 100, each role
 reason under 90, missing facts under 60 each (at most three), next check under 80.
 Only cite non-null fact IDs. Unsupported roles must remain UNKNOWN.'''
+INSTRUCTIONS += '''
+When memory_* facts exist, use that frozen saved native-trade experience to
+challenge the current setup as well as support it. These are at most 20 selected
+closed ledger records before unavailable fees, with potentially missing broker
+snapshots. They are descriptive counts, not calibrated probabilities or causes.
+Never infer a success rate, strategy edge or a sufficient training sample from
+them. The original provider liquidity score is not total-market liquidity.
+Consider what would invalidate each scenario and express that as the next
+observation, without issuing trading instructions. Missing memory stays unknown.
+Never present this post-decision review as an entry approval or an independent
+forward prediction. No outside knowledge or invented confidence percentages.'''
 PROMPT_SPEC = hashlib.sha256(json.dumps([PROTOCOL, INSTRUCTIONS, SCHEMA],
     sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 ROLE_REFS = {
@@ -83,6 +94,10 @@ ROLE_REFS = {
     'MOMENTUM_LIQUIDITY': set(FEATURES)-{'news_score','options_flow_score','atr_pct'},
     'RISK_REVIEW': {'price','atr_pct','rsi_14','rvol','liquidity_score','dollar_volume',
         'native_entry_price','native_stop_loss','native_target_1','native_target_2','native_target_3'}}
+from decision_brain import FIELDS as MEMORY_FIELDS
+ROLE_REFS['RISK_REVIEW'].update(MEMORY_FIELDS)
+ROLE_REFS['RISK_REVIEW'].update({'native_ai_score','native_opportunity_score',
+    'native_session_strategy_score','native_breakout_score','native_setup_grade','native_strategy'})
 
 
 def request_body(config, evidence):
@@ -221,11 +236,22 @@ def frozen_evidence(payload, now):
                                and abs(value) <= 1e20 and math.isfinite(value)) else None
     feed = str(metadata.get('decision_data_feed', '')).lower()
     facts['decision_feed'] = feed if feed in {'iex', 'sip', 'delayed_sip'} else None
+    for name in ('ai_score','opportunity_score','session_strategy_score','breakout_score'):
+        value=decision.get(name)
+        facts['native_'+name]=value if type(value) in (int,float) and 0<=value<=100 and math.isfinite(value) else None
+    facts['native_setup_grade']=decision.get('setup_grade') if decision.get('setup_grade') in ('A+','A','B','C') else None
+    facts['native_strategy']=decision.get('strategy') if decision.get('strategy') in (
+        'GAP_AND_GO','OPENING_RANGE_BREAKOUT','VWAP_BOUNCE','BULL_FLAG_BREAKOUT',
+        'COMPRESSION_BREAKOUT','PREMARKET_HIGH_BREAK') else None
     for name in ('entry_price', 'stop_loss', 'target_1', 'target_2', 'target_3'):
         value = decision.get(name)
         facts['native_' + name] = value if type(value) in {int, float} and abs(value) <= 1e20 and math.isfinite(value) else None
-    return {'protocol': PROTOCOL, 'symbol': symbol, 'facts': facts,
+    from decision_brain import model_facts
+    memory=model_facts(payload);facts.update(memory)
+    evidence={'protocol': PROTOCOL, 'symbol': symbol, 'facts': facts,
             'position_in_flow': 'AFTER_NATIVE_DECISION', 'execution_authority': False}
+    if memory:evidence['brain_context_hash']=payload['decision_brain']['context_hash']
+    return evidence
 
 
 def validate_review(review, evidence):

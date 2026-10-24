@@ -214,6 +214,14 @@ class MoveResearchWorker:
             logger.warning('PRIOR_DAY_PREPARATION_UNAVAILABLE %s',type(exc).__name__)
         if self.focus and future is not None:
             self.focus.freeze(future,clock() if clock else now,clock=clock)
+            try:
+                from intelligence.research_model_lab import refresh as refresh_model_lab
+                lab=refresh_model_lab(self.store,clock() if clock else now)
+                logger.info('AI_MODEL_LAB_STATUS %s',json.dumps({k:lab.get(k) for k in (
+                    'protocol','state','experiment_id','available_sessions','required_sessions',
+                    'execution_authority','scope')},sort_keys=True))
+            except Exception as exc:
+                logger.warning('AI_MODEL_LAB_UNAVAILABLE %s',type(exc).__name__)
         return dict(state='READY',universe_count=len(symbols),daily_symbols=len(daily),
                     completed_session=latest['date'],eligible_prior_features=len(features_latest),
                     historical_bars_delayed=True,selection_scope='ALPACA_ACTIVE_US_EQUITY_CATALOG',

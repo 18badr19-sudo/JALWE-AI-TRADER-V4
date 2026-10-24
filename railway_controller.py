@@ -2682,6 +2682,8 @@ def help_text() -> str:
         "/trades - آخر الأوامر المنفذة\n"
         "/target_audit CANE - فحص وصول الأهداف في يوم الشراء بدون تداول\n"
         "/learning - حالة التعلم الذاتي\n"
+        "/ai_system - البوت والذكاء والتدريب في عرض واحد\n"
+        "/ai_case SNAP - ربط أدلة القرار والتفسير المطابق\n"
         "/ai_status - حالة محلل الذكاء الاصطناعي المستقل\n"
         "/ai_review SNAP - أحدث تفسير محفوظ للسهم\n"
         "/trade_audit DRH - تدقيق القرار والتنفيذ والخروج لصفقات السهم\n"
@@ -2719,6 +2721,10 @@ def help_text() -> str:
 def handle(text: str, requested_by=None) -> Any:
     cmd = str(text or "").strip()
     low = cmd.lower()
+
+    if low == '/ai_system' or low.split(' ',1)[0] == '/ai_case':
+        from ai_system import status_text as ai_system_status
+        return ai_system_status(cmd.split(' ',1)[1] if ' ' in cmd else None)
 
     if low == '/research_findings':
         from market_move_research import read_packet

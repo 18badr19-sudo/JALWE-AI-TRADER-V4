@@ -2686,6 +2686,7 @@ def help_text() -> str:
         "/loss_study - مقارنة توقيت الدخول والوقف دون تداول\n"
         "/trade_factors - عوامل الدخول المشتركة في الصفقات الرابحة والخاسرة\n"
         "/quality_study - اختبار معايرة الدرجة والسيولة دون تغيير الشراء\n"
+        "/brain - ذاكرة عقل JALWE؛ /brain SNAP لرأيه المحفوظ المطابق\n"
         "/ai_case SNAP - ربط أدلة القرار والتفسير المطابق\n"
         "/ai_status - حالة محلل الذكاء الاصطناعي المستقل\n"
         "/ai_review SNAP - أحدث تفسير محفوظ للسهم\n"
@@ -2724,6 +2725,10 @@ def help_text() -> str:
 def handle(text: str, requested_by=None) -> Any:
     cmd = str(text or "").strip()
     low = cmd.lower()
+
+    if low == '/brain' or low.split(' ',1)[0] == '/brain':
+        from decision_brain import status_text as brain_text
+        return brain_text(cmd.split(' ',1)[1] if ' ' in cmd else None)
 
     if low == '/quality_study':
         from entry_quality_study import read_report as quality_study_text

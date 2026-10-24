@@ -215,6 +215,14 @@ class MoveResearchWorker:
         if self.focus and future is not None:
             self.focus.freeze(future,clock() if clock else now,clock=clock)
             try:
+                from decision_brain import refresh as refresh_brain_memory
+                brain=refresh_brain_memory(self.store,clock() if clock else now)
+                logger.info('DECISION_BRAIN_MEMORY_READY %s',json.dumps(dict(protocol=brain['protocol'],
+                    as_of=brain['as_of'],closed_trades=len(brain['rows']),memory_hash=brain['memory_hash'],
+                    audit_state=brain['audit_state'],execution_authority=False),sort_keys=True))
+            except Exception as exc:
+                logger.warning('DECISION_BRAIN_MEMORY_UNAVAILABLE %s',type(exc).__name__)
+            try:
                 from intelligence.research_model_lab import refresh as refresh_model_lab
                 lab=refresh_model_lab(self.store,clock() if clock else now)
                 logger.info('AI_MODEL_LAB_STATUS %s',json.dumps({k:lab.get(k) for k in (

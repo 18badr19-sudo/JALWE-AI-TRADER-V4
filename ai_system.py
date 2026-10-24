@@ -64,6 +64,8 @@ def matching_review(path,payload):
             result=json.loads(row['result']);validate_review(result,evidence)
             return dict(state='SAME_FROZEN_EVIDENCE',created_at=row['created'],provider=row.get('provider'),
                         model=row.get('model'),roles=result['roles'],agreement=result['agreement'],
+                        summary_ar=result['summary_ar'],scenarios=result['scenarios'],
+                        missing_evidence_ar=result['missing_evidence_ar'],next_check_ar=result['next_check_ar'],
                         scope='EQUIVALENT_SAVED_FACTS_NOT_UNIQUE_FILL_OR_TRADE_ID',execution_authority=False)
         except (ValueError,TypeError,KeyError):continue
     return dict(state='NO_MATCHING_REVIEW',scope='SAME_SYMBOL_ALONE_IS_NOT_A_MATCH')
@@ -88,6 +90,7 @@ def snapshot(*,native_path=None,research_path=None,shadow_path=None,now=None,sym
     out['pattern_learning']=read_state(research_path,'pattern_policy') or {}
     out['model_lab']=read_state(research_path,'ai_model_lab_status') or {}
     out['entry_quality_study']=read_state(research_path,'entry_quality_status') or {}
+    out['brain_memory']=read_state(research_path,'decision_brain_memory') or {}
     artifact=out['model_lab'].get('artifact') or {}
     if not isinstance(artifact,dict):artifact={'invalid_structure':True}
     out['artifact_status']='NO_ARTIFACT'
@@ -159,6 +162,7 @@ def status_text(symbol=None,**kwargs):
             lines.append(f"خطأ Brier: النموذج {metrics['candidate_brier']:.4f} | خط أساس ثابت {metrics['constant_baseline_brier']:.4f}؛ الأقل أفضل لهذا الحدث البحثي.")
             lines.append('هذه ليست مقارنة بأرباح البوت ولا اختبارًا لتنبؤات مسجلة قبل النتيجة.')
     lines.append('حالة النموذج المحفوظ: '+value['artifact_status']+'؛ لا صلاحية تنفيذ.')
+    lines.append(f"ذاكرة المراجعة اللغوية: {len(value['brain_memory'].get('rows',[]))} صفقة محفوظة | /brain")
     quality=value['entry_quality_study']
     if quality:
         lines.append(f"تجربة الدرجة والسيولة: {quality.get('state','UNAVAILABLE')} | مرشحون {quality.get('recorded',0)} | التفاصيل /quality_study")

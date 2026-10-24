@@ -3792,6 +3792,12 @@ def process_research(
         # ====================================================
 
         try:
+            from decision_brain import freeze_context
+            payload['decision_brain']=freeze_context(payload)
+        except Exception as exc:
+            logger.warning('DECISION_BRAIN_CONTEXT_UNAVAILABLE %s',type(exc).__name__)
+
+        try:
             get_decision_outcome_memory().record(payload, research_version(research))
         except Exception:
             logger.exception("Decision outcome recording failed for %s", symbol)

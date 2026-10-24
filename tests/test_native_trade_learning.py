@@ -61,6 +61,16 @@ class NativeSourceTests(unittest.TestCase):
                 c.execute('UPDATE managed_trades SET closed_at=?',('2026-10-25T14:00:00Z' if kind=='future_close' else self.trade['closed_at'],))
             self.assertEqual(model.load_samples(self.path,as_of=NOW)['samples'],[],kind)
 
+    def test_closed_trade_with_missing_original_features_stays_in_coverage_population(self):
+        self.enrich()
+        d=deepcopy(self.decision);d['jalwe']['metadata']['quality_inputs']={}
+        with self.db.connection() as c:
+            c.execute('UPDATE system_events SET metadata_json=? WHERE id=1',(json.dumps(d),))
+        before=self.path.read_bytes();r=model.load_samples(self.path,as_of=NOW)
+        self.assertEqual(r['samples'],[])
+        self.assertEqual(r['cohort'],[dict(trade_id=self.trade['trade_id'],entry_at='2026-10-16T14:00:03+00:00')])
+        self.assertEqual(before,self.path.read_bytes())
+
     def test_open_mismatched_or_repeated_pnl_cannot_become_training_reward(self):
         self.enrich()
         with self.db.connection() as c:c.execute('UPDATE strategy_pnl_ledger SET realized_pnl=99 WHERE event_key=?',('SELL1:10',))
@@ -123,6 +133,63 @@ class NativeModelTests(unittest.TestCase):
         r=model.fit_evaluate(rows,NOW)
         self.assertEqual(r['state'],'BLOCKED_SAMPLE_OR_COVERAGE');self.assertIsNone(r['artifact'])
 
+    def test_original_exclusions_stay_in_each_split_coverage_denominator(self):
+        rows=samples()
+        cohort=[dict(trade_id=r['trade_id'],entry_at=r['entry_at']) for r in rows]
+        # Seven missing original decisions must not vanish from 30 training rows.
+        cohort += [dict(trade_id=f'missing-{i}',entry_at=rows[i]['entry_at']) for i in range(7)]
+        r=model.fit_evaluate(rows,NOW,cohort=cohort)
+        self.assertEqual(r['state'],'BLOCKED_SAMPLE_OR_COVERAGE')
+        self.assertEqual(r['train']['recorded'],37)
+        self.assertAlmostEqual(r['train']['coverage'],30/37)
+        self.assertIsNone(r['artifact'])
+
+    def test_hourly_refresh_uses_original_population_not_only_surviving_samples(self):
+        class State:
+            def __init__(self):self.v={}
+            def state(self,k,v=None):
+                if v is not None:self.v[k]=v
+                return self.v.get(k)
+        rows=samples();cohort=[dict(trade_id=r['trade_id'],entry_at=r['entry_at']) for r in rows]
+        cohort += [dict(trade_id=f'missing-{i}',entry_at=rows[i]['entry_at']) for i in range(7)]
+        report=dict(samples=rows,cohort=cohort,protocol=model.SOURCE_PROTOCOL,audit_state='AUDITED',excluded={'EXACT_ENTRY_LINK_MISSING':7})
+        store=State()
+        with patch.object(model,'load_samples',return_value=report):r=model.refresh(store,NOW)
+        self.assertEqual(r['state'],'BLOCKED_SAMPLE_OR_COVERAGE')
+        self.assertEqual(r['coverage_population'],52)
+        self.assertNotIn('cohort',r['source_audit'])
+        self.assertEqual(store.v['native_local_model'],r)
+
+    def test_unknown_cohort_time_or_identity_cannot_be_silently_dropped(self):
+        rows=samples();cohort=[dict(trade_id=r['trade_id'],entry_at=r['entry_at']) for r in rows]
+        for bad in (dict(trade_id='unknown',entry_at=None),cohort[0]):
+            r=model.fit_evaluate(rows,NOW,cohort=cohort+[bad])
+            self.assertEqual(r['state'],'BLOCKED_COHORT_EVIDENCE')
+            self.assertIsNone(r['artifact'])
+
+    def test_only_days_with_eligible_vectors_and_nonoverlapping_labels_count(self):
+        rows=samples()
+        # Still 30 valid training trades and >90% coverage, but only nine valid days.
+        for r in rows[:3]:r['snapshot']['rvol']=None
+        for j in range(3):
+            extra=deepcopy(rows[3+j]);extra['trade_id']=f'extra-{j}';rows.append(extra)
+        r=model.fit_evaluate(rows,NOW)
+        self.assertEqual(r['state'],'BLOCKED_ELIGIBLE_DAYS')
+        self.assertEqual(r['train']['eligible'],30)
+        self.assertEqual(r['train']['eligible_days'],9)
+        self.assertIsNone(r['artifact'])
+
+    def test_missing_test_day_cannot_count_towards_five_later_days(self):
+        rows=samples()
+        # One unmeasurable test day among 33 test trades still passes numeric coverage.
+        for r in rows[30:33]:r['snapshot']['rvol']=None
+        for j in range(18):
+            extra=deepcopy(rows[33+j%12]);extra['trade_id']=f'extra-{j}';rows.append(extra)
+        r=model.fit_evaluate(rows,NOW)
+        self.assertEqual(r['state'],'BLOCKED_ELIGIBLE_DAYS')
+        self.assertEqual(r['test']['eligible_days'],4)
+        self.assertIsNone(r['artifact'])
+
     def test_missing_sample_variation_and_numeric_corruption_are_not_fake_training(self):
         self.assertEqual(model.fit_evaluate(samples()[:8],NOW)['state'],'COLLECTING_NATIVE_TRADES')
         for v in (True,'70',float('nan'),10**1000):
@@ -173,6 +240,16 @@ class NativeModelTests(unittest.TestCase):
             self.assertEqual(railway_controller.handle('/local_ai'),'local saved');read.assert_called_once()
         with patch.dict('os.environ',{'JALWE_SHADOW_AI_ENABLED':'false'}),patch.object(model,'status_text',return_value='local saved') as read:
             self.assertEqual(railway_controller.handle('/brain SNAP'),'local saved');read.assert_called_once_with(symbol='SNAP')
+
+    def test_status_explains_exclusions_days_truncation_and_saudi_time(self):
+        r=model.fit_evaluate(samples()[:3],NOW)
+        r.update(checked_at=NOW.isoformat(),source_audit=dict(audited_trades=8,truncated=True,
+            excluded={'ORIGINAL_CLOSED_FEATURE_EVIDENCE_MISSING':5}))
+        self.save(r);before=self.path.read_bytes();message=model.status_text(self.path)
+        self.assertIn('التدريب لم يكتمل',message)
+        self.assertIn('مستبعد 5: دليل الشمعة الأصلية',message)
+        self.assertIn('2026-10-24 03:00:00 السعودية',message)
+        self.assertIn('آخر 50',message);self.assertEqual(before,self.path.read_bytes())
 
     def test_refresh_is_local_hourly_and_never_consumes_simulation_as_native_reward(self):
         class State:

@@ -6,7 +6,7 @@ from collections import Counter
 from datetime import datetime,timedelta,timezone
 import hashlib,json,math
 
-PROTOCOL='native-ledger-local-ridge-r-v1'
+PROTOCOL='native-ledger-local-ridge-r-v2'
 SOURCE_PROTOCOL='exact-native-entry-audited-ledger-v2'
 FEATURES=('liquidity_score','rvol','momentum_score','atr_pct','distance_from_vwap_pct','above_vwap')
 SPEC=dict(protocol=PROTOCOL,features=FEATURES,family='LOCAL_STANDARDIZED_RIDGE',alpha=10.,
@@ -14,7 +14,9 @@ SPEC=dict(protocol=PROTOCOL,features=FEATURES,family='LOCAL_STANDARDIZED_RIDGE',
     primary_cost_each_side=.001,stress_cost_each_side=.0025,train_reward_clip_r=10.,
     filter_threshold_r=0.,unit='NATIVE_CLOSED_TRADE',decision_feed='iex',
     objective='REALIZED_LEDGER_RETURN_R_AFTER_ASSUMED_EXECUTION_COSTS',
-    scope='OUT_OF_TIME_BACKTEST_NOT_FORWARD_PROFIT_VALIDATION',automatic_promotion=False)
+    scope='OUT_OF_TIME_BACKTEST_NOT_FORWARD_PROFIT_VALIDATION',automatic_promotion=False,
+    coverage_population='AUDITED_CLOSED_TRADES_INCLUDING_ORIGINAL_EVIDENCE_EXCLUSIONS',
+    day_count='ELIGIBLE_VECTORS_WITH_NONOVERLAPPING_LABELS')
 digest=lambda v:hashlib.sha256(json.dumps(v,sort_keys=True,allow_nan=False).encode()).hexdigest()
 SPEC_HASH=digest(SPEC)
 
@@ -44,8 +46,14 @@ def load_samples(path=None,limit=50,as_of=None):
     from trade_chain_audit import audit
     from trade_factor_review import stamp
     now=as_of or datetime.now(timezone.utc);a=audit(path=path,limit=min(limit,50))
-    rows=[];excluded=Counter();counts=Counter(t.get('trade_id') for t in a.get('trades',[]))
+    rows=[];cohort=[];excluded=Counter();counts=Counter(t.get('trade_id') for t in a.get('trades',[]))
     for t in a.get('trades',[]):
+        # Keep the original closed-trade population before evidence exclusions.
+        # Missing decision/feed/time cannot silently improve measured coverage.
+        facts=t.get('entry_factors') or {}
+        if t.get('stage')=='CLOSED' and facts.get('decision_feed')!='sip':
+            at=stamp(facts.get('entry_at'))
+            cohort.append(dict(trade_id=t.get('trade_id'),entry_at=at.isoformat() if at else None))
         try:
             if counts[t['trade_id']]!=1:raise ValueError('DUPLICATE_TRADE')
             if t.get('stage')!='CLOSED':raise ValueError('OPEN_TRADE')
@@ -69,7 +77,7 @@ def load_samples(path=None,limit=50,as_of=None):
                 unknown_execution_evidence=t.get('unknown',[])))
         except (KeyError,TypeError,ValueError,OverflowError) as exc:
             reason=str(exc) if isinstance(exc,ValueError) else 'MISSING_ORIGINAL_INPUTS';excluded[reason]+=1
-    return dict(protocol=SOURCE_PROTOCOL,samples=rows,excluded=dict(excluded),audit_state=a['state'],
+    return dict(protocol=SOURCE_PROTOCOL,samples=rows,cohort=cohort,excluded=dict(excluded),audit_state=a['state'],
         audited_trades=len(a.get('trades',[])),truncated=a.get('truncated',False),limit=min(limit,50))
 
 
@@ -77,26 +85,39 @@ def reward(row,cost):
     return (row['pnl_before_fees']-cost*(row['entry_notional']+row['exit_notional']))/row['initial_risk_dollars']
 
 
-def fit_evaluate(samples,now):
+def fit_evaluate(samples,now,cohort=None):
     base=dict(protocol=PROTOCOL,spec_hash=SPEC_HASH,state='COLLECTING_NATIVE_TRADES',requirements=SPEC,
         source_trades=len(samples),metrics=None,artifact=None,execution_authority=False,
         automatic_promotion=False,fees='UNAVAILABLE_COSTS_ARE_ASSUMPTIONS',forward_validation_complete=False)
-    rows=sorted([r for r in samples if r.get('decision_feed')=='iex'],key=lambda r:(r['entry_at'],r['trade_id']))
+    rows=sorted([r for r in samples if r.get('decision_feed')=='iex'],key=lambda r:(utc(r['entry_at']),r['trade_id']))
     if len({r['trade_id'] for r in rows})!=len(rows):return dict(base,state='BLOCKED_DUPLICATE_TRADES')
     from zoneinfo import ZoneInfo
-    ny=ZoneInfo('America/New_York');days=sorted({str(utc(r['entry_at']).astimezone(ny).date()) for r in rows})
+    ny=ZoneInfo('America/New_York')
+    day=lambda r:str(utc(r['entry_at']).astimezone(ny).date())
+    population=[dict(trade_id=r['trade_id'],entry_at=r['entry_at']) for r in rows] if cohort is None else cohort
+    try:
+        identity={r['trade_id']:utc(r['entry_at']) for r in population}
+        if (len(identity)!=len(population) or any(not isinstance(k,str) or not k for k in identity)
+                or any(identity.get(r['trade_id'])!=utc(r['entry_at']) for r in rows)):
+            return dict(base,state='BLOCKED_COHORT_EVIDENCE')
+        days=sorted({day(r) for r in population})
+    except (KeyError,TypeError,ValueError):return dict(base,state='BLOCKED_COHORT_EVIDENCE')
     usable=[r for r in rows if vector(r['snapshot']) is not None]
     base.update(known_vectors=len(usable),entry_days=len(days))
     if len(days)<15:return base
-    boundary=days[-5];start=min(utc(r['entry_at']) for r in rows if str(utc(r['entry_at']).astimezone(ny).date())>=boundary)
+    boundary=days[-5];start=min(utc(r['entry_at']) for r in population if day(r)>=boundary)
     parts=[]
     for name,minimum in [('train',30),('test',10)]:
-        selected=[r for r in rows if (str(utc(r['entry_at']).astimezone(ny).date())<boundary)==(name=='train')]
+        selected=[r for r in rows if (day(r)<boundary)==(name=='train')]
+        recorded=sum((day(r)<boundary)==(name=='train') for r in population)
         # Labels closing in/after the test cannot train the model, even for an older entry.
         known=[r for r in selected if vector(r['snapshot']) is not None and (name=='test' or utc(r['closed_at'])<start)]
-        coverage=len(known)/len(selected) if selected else 0
-        base[name]=dict(eligible=len(known),recorded=len(selected),coverage=coverage)
+        coverage=len(known)/recorded if recorded else 0
+        eligible_days=len({day(r) for r in known})
+        base[name]=dict(eligible=len(known),recorded=recorded,coverage=coverage,eligible_days=eligible_days)
         if len(known)<minimum or coverage<.90:return dict(base,state='BLOCKED_SAMPLE_OR_COVERAGE')
+        if eligible_days<(SPEC['min_train_days'] if name=='train' else SPEC['test_days']):
+            return dict(base,state='BLOCKED_ELIGIBLE_DAYS')
         rewards=[reward(r,.001) for r in known]
         if any(not math.isfinite(y) or utc(r['closed_at'])>now for r,y in zip(known,rewards)):
             return dict(base,state='BLOCKED_REWARD_OR_TIME')
@@ -127,7 +148,7 @@ def fit_evaluate(samples,now):
             hypothesis_supported=candidate<baseline and all(v['difference']>0 and v['filtered_proxy']>0
                 and v['avoided_losses']>0 and v['kept']>=max(3,math.ceil(.3*len(test))) for v in comparisons.values()),
             comparisons=comparisons,baseline_scope='FILTER_PROXY_ON_SAME_EXECUTED_TRADES_NOT_NEW_PORTFOLIO'),
-        dataset_hash=digest(samples),coefficients_are_causal=False)
+        dataset_hash=digest(samples),cohort_hash=digest(population),coefficients_are_causal=False)
 
 
 def refresh(store,now,path=None):
@@ -136,9 +157,10 @@ def refresh(store,now,path=None):
         if old.get('spec_hash')==SPEC_HASH and utc(old['checked_at'])<=now<utc(old['checked_at'])+timedelta(hours=1):return old
     except (KeyError,ValueError,TypeError):pass
     source=load_samples(path,as_of=now)
-    try:result=fit_evaluate(source['samples'],now)
+    try:result=fit_evaluate(source['samples'],now,cohort=source.get('cohort'))
     except (ValueError,KeyError,TypeError,OverflowError):result=dict(protocol=PROTOCOL,spec_hash=SPEC_HASH,state='INVALID_ORIGINAL_INPUTS',artifact=None,metrics=None,execution_authority=False)
-    result.update(checked_at=now.isoformat(),source_audit={k:v for k,v in source.items() if k!='samples'})
+    result.update(checked_at=now.isoformat(),source_audit={k:v for k,v in source.items() if k not in ('samples','cohort')},
+        coverage_population=len(source.get('cohort',[])))
     store.state('native_local_model',result);return result
 
 
@@ -178,7 +200,17 @@ def status_text(path=None,symbol=None,native_path=None):
         f"سجل مقروء {s.get('audited_trades','غير متاح')} | عينات موثقة {r.get('source_trades','غير متاحة')} | متجهات مكتملة {r.get('known_vectors','غير متاحة')}",
         'يتعلم عائد الصفقة نسبةً إلى مخاطرتها الأولية، بعد تكاليف مفترضة؛ لا يستخدم نموذجًا أو خدمة AI خارجية.',
         'الحد الأدنى: 30 صفقة تدريب و10 اختبار لاحق، 10 أيام تدريب و5 اختبار، تغطية ≥90% وتنوع نتائج.']
-    if s.get('excluded'):lines.append('استبعاد أدلة ناقصة: '+str(sum(s['excluded'].values())))
+    if not r.get('artifact'):lines.append('التدريب لم يكتمل؛ لا توجد توقعات نموذج معتمد للمقارنة بعد.')
+    reasons={'ORIGINAL_CLOSED_FEATURE_EVIDENCE_MISSING':'دليل الشمعة الأصلية أو فترتها غير مكتمل',
+        'EXACT_ENTRY_LINK_MISSING':'ربط قرار الدخول غير متاح',
+        'LEDGER_INCOMPLETE_OR_MISMATCHED':'سجل التنفيذ ناقص أو غير متطابق',
+        'OPEN_TRADE':'صفقة مفتوحة', 'INVALID_OR_FUTURE_TRADE_TIME':'توقيت الصفقة غير صالح'}
+    for reason,count in sorted((s.get('excluded') or {}).items()):
+        lines.append(f'مستبعد {count}: {reasons.get(reason,reason)}')
+    for name,label in (('train','التدريب'),('test','الاختبار اللاحق')):
+        part=r.get(name) or {}
+        if part:lines.append(f"{label}: {part['eligible']}/{part['recorded']} عينة | تغطية {part['coverage']:.1%} | أيام صالحة {part.get('eligible_days','غير متاحة')}")
+    if s.get('truncated'):lines.append('التغطية لآخر 50 سجل صفقة فقط؛ ليست كل السجل التاريخي.')
     metrics=r.get('metrics') or {}
     if metrics:
         lines.append(f"متوسط مربع خطأ العائد (بوحدة R²): النموذج {metrics['candidate_mse_r2']:.3f} | الثابت {metrics['constant_mse_r2']:.3f}")
@@ -187,7 +219,10 @@ def status_text(path=None,symbol=None,native_path=None):
         if a.get('artifact_hash')==digest({k:v for k,v in a.items() if k!='artifact_hash'}):
             top=sorted(zip(a['features'],a['coefficients']),key=lambda pair:-abs(pair[1]))[:3]
             lines.append('أقوى ارتباطات النموذج المعيارية: '+' | '.join(f'{k}: {v:+.3f}R' for k,v in top))
-    if r.get('checked_at'):lines.append('وقت الفحص: '+r['checked_at'])
+    if r.get('checked_at'):
+        from zoneinfo import ZoneInfo
+        try:lines.append('وقت الفحص: '+utc(r['checked_at']).astimezone(ZoneInfo('Asia/Riyadh')).strftime('%Y-%m-%d %H:%M:%S')+' السعودية')
+        except (ValueError,TypeError):lines.append('وقت الفحص المحفوظ غير صالح')
     if symbol:
         import re
         from ai_system import latest_decision

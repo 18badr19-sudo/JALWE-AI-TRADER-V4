@@ -175,6 +175,11 @@ class LossReductionStudy:
                 trial_key TEXT NOT NULL,feed TEXT NOT NULL,checked_at TEXT NOT NULL,result_json TEXT NOT NULL,
                 PRIMARY KEY(trial_key,feed));''')
         logging.getLogger(__name__).info('LOSS_REDUCTION_STUDY_READY protocol=%s cutoff_minutes=30 risk_dollars=1 cash_dollars=100 execution_authority=false',PROTOCOL)
+        self.quality_study=None
+        try:
+            from entry_quality_study import Recorder
+            self.quality_study=Recorder(db)
+        except Exception as exc:logging.getLogger(__name__).warning('ENTRY_QUALITY_INIT_UNAVAILABLE %s',type(exc).__name__)
 
     def record(self,c,trial_key,decision_key,payload,candidate):
         at=utc(payload['timestamp']);m=payload['jalwe'].get('metadata') or {}
@@ -190,6 +195,10 @@ class LossReductionStudy:
         plan=safe(plan)
         c.execute('INSERT OR IGNORE INTO loss_reduction_trials VALUES (?,?,?,?,?,?)',
             (trial_key,decision_key,payload['symbol'],at.isoformat(),PROTOCOL,json.dumps(plan,allow_nan=False,default=str)))
+        # Optional descriptive research cannot alter a candidate or execution decision.
+        try:
+            if self.quality_study:self.quality_study.record(c,trial_key,payload)
+        except Exception as exc:logging.getLogger(__name__).warning('ENTRY_QUALITY_RECORD_UNAVAILABLE %s',type(exc).__name__)
 
     def observe(self,c,decision_key,frame,feed,as_of):
         for row in c.execute('SELECT * FROM loss_reduction_trials WHERE decision_key=? AND protocol=?',(decision_key,PROTOCOL)).fetchall():

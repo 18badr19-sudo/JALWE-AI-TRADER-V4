@@ -995,7 +995,8 @@ class PaperTradeOrchestrator:
         if trade is None:
             raise RuntimeError('ManagedTrade could not be reloaded for protective stop arming.')
         quantity = int(trade.remaining_quantity)
-        stop_price = float(trade.current_stop)
+        from broker.stop_pricing import normalize_stop_price
+        stop_price = normalize_stop_price(trade.current_stop)
         if quantity <= 0:
             return {'enabled': True, 'active': False, 'reason': 'NO_REMAINING_POSITION'}
         if trade.metadata.get('protective_stop_order_id') or trade.metadata.get('protective_stop_submission_uncertain'):

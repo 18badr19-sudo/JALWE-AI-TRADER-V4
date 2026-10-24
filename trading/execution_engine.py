@@ -1247,9 +1247,8 @@ class ExecutionEngine:
             quantity
         )
 
-        stop_price = float(
-            stop_price
-        )
+        from broker.stop_pricing import normalize_stop_price
+        stop_price = normalize_stop_price(stop_price)
 
         if quantity <= 0:
             raise ValueError(

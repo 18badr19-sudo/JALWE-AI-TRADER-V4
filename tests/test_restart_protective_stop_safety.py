@@ -331,10 +331,12 @@ class RestartAndProtectiveStopSafetyTests(
                 side_effect=[
                     SimpleNamespace(
                         id="OLD-CANE-STOP",
+                        stop_price="11.58",
                         status="new"
                     ),
                     SimpleNamespace(
                         id="OLD-CANE-STOP",
+                        stop_price="11.58",
                         status="new"
                     ),
                     SimpleNamespace(

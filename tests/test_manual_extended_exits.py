@@ -370,7 +370,7 @@ class WatcherIntegrationTests(unittest.TestCase):
         execution, reconciliation, market, cancel, sync = self.fixtures('EXTENDED')
         sync.side_effect = real_sync
         execution.broker.get_order.return_value = NS(id='protect', symbol='TEST', side='sell',
-            status='new', filled_qty='0', filled_avg_price=None)
+            status='new', filled_qty='0', filled_avg_price=None, stop_price='9')
         market.get_execution_quote.side_effect = ExecutionQuoteUnavailable('SUBSCRIPTION_REQUIRED')
         with patch.object(watcher, 'settings', replace(watcher.settings, BROKER_PROTECTIVE_STOP_ENABLED=True)):
             watcher.manage_active_paper_trades({})

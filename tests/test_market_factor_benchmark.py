@@ -28,6 +28,22 @@ class FactorBenchmarkTests(unittest.TestCase):
         return bench.update(self.store,self.daily if daily is None else daily,self.sessions,list(self.daily),
                             self.now,source_session='2026-10-12',**kwargs)
 
+    def test_v2_preserves_old_definition_and_separates_price_bands(self):
+        old={'protocol':'daily-factor-benchmark-v1','spec_hash':'old','defined_at':'2026-10-01T00:00:00Z'}
+        self.store.state('daily_factor_definition',old)
+        data=copy.deepcopy(self.daily)
+        # Scale all prices together; adjust volume so research liquidity remains eligible.
+        for bars in data.values():
+            for bar in bars:
+                for key in ('o','h','l','c'): bar[key]*=.02
+                bar['v']*=100
+        result=self.run_benchmark(data)
+        self.assertEqual(self.store.state('daily_factor_definition'),old)
+        self.assertEqual(result['research_price_range']['minimum'],.1)
+        self.assertIn('0.10–0.49',result['retrospective_price_bands'])
+        self.assertEqual(result['forward']['cohort_days'],0)
+        self.assertFalse(result['automatic_application'])
+
     def test_all_universe_denominators_include_signal_failures_and_nonmatching_winners(self):
         result=self.run_benchmark(); r=result['retrospective']['all_days']['rules']['ALL_THREE']
         self.assertEqual(r['matching'],dict(total=2,reached=1,not_reached=1,unknown=0,known_coverage=1.,reached_frequency=.5))

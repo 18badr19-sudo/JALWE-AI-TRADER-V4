@@ -647,7 +647,7 @@ def report_text(packet):
         lines.append(f"📚 مسارات القفزات — آخر {jumps['lookback_days']} يومًا: مرشحة {jumps['episodes']} | قفزات مؤكدة {jumps['confirmed']} | تنتظر {jc.get('PENDING',0)}")
         lines.append('مرشحو نطاق/فجوة يومية 8% أو أكثر بسيولة مرصودة قبل الحركة أو يومها؛ الأكبر له أولوية قراءة، والحد اليومي ليس مسارًا مثبتًا. لا يشترط شراء البوت أو قابلية التداول عند الوسيط.')
     benchmark = packet.get('factor_benchmark',{})
-    if benchmark.get('protocol') == 'daily-factor-benchmark-v1':
+    if benchmark.get('protocol') in {'daily-factor-benchmark-v1','daily-factor-benchmark-v2'}:
         history = benchmark['retrospective']['all_days']
         forward = benchmark['forward']
         lines.append(f"⚖️ قياس العوامل اليومي — {history['days']} جلسات تاريخية؛ يشمل الأسهم التي لم تصعد.")

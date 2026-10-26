@@ -77,7 +77,7 @@ def summarize_common(completed, minute_factors):
 
     def group(items, threshold):
         factors, shared = [], []
-        for selection in [(c,) for c in codes]+list(combinations(codes,2)):
+        for selection in [(c,) for c in codes]+list(combinations(codes,2))+list(combinations(codes,3)):
             known = [(r,all(s[c]=='PRESENT' for c in selection)) for r,_,s in items
                      if all(s[c] in {'PRESENT','ABSENT'} for c in selection)]
             present = [r for r,yes in known if yes]
@@ -90,7 +90,8 @@ def summarize_common(completed, minute_factors):
         return dict(min_rise_pct=threshold,cases=len(items),
             unique_symbols=len({r['symbol'] for r,_,_ in items}),
             unique_days=len({r['session_day'] for r,_,_ in items}),
-            factors=factors,cooccurrences=shared,
+            factors=factors,cooccurrences=[v for v in shared if len(v['codes'])==2],
+            triple_cooccurrences=[v for v in shared if len(v['codes'])==3],
             prominent_cooccurrences=[v for v in shared if v['known']>=3 and v['present']>=2][:3])
     return dict(protocol=PROTOCOL,scope='DESCRIPTIVE_SELECTED_WINNERS_NOT_CAUSES',
         all_jumps=group(cases,8),large_jump_groups=[group([v for v in cases if v[1]>=n],n) for n in (25,50,100)],

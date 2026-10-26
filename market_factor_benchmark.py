@@ -13,13 +13,18 @@ import math
 from market_move_research import NY, bucket, daily_features, utc, valid_bar
 import market_factor_statistics as statistics
 
-PROTOCOL = 'daily-factor-benchmark-v1'
+PROTOCOL = 'daily-factor-benchmark-v2'
+DEFINITION_KEY = 'daily_factor_definition_v2'
+STATISTICS_KEY = 'daily_factor_statistics_definition_v2'
 RULES = {'RANGE8': {'range_pct':8.}, 'VOLUME2': {'volume_ratio_previous_day':2.},
          'MOMENTUM3': {'daily_return_pct':3.},
+         'RANGE8_VOLUME2': {'range_pct':8.,'volume_ratio_previous_day':2.},
+         'RANGE8_MOMENTUM3': {'range_pct':8.,'daily_return_pct':3.},
+         'VOLUME2_MOMENTUM3': {'volume_ratio_previous_day':2.,'daily_return_pct':3.},
          'ALL_THREE': {'range_pct':8., 'volume_ratio_previous_day':2., 'daily_return_pct':3.}}
-SPEC = hashlib.sha256(json.dumps(RULES,sort_keys=True).encode()).hexdigest()
-PREFIX = 'daily_factor_cohort_v1:'
-RESULT_PREFIX = 'daily_factor_result_v1:'
+SPEC = hashlib.sha256(json.dumps(dict(rules=RULES,price_min=.1,price_max=100,price_bands=[.1,.5,1,5,15,100]),sort_keys=True).encode()).hexdigest()
+PREFIX = 'daily_factor_cohort_v2:'
+RESULT_PREFIX = 'daily_factor_result_v2:'
 DELAY = timedelta(hours=24, minutes=16)
 
 
@@ -30,14 +35,22 @@ def signals(features):
     return {rule:all(features[k]>=n for k,n in tests.items()) for rule,tests in RULES.items()}
 
 
+def price_band(price):
+    if price < .5: return '0.10–0.49'
+    if price < 1: return '0.50–0.99'
+    if price < 5: return '1–4.99'
+    if price < 15: return '5–14.99'
+    return '15–100'
+
+
 def record(features):
     flags = signals(features)
     close, dollars = features.get('close'),features.get('dollar_volume')
     if (flags is None or type(close) not in (float,int) or type(dollars) not in (float,int)
             or not math.isfinite(close) or not math.isfinite(dollars)
-            or not .5<=close<=100 or dollars<100000 or features.get('source_feed')!='sip'):
+            or not .1<=close<=100 or dollars<100000 or features.get('source_feed')!='sip'):
         return None
-    return dict(symbol=features['symbol'], group=list(bucket(features)), signals=flags,
+    return dict(symbol=features['symbol'], group=[price_band(close), *bucket(features)], signals=flags,
                 features=dict(features))
 
 
@@ -97,7 +110,7 @@ def measure(records, session, indexed, *, outcomes=None, returns=None, market_re
     return dict(day=session['date'],rules=result,statistics=evidence)
 
 
-def aggregate(days):
+def aggregate(days, *, include_statistics=True):
     result = dict(days=len(days), first_day=min((d['day'] for d in days),default=None),
                   last_day=max((d['day'] for d in days),default=None),rules={})
     for rule in RULES:
@@ -115,7 +128,8 @@ def aggregate(days):
         p.update(coverage=p['complete']/p['selected'] if p['selected'] else None,days_with_pairs=len(edges),
                  day_weighted_frequency_difference=sum(edges)/len(edges) if edges else None)
         value['pairs']=p; result['rules'][rule]=value
-    result['statistics']=statistics.aggregate([d['statistics'] for d in days if 'statistics' in d],RULES)
+    if include_statistics:
+        result['statistics']=statistics.aggregate([d['statistics'] for d in days if 'statistics' in d],RULES)
     return result
 
 
@@ -161,21 +175,21 @@ def freeze_next(store, now, defined_at, *, clock=None):
 
 
 def update(store, daily, sessions, symbols, now, *, clock=None, source_session=None):
-    fixed=store.state('daily_factor_definition')
+    fixed=store.state(DEFINITION_KEY)
     if fixed is None:
         fixed=dict(protocol=PROTOCOL,spec_hash=SPEC,defined_at=now.isoformat(),rules=RULES)
         with store.connect() as conn:
-            conn.execute('INSERT OR IGNORE INTO move_state VALUES (?,?)',('daily_factor_definition',json.dumps(fixed)))
-        fixed=store.state('daily_factor_definition')
+            conn.execute('INSERT OR IGNORE INTO move_state VALUES (?,?)',(DEFINITION_KEY,json.dumps(fixed)))
+        fixed=store.state(DEFINITION_KEY)
     if fixed.get('spec_hash')!=SPEC or fixed.get('protocol')!=PROTOCOL:
         raise ValueError('BENCHMARK_DEFINITION_MISMATCH')
-    statistics_definition=store.state('daily_factor_statistics_definition')
+    statistics_definition=store.state(STATISTICS_KEY)
     if statistics_definition is None:
         statistics_definition=dict(spec_hash=statistics.SPEC,defined_at=now.isoformat())
         with store.connect() as conn:
             conn.execute('INSERT OR IGNORE INTO move_state VALUES (?,?)',
-                ('daily_factor_statistics_definition',json.dumps(statistics_definition)))
-        statistics_definition=store.state('daily_factor_statistics_definition')
+                (STATISTICS_KEY,json.dumps(statistics_definition)))
+        statistics_definition=store.state(STATISTICS_KEY)
     if statistics_definition.get('spec_hash')!=statistics.SPEC:
         raise ValueError('STATISTICS_DEFINITION_MISMATCH')
     freeze_next(store,now,fixed['defined_at'],clock=clock)
@@ -191,6 +205,7 @@ def update(store, daily, sessions, symbols, now, *, clock=None, source_session=N
     historical=[]
     cutoff=(now.astimezone(NY).date()-timedelta(days=30)).isoformat()
     universe=sorted(set(symbols))
+    band_days={}
     for i,s in enumerate(sessions):
         if i<2 or s['date']<cutoff or utc(s['close'])+DELAY>now:
             continue
@@ -212,7 +227,10 @@ def update(store, daily, sessions, symbols, now, *, clock=None, source_session=N
         measured=measure(records,s,indexed,market_return=market_return)
         measured['unknown_or_ineligible_inputs']=len(universe)-len(records)
         historical.append(measured)
+        for band in sorted({r['group'][0] for r in records}):
+            band_days.setdefault(band,[]).append(measure([r for r in records if r['group'][0]==band],s,indexed,market_return=market_return))
     forward,pending=[],0
+    forward_bands={}
     for key in cohort_keys:
         cohort=store.state(key)
         if cohort.get('protocol')!=PROTOCOL or cohort.get('spec_hash')!=SPEC:
@@ -245,14 +263,24 @@ def update(store, daily, sessions, symbols, now, *, clock=None, source_session=N
         if utc(statistics_definition['defined_at'])>=utc(cohort['session']['open']):
             measured.pop('statistics')
         forward.append(measured)
+        for band in sorted({r['group'][0] for r in cohort['records']}):
+            members=[r for r in cohort['records'] if r['group'][0]==band]
+            part=measure(members,cohort['session'],indexed,outcomes=outcomes,
+                         returns=returns,market_return=market_return)
+            if utc(statistics_definition['defined_at'])>=utc(cohort['session']['open']):
+                part.pop('statistics')
+            forward_bands.setdefault(band,[]).append(part)
     split=max(1,len(historical)*2//3) if historical else 0
     result=dict(protocol=PROTOCOL,spec_hash=SPEC,rules=RULES,updated_at=now.isoformat(),cache_key=cache_key,
+        research_price_range=dict(minimum=.1,maximum=100,basis='PRIOR_DAY_CLOSE'),
+        retrospective_price_bands={band:aggregate(days,include_statistics=False) for band,days in band_days.items()},
         endpoint='PROVIDER_DAILY_HIGH_GE_OPEN_PLUS_8_NOT_PNL_OR_FIRST_BARRIER',
         retrospective=dict(all_days=aggregate(historical),earlier_period=aggregate(historical[:split]),
                            later_period=aggregate(historical[split:]),
                            excluded_inputs=sum(d['unknown_or_ineligible_inputs'] for d in historical)),
         forward=dict(state='FROZEN_FORWARD_DAILY_DATA' if forward else 'WAITING_FORWARD_DAILY_DATA',
-                     pending_symbol_days=pending,cohort_days=len(cohort_keys),evidence=aggregate(forward)),
+                     pending_symbol_days=pending,cohort_days=len(cohort_keys),evidence=aggregate(forward),
+                     price_bands={band:aggregate(days,include_statistics=False) for band,days in forward_bands.items()}),
         statistics_method=dict(protocol=statistics.PROTOCOL,spec_hash=statistics.SPEC,
             defined_at=statistics_definition['defined_at'],
             benchmark=statistics.BENCHMARK,return_endpoint='PROVIDER_DAILY_OPEN_TO_CLOSE_MINUS_SAME_DAY_SPY_BETA_ONE',

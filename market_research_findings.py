@@ -9,7 +9,11 @@ import sqlite3
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-LABELS = {'PRIOR_DAY_RANGE':'نطاق حركة اليوم السابق ≥8%',
+LABELS = {'VOLUME_BUILDUP':'تسارع الحجم قبل البداية المرصودة',
+          'POSITIVE_PRE_MOVE':'زخم موجب قبل البداية المرصودة',
+          'ABOVE_CONTEXT_VWAP':'السعر فوق VWAP قبل البداية المرصودة',
+          'TIGHT_PRE_RANGE':'نطاق ضيق قبل البداية المرصودة',
+          'PRIOR_DAY_RANGE':'نطاق حركة اليوم السابق ≥8%',
           'PRIOR_DAY_VOLUME':'حجم اليوم السابق ≥2× اليوم الذي قبله',
           'PRIOR_DAY_MOMENTUM':'صعود اليوم السابق ≥3%'}
 SYMBOL = re.compile(r'[A-Z][A-Z0-9.\-]{0,11}\Z')
@@ -36,7 +40,8 @@ def findings(packet):
         source_time=packet.get('published_at'),selected_jump_group=dict(
             min_rise_pct=selected.get('min_rise_pct'),cases=selected.get('cases',0),
             unique_symbols=selected.get('unique_symbols'),factors=factors,
-            cooccurrences=selected.get('prominent_cooccurrences',[])[:3]),
+            cooccurrences=selected.get('prominent_cooccurrences',[])[:3],
+            all_cooccurrences=selected.get('cooccurrences',[])+selected.get('triple_cooccurrences',[])),
         coverage=packet.get('diagnostics',{}).get('coverage_totals',{}),
         forward_comparison=packet.get('comparison',{}),
         training=dict(state=policy.get('state','UNAVAILABLE'),candidates=policy.get('candidates',{}),
@@ -52,6 +57,31 @@ def findings(packet):
         automatic_application=False,execution_authority=False)
 
 
+BENCHMARK_LABELS = {'RANGE8':'نطاق اليوم السابق ≥8%',
+    'VOLUME2':'حجم اليوم السابق ≥2×', 'MOMENTUM3':'صعود اليوم السابق ≥3%',
+    'RANGE8_VOLUME2':'نطاق ≥8% وحجم ≥2×',
+    'RANGE8_MOMENTUM3':'نطاق ≥8% وصعود ≥3%',
+    'VOLUME2_MOMENTUM3':'حجم ≥2× وصعود ≥3%',
+    'ALL_THREE':'اجتماع الشروط الثلاثة'}
+
+
+def controlled_factor_rows(packet):
+    """Paired descriptive comparisons only; never promote a rule from daily highs."""
+    benchmark=packet.get('factor_benchmark',{})
+    result=[]
+    for scope,section in (('historical',benchmark.get('retrospective',{}).get('all_days',{})),
+                          ('forward',benchmark.get('forward',{}).get('evidence',{}))):
+        for code,label in BENCHMARK_LABELS.items():
+            pairs=section.get('rules',{}).get(code,{}).get('pairs',{})
+            n,a,b=(pairs.get(k) for k in ('complete','matching_reached','control_reached'))
+            if not all(type(v) is int for v in (n,a,b)) or n<=0 or not 0<=a<=n or not 0<=b<=n:
+                continue
+            result.append(dict(scope=scope,code=code,label=label,pairs=n,matching=a,control=b,
+                difference_pp=100*(a-b)/n,days=section.get('days'),
+                endpoint='DAILY_HIGH_8_NOT_TRADE_PNL',execution_authority=False))
+    return result
+
+
 def findings_text(packet):
     if not packet: return '🧠 خلاصة الباحث: لا توجد حزمة بحث حديثة متاحة.'
     value=findings(packet); group=value['selected_jump_group']
@@ -65,7 +95,7 @@ def findings_text(packet):
         if all(c in LABELS for c in row.get('codes',[])):
             lines.append('• اجتماع '+ ' + '.join(LABELS[c] for c in row['codes'])+
                          f": {row['present']}/{row['known']} | مجهول {row['unknown']}")
-    lines.append('هذه نسبة ظهور الصفة بين قافزين مختارين؛ ليست احتمال قفزة لسهم يحمل الصفة ولا نسبة نجاح شراء.')
+    lines.append('هذه نسبة ظهور الصفة بين قافزين مختارين؛ ليست احتمال قفزة لسهم يحمل الصفة ولا نسبة نجاح شراء. سياق البداية المرصودة مختار بعد الحركة؛ يحتاج اختبارًا بتوقيت محدد مسبقًا.')
     comp=value['forward_comparison']; training=value['training']
     lines.append(f"اختبار المسار المسبق: {comp.get('complete_pairs',0)}/{comp.get('pair_episodes',0)} زوج مكتمل، خلال {comp.get('unique_days',0)} أيام.")
     labels={'COLLECTING_TRAINING':'يجمع بيانات التدريب','WAITING_FRESH_VALIDATION':'ينتظر الاختبار اللاحق',
@@ -79,6 +109,19 @@ def findings_text(packet):
         complete=pairs.get('complete',0)
         if complete:
             lines.append(f"{label} للشروط الثلاثة: بلغ أعلى اليوم +8% للمطابقة {pairs['matching_reached']}/{complete}، وللضابطة {pairs['control_reached']}/{complete}. ليست ترتيب وقف/هدف أو ربح صفقة.")
+    benchmark=packet.get('factor_benchmark',{})
+    price_range=benchmark.get('research_price_range')
+    if price_range:
+        lines.append(f"نطاق المقارنة البحثية: ${price_range['minimum']:.2f}–${price_range['maximum']:.2f} حسب إغلاق اليوم السابق؛ نطاق الشراء مستقل.")
+    for band,data in benchmark.get('retrospective_price_bands',{}).items():
+        p=data.get('rules',{}).get('ALL_THREE',{}).get('pairs',{})
+        lines.append(f"فئة سعر ${band} — تاريخي، الشروط الثلاثة: مطابقة {p.get('matching_reached',0)}/{p.get('complete',0)} مقابل ضابطة {p.get('control_reached',0)}/{p.get('complete',0)}؛ صفر أزواج يعني غير معلوم.")
+    for row in controlled_factor_rows(packet):
+        if row['code']=='ALL_THREE': continue  # Already shown above.
+        label='تاريخي' if row['scope']=='historical' else 'مستقبلي مجمد'
+        lines.append(f"مقارنة {label} — {row['label']}: مطابقة {row['matching']}/{row['pairs']} مقابل ضابطة {row['control']}/{row['pairs']}؛ فرق تكرار +8% اليومي {row['difference_pp']:+.2f} نقطة مئوية.")
+    lines.append('الفائدة للبوت: القواعد المجتازة لإثبات التدريب والاختبار اللاحق تؤثر في أولوية الفحص فقط؛ كثرة الصفة أو فرق القمم اليومية لا يفعّلان قاعدة شراء.')
+    lines.append('سياق ما قبل القفزة المختار لاحقًا ليس ضمن المقارنة اليومية؛ لا يُنسب لها نجاح دخول.')
     simulation=value['simulation']; states=simulation.get('states',{})
     if simulation:
         no_entry=sum(v for k,v in states.items() if k.startswith('NO_') or k=='INVALIDATED_BEFORE_ENTRY')

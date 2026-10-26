@@ -107,7 +107,7 @@ class StatisticsIntegrationTests(unittest.TestCase):
         session,stamp=self.freeze_fixture()
         bench.update(self.store,self.daily,self.sessions,list(self.daily),stamp)
         with self.store.connect() as conn:
-            conn.execute('DELETE FROM move_state WHERE key=?',('daily_factor_statistics_definition',))
+            conn.execute('DELETE FROM move_state WHERE key=?',(bench.STATISTICS_KEY,))
         mature=utc(session['close'])+bench.DELAY
         result=bench.update(self.store,self.with_market(),self.sessions+[session],list(self.daily),mature,
                             source_session=session['date'])

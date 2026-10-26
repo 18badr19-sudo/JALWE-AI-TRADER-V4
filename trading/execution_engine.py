@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -8,7 +9,7 @@ from uuid import uuid4
 from trading.exit_sessions import exit_session
 from core.runtime_controls import new_entries_allowed
 
-from broker.order_evidence import map_order_status, validate_order_snapshot
+from broker.order_evidence import map_order_status, validate_order_snapshot, whole_shares
 from broker.alpaca_client import (
     get_alpaca_client,
 )
@@ -701,139 +702,32 @@ class ExecutionEngine:
         # ----------------------------------------------------
 
         try:
-
-            quantity = int(
-                getattr(
-                    decision,
-                    "quantity",
-                    0,
-                )
-            )
-
-        except (
-            TypeError,
-            ValueError,
-        ):
-
-            quantity = 0
-
-        if quantity <= 0:
-
-            return (
-                "Final decision contains "
-                "invalid quantity."
-            )
-
-        # ----------------------------------------------------
-        # PRICE STRUCTURE
-        # ----------------------------------------------------
+            whole_shares(getattr(decision, 'quantity', 0))
+        except (TypeError, ValueError, OverflowError):
+            return 'Final decision contains invalid whole-share quantity.'
 
         try:
-
-            entry = float(
-                getattr(
-                    decision,
-                    "entry_price",
-                    0,
-                )
-                or 0
-            )
-
-            stop = float(
-                getattr(
-                    decision,
-                    "stop_price",
-                    0,
-                )
-                or 0
-            )
-
-            target_1 = float(
-                getattr(
-                    decision,
-                    "target_1",
-                    0,
-                )
-                or 0
-            )
-
-            target_2 = float(
-                getattr(
-                    decision,
-                    "target_2",
-                    0,
-                )
-                or 0
-            )
-
-            target_3 = float(
-                getattr(
-                    decision,
-                    "target_3",
-                    0,
-                )
-                or 0
-            )
-
-        except (
-            TypeError,
-            ValueError,
-        ):
-
-            return (
-                "Final decision contains "
-                "invalid price levels."
-            )
-
-        if not (
-            0
-            < stop
-            < entry
-            < target_1
-            < target_2
-            < target_3
-        ):
-
-            return (
-                "Final decision price "
-                "structure is invalid."
-            )
-
-        # ----------------------------------------------------
-        # RISK
-        # ----------------------------------------------------
+            levels = [getattr(decision, name, None) for name in
+                      ('stop_price', 'entry_price', 'target_1', 'target_2', 'target_3')]
+            if any(isinstance(value, bool) for value in levels):
+                raise ValueError('Boolean price')
+            stop, entry, target_1, target_2, target_3 = [float(v) for v in levels]
+            if not all(math.isfinite(v) for v in (stop, entry, target_1, target_2, target_3)):
+                raise ValueError('Nonfinite price')
+        except (TypeError, ValueError, OverflowError):
+            return 'Final decision contains invalid price levels.'
+        if not 0 < stop < entry < target_1 < target_2 < target_3:
+            return 'Final decision price structure is invalid.'
 
         try:
-
-            risk_pct = float(
-                getattr(
-                    decision,
-                    "risk_pct",
-                    0,
-                )
-                or 0
-            )
-
-        except (
-            TypeError,
-            ValueError,
-        ):
-
-            return (
-                "Invalid final risk percentage."
-            )
-
-        # Current JALWE hard cap.
-        if not (
-            0
-            < risk_pct
-            <= 1.50
-        ):
-
-            return (
-                "Final risk percentage is "
-                "outside JALWE safety limits."
-            )
+            raw_risk = getattr(decision, 'risk_pct', None)
+            if isinstance(raw_risk, bool):
+                raise ValueError('Boolean risk')
+            risk_pct = float(raw_risk)
+        except (TypeError, ValueError, OverflowError):
+            return 'Invalid final risk percentage.'
+        if not 0 < risk_pct <= 1.50:
+            return 'Final risk percentage is outside JALWE safety limits.'
 
         return None
 
@@ -916,7 +810,7 @@ class ExecutionEngine:
             )
         )
 
-        quantity = int(
+        quantity = whole_shares(
             decision.quantity
         )
 

@@ -144,9 +144,30 @@ class RiskEngine:
     # CONFIGURATION
     # ========================================================
 
+    @staticmethod
+    def _finite_number(value, label):
+        """Do not let NaN comparisons or booleans establish risk evidence."""
+        try:
+            if isinstance(value, bool):
+                raise ValueError(label)
+            number = float(value)
+            if not math.isfinite(number):
+                raise ValueError(label)
+            return number
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"Invalid {label}: expected a finite number.") from exc
+
     def _validate_configuration(
         self,
     ) -> None:
+
+        for name in ('strategy_starting_capital', 'default_risk_pct',
+                     'maximum_risk_pct', 'max_daily_loss_pct',
+                     'max_position_allocation_pct', 'allocation_b_pct',
+                     'allocation_a_pct', 'allocation_a_plus_pct',
+                     'minimum_signal_score', 'minimum_price', 'maximum_price',
+                     'atr_stop_multiplier', 'maximum_stop_pct', 'minimum_stop_pct'):
+            self._finite_number(getattr(self, name), name)
 
         if self.strategy_starting_capital <= 0:
 
@@ -321,8 +342,8 @@ class RiskEngine:
         if recommended_risk_pct is not None:
 
             try:
-                requested = float(
-                    recommended_risk_pct
+                requested = self._finite_number(
+                    recommended_risk_pct, "recommended risk percentage"
                 )
 
             except (
@@ -450,6 +471,11 @@ class RiskEngine:
         float,
     ]:
 
+        current_strategy_equity = self._finite_number(
+            current_strategy_equity, 'current strategy equity')
+        daily_start_strategy_equity = self._finite_number(
+            daily_start_strategy_equity, 'daily start strategy equity')
+
         if (
             daily_start_strategy_equity
             <= 0
@@ -489,17 +515,16 @@ class RiskEngine:
         entry: float,
     ) -> Optional[float]:
 
-        if (
-            features.atr is None
-            or features.atr <= 0
-        ):
-
+        try:
+            atr = self._finite_number(features.atr, 'ATR')
+        except ValueError:
+            return None
+        if atr <= 0:
             return None
 
-        atr_distance = (
-            float(features.atr)
-            * self.atr_stop_multiplier
-        )
+        atr_distance = atr * self.atr_stop_multiplier
+        if not math.isfinite(atr_distance):
+            return None
 
         minimum_distance = (
             entry
@@ -557,6 +582,12 @@ class RiskEngine:
         Optional[str],
         Optional[float],
     ]:
+
+        try:
+            entry = self._finite_number(entry, 'entry price')
+            stop = self._finite_number(stop, 'strategy stop')
+        except ValueError:
+            return False, 'Invalid strategy stop.', None
 
         if (
             stop <= 0
@@ -806,10 +837,14 @@ class RiskEngine:
                 ),
             )
 
-        if (
-            ai_analysis.score
-            < self.minimum_signal_score
-        ):
+        try:
+            score = self._finite_number(ai_analysis.score, 'AI score')
+        except ValueError as exc:
+            return self._reject(str(exc))
+        if not 0 <= score <= 100:
+            return self._reject('AI score is outside the valid range.')
+
+        if score < self.minimum_signal_score:
 
             return self._reject(
                 "AI score is below minimum threshold.",
@@ -827,36 +862,12 @@ class RiskEngine:
         # ENTRY PRICE
         # ====================================================
 
-        if confirmed_entry_price is not None:
-
-            try:
-                entry = float(
-                    confirmed_entry_price
-                )
-
-            except (
-                TypeError,
-                ValueError,
-            ):
-
-                return self._reject(
-                    "Invalid confirmed entry price."
-                )
-
-        else:
-
-            if (
-                features.price is None
-                or features.price <= 0
-            ):
-
-                return self._reject(
-                    "Invalid entry price."
-                )
-
-            entry = float(
-                features.price
-            )
+        try:
+            entry = self._finite_number(
+                confirmed_entry_price if confirmed_entry_price is not None else features.price,
+                'entry price')
+        except ValueError as exc:
+            return self._reject(str(exc))
 
         if entry <= 0:
 
@@ -919,13 +930,11 @@ class RiskEngine:
                 error=str(exc),
             )
 
-        broker_equity = float(
-            account["equity"]
-        )
-
-        broker_cash = float(
-            account["cash"]
-        )
+        try:
+            broker_equity = self._finite_number(account['equity'], 'broker equity')
+            broker_cash = self._finite_number(account['cash'], 'broker cash')
+        except (ValueError, TypeError, KeyError):
+            return self._reject('Invalid broker account values.')
 
         if (
             broker_equity <= 0
@@ -949,8 +958,8 @@ class RiskEngine:
         else:
 
             try:
-                current_strategy_equity = float(
-                    strategy_equity
+                current_strategy_equity = self._finite_number(
+                    strategy_equity, "strategy equity"
                 )
 
             except (
@@ -1060,8 +1069,8 @@ class RiskEngine:
 
         try:
 
-            daily_start_equity = float(
-                daily_start_equity
+            daily_start_equity = self._finite_number(
+                daily_start_equity, "daily start strategy equity"
             )
 
         except (
@@ -1146,8 +1155,8 @@ class RiskEngine:
         if confirmed_stop_price is not None:
 
             try:
-                stop = float(
-                    confirmed_stop_price
+                stop = self._finite_number(
+                    confirmed_stop_price, "confirmed stop price"
                 )
 
             except (

@@ -851,6 +851,9 @@ class DecisionEngine:
         # and deadline, never let a later strategy switch resurrect it.
         for name in ("ai", "opportunity", "strategy_router", "session_strategy"):
             gates[name] = False
+        refresh_failure = "NATIVE_QUALITY_REFRESH_ERROR"
+        current_ai = current_opportunity = current_session = None
+        selected = None
         try:
             self._apply_news(features, warnings)
             self._apply_options(features, warnings)
@@ -873,19 +876,36 @@ class DecisionEngine:
                     ("ai", "opportunity", "strategy_router", "session_strategy")}}
             latch_metadata["decision_features"] = self._decision_feature_evidence(features)
             if not all(gates[k] for k in ("ai", "opportunity", "strategy_router", "session_strategy")):
+                refresh_failure = "CURRENT_NATIVE_GATES_FAILED"
                 raise ValueError("Current native quality no longer passes")
             if selected["invalidation_price"] >= current_price:
                 gates["session_strategy"] = False
+                refresh_failure = "CURRENT_CANDIDATE_INVALIDATED"
                 raise ValueError("Current candidate is invalidated")
             if current_price < selected["trigger_price"]:
                 gates["trigger"] = False
+                refresh_failure = "CURRENT_TRIGGER_NOT_REACHED"
                 raise ValueError("Current candidate trigger has not been reached")
         except Exception as exc:
             self._breakout_latches.pop(symbol, None)
             latch_metadata["latched_quality_refresh_error"] = type(exc).__name__
-            return self._reject(symbol=symbol, reason="Latched entry failed current native quality recheck.",
+            refresh = latch_metadata.setdefault("latched_quality_refresh", {})
+            refresh.update(failure_code=refresh_failure, current_price=current_price,
+                           original_trigger_price=trigger_price,
+                           current_trigger_price=selected.get("trigger_price") if selected else None,
+                           current_invalidation_price=selected.get("invalidation_price") if selected else None,
+                           gates={k:gates[k] for k in ("ai","opportunity","strategy_router","session_strategy","trigger")})
+            reason = {
+                "CURRENT_TRIGGER_NOT_REACHED": "Latched entry has not reached the current candidate trigger.",
+                "CURRENT_CANDIDATE_INVALIDATED": "Latched current candidate was invalidated before entry.",
+                "NATIVE_QUALITY_REFRESH_ERROR": "Latched current quality refresh could not be completed.",
+            }.get(refresh_failure, "Latched entry failed current native quality recheck.")
+            return self._reject(symbol=symbol, reason=reason,
                                 gates=gates, warnings=warnings, metadata=latch_metadata,
-                                strategy=latch.get("strategy"), entry_price=trigger_price, stop_price=stop_price)
+                                strategy=latch.get("strategy"), entry_price=trigger_price, stop_price=stop_price,
+                                ai_score=getattr(current_ai,"score",None),
+                                opportunity_score=getattr(current_opportunity,"score",None),
+                                session_strategy_score=getattr(current_session,"score",None))
         latched_ai_score = float(current_ai.score)
         # Current grading can reduce risk, but cannot increase the original budget.
         risk_budget = min(float(latch.get("risk_pct", 0) or 0), float(current_routed.final_risk_pct))

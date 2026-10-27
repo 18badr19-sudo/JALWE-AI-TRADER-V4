@@ -401,6 +401,9 @@ class DecisionOutcomeMemory:
         }
         translations.update({
             "Latched entry failed current native quality recheck.": "تراجعت جودة الفرصة عند إعادة الفحص قبل الدخول",
+            "Latched entry has not reached the current candidate trigger.": "السعر لم يصل إلى مستوى تفعيل المرشح المحدّث",
+            "Latched current candidate was invalidated before entry.": "وصل المرشح المحدّث إلى إلغاء الفرصة قبل الدخول",
+            "Latched current quality refresh could not be completed.": "تعذر إكمال إعادة فحص جودة الفرصة؛ ليس رفض جودة مثبتًا",
             "Latched market-regime refresh unavailable.": "تعذر تحديث حالة السوق قبل الدخول",
             "Final entry quality failed: CURRENT_RVOL_BELOW_MIN": "النشاط الحالي أقل من الحد عند الدخول",
             "Final entry quality failed: MISSING_CURRENT_ACTIVITY": "دليل النشاط والسيولة الحالي ناقص",

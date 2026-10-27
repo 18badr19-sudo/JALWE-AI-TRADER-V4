@@ -163,6 +163,40 @@ class CurrentLatchTests(unittest.TestCase):
         breakout.approved_for_entry = True
         breakout.state = BreakoutConfirmationState.CONFIRMED
 
+    def test_current_trigger_failure_is_not_reported_as_quality_deterioration(self):
+        self.confirm()
+        candidate=self.engine.session_strategy_engine.evaluate.return_value.candidates[0]
+        candidate.trigger_price=10.3
+        decision=self.analyze()
+        self.assertEqual(decision.reason,'Latched entry has not reached the current candidate trigger.')
+        self.assertTrue(all(decision.gates[k] for k in ('ai','opportunity','strategy_router','session_strategy')))
+        self.assertFalse(decision.gates['trigger'])
+        self.assertEqual(decision.metadata['latched_quality_refresh']['failure_code'],'CURRENT_TRIGGER_NOT_REACHED')
+        self.engine.risk_engine.evaluate.assert_not_called()
+        self.assertFalse(decision.ready_for_execution)
+
+    def test_current_invalidation_is_reported_separately_and_keeps_gates_consistent(self):
+        self.confirm()
+        candidate=self.engine.session_strategy_engine.evaluate.return_value.candidates[0]
+        candidate.trigger_price=10.3
+        candidate.invalidation_price=10.25
+        decision=self.analyze()
+        self.assertEqual(decision.reason,'Latched current candidate was invalidated before entry.')
+        evidence=decision.metadata['latched_quality_refresh']
+        self.assertEqual(evidence['failure_code'],'CURRENT_CANDIDATE_INVALIDATED')
+        self.assertFalse(evidence['gates']['session_strategy'])
+        self.assertFalse(decision.gates['session_strategy'])
+        self.engine.risk_engine.evaluate.assert_not_called()
+
+    def test_refresh_exception_is_not_reported_as_a_measured_quality_rejection(self):
+        self.confirm()
+        self.engine.ai_engine.evaluate.side_effect=TimeoutError('fixture')
+        decision=self.analyze()
+        self.assertEqual(decision.reason,'Latched current quality refresh could not be completed.')
+        self.assertEqual(decision.metadata['latched_quality_refresh']['failure_code'],'NATIVE_QUALITY_REFRESH_ERROR')
+        self.assertFalse(decision.ready_for_execution)
+        self.engine.risk_engine.evaluate.assert_not_called()
+
     def test_ai_deterioration_cannot_reuse_old_buy_permission(self):
         self.confirm()
         self.engine.ai_engine.evaluate.return_value = NS(action='SELL', score=40)

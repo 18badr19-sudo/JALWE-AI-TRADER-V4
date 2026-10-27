@@ -44,6 +44,30 @@ class FactorBenchmarkTests(unittest.TestCase):
         self.assertEqual(result['forward']['cohort_days'],0)
         self.assertFalse(result['automatic_application'])
 
+    def test_late_daily_data_refreshes_same_session_cached_unknown(self):
+        incomplete=copy.deepcopy(self.daily)
+        incomplete['A'].pop()
+        first=self.run_benchmark(incomplete)
+        self.assertEqual(first['retrospective']['all_days']['rules']['ALL_THREE']['matching']['unknown'],1)
+        recovered=self.run_benchmark()
+        self.assertEqual(recovered['retrospective']['all_days']['rules']['ALL_THREE']['matching']['unknown'],0)
+        self.assertEqual(recovered['retrospective']['all_days']['rules']['ALL_THREE']['matching']['reached'],1)
+
+    def test_cache_ignores_transport_order_but_not_changed_price_evidence(self):
+        from unittest.mock import patch
+        first=self.run_benchmark()
+        reordered={symbol:list(reversed(bars)) for symbol,bars in reversed(list(self.daily.items()))}
+        with patch.object(bench,'measure',side_effect=AssertionError('Unchanged evidence must hit cache')):
+            self.assertEqual(first,self.run_benchmark(reordered))
+        corrected=copy.deepcopy(self.daily)
+        corrected['A'][-1]['h']=10.7
+        self.assertEqual(self.run_benchmark(corrected)['retrospective']['all_days']['rules']['ALL_THREE']['matching']['reached'],0)
+
+    def test_changed_universe_invalidates_same_session_cache(self):
+        self.run_benchmark()
+        result=bench.update(self.store,self.daily,self.sessions,['A','C'],self.now,source_session='2026-10-12')
+        self.assertEqual(result['retrospective']['all_days']['rules']['ALL_THREE']['matching']['total'],1)
+
     def test_all_universe_denominators_include_signal_failures_and_nonmatching_winners(self):
         result=self.run_benchmark(); r=result['retrospective']['all_days']['rules']['ALL_THREE']
         self.assertEqual(r['matching'],dict(total=2,reached=1,not_reached=1,unknown=0,known_coverage=1.,reached_frequency=.5))

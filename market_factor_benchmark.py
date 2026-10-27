@@ -70,6 +70,21 @@ def daily_index(daily):
     return indexed
 
 
+def input_fingerprint(indexed):
+    """Hash normalized price evidence, not transport order or unrelated metadata.
+
+    Invalid/duplicate symbol-days already map to None in daily_index. They must
+    stay unknown; a later valid read may invalidate the cached comparison.
+    """
+    payload={symbol:{day:None if bar is None else
+        {key:bar[key] for key in ('o','h','l','c','v')}
+        for day,bar in days.items()} for symbol,days in indexed.items()}
+    digest=hashlib.sha256()
+    for chunk in json.JSONEncoder(sort_keys=True,separators=(',',':'),allow_nan=False).iterencode(payload):
+        digest.update(chunk.encode())
+    return digest.hexdigest()
+
+
 def paired(records, day, rule):
     """Seal matching using pre-day price/liquidity buckets, never target outcomes."""
     groups = defaultdict(lambda: ([],[]))
@@ -196,15 +211,17 @@ def update(store, daily, sessions, symbols, now, *, clock=None, source_session=N
     mature=[s for s in sessions if utc(s['close'])+DELAY<=now]
     with store.connect() as conn:
         cohort_keys=[r[0] for r in conn.execute('SELECT key FROM move_state WHERE key LIKE ? ORDER BY key',(PREFIX+'%',))]
-    cache_key=dict(spec_hash=SPEC,statistics_spec=statistics.SPEC,mature_through=mature[-1]['date'] if mature else None,
+    indexed=daily_index(daily)
+    universe=sorted(set(symbols))
+    cutoff=(now.astimezone(NY).date()-timedelta(days=30)).isoformat()
+    cache_key=dict(input_fingerprint=input_fingerprint(indexed),universe=universe,
+                   sessions=sessions,window_start=cutoff,defined_at=fixed['defined_at'],
+                   statistics_defined_at=statistics_definition['defined_at'],spec_hash=SPEC,statistics_spec=statistics.SPEC,mature_through=mature[-1]['date'] if mature else None,
                    source_session=source_session,cohorts=cohort_keys)
     saved=store.state('daily_factor_benchmark')
     if saved and saved.get('cache_key')==cache_key:
         return saved
-    indexed=daily_index(daily)
     historical=[]
-    cutoff=(now.astimezone(NY).date()-timedelta(days=30)).isoformat()
-    universe=sorted(set(symbols))
     band_days={}
     for i,s in enumerate(sessions):
         if i<2 or s['date']<cutoff or utc(s['close'])+DELAY>now:

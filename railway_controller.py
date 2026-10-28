@@ -2770,11 +2770,11 @@ def handle(text: str, requested_by=None) -> Any:
         from prior_day_entry_study import stock_trace_text
         args=cmd.split()
         if not 2<=len(args)<=3:
-            return 'اكتب: /research_stock SHFS 20            from stock_decision_evidence import stock_decision_text
-            details += '\n\n'+stock_decision_text(args[1],args[2])
-26-10-22'
+            return 'اكتب: /research_stock SHFS 2026-10-22'
         details=stock_research_text(args[1],args[2] if len(args)==3 else None)
         if len(args)==3:
+            from stock_decision_evidence import stock_decision_text
+            details += '\n\n'+stock_decision_text(args[1],args[2])
             details += '\n\n'+stock_trace_text(args[1],args[2])
             from archival_entry_research import stock_text as archive_stock_text
             archive=archive_stock_text(args[1],args[2])

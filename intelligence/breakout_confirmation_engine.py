@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+import math
 from typing import Any, Optional
 
 import pandas as pd
@@ -197,6 +198,18 @@ class BreakoutConfirmationEngine:
 
         data = bars.copy()
 
+        # Reject corrupt evidence instead of dropping the newest candle and
+        # silently confirming an older breakout. Never manufacture missing bars.
+        if isinstance(data.index, (pd.RangeIndex, pd.MultiIndex)):
+            raise ValueError('Invalid breakout candle timestamps.')
+        stamps = pd.to_datetime(data.index, utc=True, errors='coerce')
+        if stamps.isna().any() or stamps.has_duplicates:
+            raise ValueError('Invalid or duplicate breakout candle timestamps.')
+        data.index = stamps
+        if any(type(v).__name__ in {'bool', 'bool_'}
+               for v in data[list(required)].to_numpy().flat):
+            raise ValueError('Boolean breakout OHLCV evidence.')
+
         for column in required:
 
             data[column] = pd.to_numeric(
@@ -204,15 +217,14 @@ class BreakoutConfirmationEngine:
                 errors="coerce",
             )
 
-        data = data.dropna(
-            subset=[
-                "open",
-                "high",
-                "low",
-                "close",
-                "volume",
-            ]
-        )
+        if not all(math.isfinite(float(v)) for v in data[list(required)].to_numpy().flat):
+            raise ValueError('Non-finite breakout OHLCV evidence.')
+        prices = data[['open', 'high', 'low', 'close']]
+        if ((prices <= 0).any().any() or (data['volume'] < 0).any()
+                or (data['low'] > data[['open', 'close']].min(axis=1)).any()
+                or (data['high'] < data[['open', 'close']].max(axis=1)).any()
+                or (data['high'] < data['low']).any()):
+            raise ValueError('Invalid breakout candle price/volume geometry.')
 
         if len(data) < 5:
 

@@ -57,6 +57,7 @@ class RetainedSipEvidenceTests(unittest.TestCase):
         self.assertEqual(history['previous_result_json'], before['result_json'])
         self.assertEqual(self.market.get_research_observation_bars.call_count, 2)
         self.assertIn('مكتملة منها 1', self.research.report_for_ny_date('2026-10-02'))
+        self.assertIn('نوافذ لها أدلة محفوظة 1', self.research.report_for_ny_date('2026-10-02'))
         audit = self.research.completed_audit_for_ny_date('2026-10-02')
         self.assertEqual(audit['records'][0]['evidence_recovery']['retained_minutes'], 1)
 

@@ -145,8 +145,9 @@ class ArchiveTests(unittest.TestCase):
         with patch('market_move_research.read_packet',return_value=data):
             self.assertIn('اختبار الأرشيف',controller.handle('/research_archive'))
         with (patch('market_research_findings.stock_research_text',return_value='study'),
+              patch('scanner_evidence.stock_scan_text',return_value='scan'),
               patch('stock_decision_evidence.stock_decision_text',return_value='decisions'),
               patch('prior_day_entry_study.stock_trace_text',return_value='trace'),
               patch('archival_entry_research.stock_text',return_value='archive') as read):
-            self.assertEqual(controller.handle('/research_stock SHFS 2026-10-22'),'study\n\ndecisions\n\ntrace\n\narchive')
+            self.assertEqual(controller.handle('/research_stock SHFS 2026-10-22'),'study\n\nscan\n\ndecisions\n\ntrace\n\narchive')
             read.assert_called_once_with('SHFS','2026-10-22')

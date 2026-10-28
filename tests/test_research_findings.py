@@ -90,9 +90,11 @@ class FindingsTests(unittest.TestCase):
         import railway_controller as controller
         with (patch('market_move_research.read_packet',return_value=packet()),
               patch('market_research_findings.stock_research_text',return_value='saved study') as read,
-              patch('prior_day_entry_study.stock_trace_text',return_value='saved chain') as chain):
+              patch('prior_day_entry_study.stock_trace_text',return_value='saved chain') as chain,
+              patch('stock_decision_evidence.stock_decision_text',return_value='saved decisions') as native):
             self.assertIn('ماذا عرف',controller.handle('/research_findings'))
-            self.assertEqual(controller.handle('/research_stock TEST 2026-10-12'),'saved study\n\nsaved chain')
+            self.assertEqual(controller.handle('/research_stock TEST 2026-10-12'),'saved study\n\nsaved decisions\n\nsaved chain')
+            native.assert_called_once_with('TEST','2026-10-12')
             read.assert_called_once_with('TEST','2026-10-12')
             chain.assert_called_once_with('TEST','2026-10-12')
 

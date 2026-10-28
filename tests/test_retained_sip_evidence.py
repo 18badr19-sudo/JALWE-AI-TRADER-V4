@@ -57,8 +57,13 @@ class RetainedSipEvidenceTests(unittest.TestCase):
         self.assertEqual(history['previous_result_json'], before['result_json'])
         self.assertEqual(self.market.get_research_observation_bars.call_count, 2)
         self.assertIn('مكتملة منها 1', self.research.report_for_ny_date('2026-10-02'))
+        self.assertIn('نوافذ لها أدلة محفوظة 1', self.research.report_for_ny_date('2026-10-02'))
         audit = self.research.completed_audit_for_ny_date('2026-10-02')
         self.assertEqual(audit['records'][0]['evidence_recovery']['retained_minutes'], 1)
+
+    def test_empty_retention_container_is_not_counted_as_saved_candles(self):
+        self.observe(self.frame().iloc[:0])
+        self.assertIn('نوافذ لها أدلة محفوظة 0', self.research.report_for_ny_date('2026-10-02'))
 
     def test_restart_retains_observed_bars_without_rewriting_decision_inputs(self):
         with self.db.connection() as conn:

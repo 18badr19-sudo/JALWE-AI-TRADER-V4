@@ -294,6 +294,9 @@ class DelayedSipResearch:
         if coverage:
             lines.append(coverage)
         recovered = [(row, json.loads(row.get("result_json") or "{}")) for row in rows]
+        retained_count = sum(bool((result.get('bar_evidence') or {}).get('minutes')) for _, result in recovered)
+        lines.append(f'حفظ شموع SIP الفعلية بين إعادة الفحص: مفعّل | نوافذ لها أدلة محفوظة {retained_count}. '
+                     'نفس السهم والنافذة والمصدر فقط؛ لا تُملأ دقيقة غائبة، وفشل الطلب لا يثبت اكتمالها.')
         recovered = [(row, result) for row, result in recovered
                      if (result.get("evidence_recovery") or {}).get("retained_minutes", 0) > 0]
         if recovered:

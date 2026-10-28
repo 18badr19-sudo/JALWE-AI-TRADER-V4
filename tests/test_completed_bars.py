@@ -92,6 +92,26 @@ class CompletedBarTests(unittest.TestCase):
         self.assertEqual(result.attrs['bar_fetch_diagnostics']['numeric_rows_removed'],1)
         self.assertEqual(result.attrs['completed_bar_diagnostics']['excluded_rows'],0)
         self.assertEqual(result.index[-1],pd.Timestamp('2026-09-30T14:05:00Z'))
+        # Unlike the still-open 14:10 row above, a corrupt completed 14:05
+        # candle must not be silently replaced with the older 14:00 candle.
+        corrupt_completed=self.bars().iloc[:-1].copy()
+        corrupt_completed['close']=corrupt_completed['close'].astype(object)
+        corrupt_completed.loc[corrupt_completed.index[-1],'close']='invalid'
+        client.get_stock_bars.return_value=SimpleNamespace(df=corrupt_completed)
+        with self.assertRaisesRegex(RuntimeError,'Latest completed market bar'):
+            ns['get_bars'](fake,'TEST','5m',51)
+        for column in ('open','high','low','close','volume'):
+            with self.subTest(column=column):
+                corrupt_completed=self.bars().iloc[:-1].copy()
+                corrupt_completed.loc[corrupt_completed.index[-1],column]=float('nan')
+                client.get_stock_bars.return_value=SimpleNamespace(df=corrupt_completed)
+                with self.assertRaisesRegex(RuntimeError,'Latest completed market bar'):
+                    ns['get_bars'](fake,'TEST','5m',51)
+        # A corrupt older historical row retains the existing drop policy,
+        # while the latest completed timestamp must remain exact.
+        older=self.bars();older.loc[older.index[-3],'close']=float('nan')
+        client.get_stock_bars.return_value=SimpleNamespace(df=older)
+        self.assertEqual(ns['get_bars'](fake,'TEST','5m',51).index[-1],pd.Timestamp('2026-09-30T14:05:00Z'))
         old=self.bars();old.index=old.index-timedelta(days=3)
         client.get_stock_bars.return_value=SimpleNamespace(df=old)
         result=ns['get_bars'](fake,'TEST','5m',51)

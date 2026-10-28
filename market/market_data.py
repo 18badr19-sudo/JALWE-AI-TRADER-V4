@@ -366,6 +366,12 @@ class MarketData:
                 f"{sorted(missing_columns)}"
             )
 
+        # Preserve the identity of the latest usable interval before numeric
+        # cleaning. A corrupt closed candle must not disappear and expose an
+        # older candle as if it were the latest observation.
+        raw_completed = completed_intraday_bars(df, timeframe, end)
+        latest_completed_index = raw_completed.index[-1] if not raw_completed.empty else None
+
         numeric_columns = [
             "open",
             "high",
@@ -394,6 +400,9 @@ class MarketData:
                 "volume",
             ]
         )
+
+        if latest_completed_index is not None and latest_completed_index not in df.index:
+            raise MarketDataError(f"Latest completed market bar has invalid OHLCV for {symbol}")
 
         if df.empty:
             raise MarketDataError(

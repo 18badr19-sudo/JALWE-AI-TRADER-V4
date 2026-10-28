@@ -1206,6 +1206,14 @@ class DecisionEngine:
             symbol, timeframe, bar_limit, bars, features, feature_diagnostics)
         if refresh_evidence is not None:
             base_metadata["freshness_refresh"] = refresh_evidence
+        # Retain the exact fetch/completion evidence with the decision, rather
+        # than requiring short-lived deployment logs to explain stale bars.
+        base_metadata["bar_source_evidence"] = {
+            "fetch": dict(bars.attrs.get("bar_fetch_diagnostics", {})),
+            "completion": dict(bars.attrs.get("completed_bar_diagnostics", {})),
+            "timeframe": timeframe,
+            "feed": base_metadata.get("decision_data_feed", "unknown"),
+        }
         if features.data_is_stale:
             logger.info("FEATURE_FRESHNESS_DIAGNOSTIC %s", json.dumps({
                 "symbol": symbol, "timeframe": timeframe,

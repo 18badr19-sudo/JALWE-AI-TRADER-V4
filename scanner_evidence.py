@@ -16,7 +16,41 @@ FIELDS={'symbol','stage','reason','observed_price','bar_at','bar_age_s','trade_a
         'rank','rank_score','radar_limit','deep_limit','pre_score','confidence',
         'score','minimum','watch_threshold','early_surge_priority','prior_day_priority'}
 FIELDS.update({'min_price','max_price','bar_refresh','snapshot_bar_at','snapshot_bar_age_s'})
-_queue=queue.Queue(maxsize=32)
+class EvidenceQueue(queue.Queue):
+    """Bound both pending packet count and retained row count."""
+    def __init__(self, maxsize=256, max_rows=40000):
+        super().__init__(maxsize=maxsize)
+        self.max_rows = max_rows
+        self.pending_rows = 0
+
+    def _put(self, packet):
+        rows = len(packet['rows'])
+        if self.pending_rows + rows > self.max_rows:
+            raise queue.Full
+        super()._put(packet)
+        self.pending_rows += rows
+
+    def _get(self):
+        packet = super()._get()
+        self.pending_rows -= len(packet['rows'])
+        return packet
+
+    def get_batch(self):
+        # Take one bounded group atomically, even if producers refill concurrently.
+        with self.not_empty:
+            while not self._qsize():
+                self.not_empty.wait()
+            packets=[]
+            rows=0
+            while self._qsize() and len(packets)<32:
+                size=len(self.queue[0]['rows'])
+                if rows+size>40000:break
+                packets.append(self._get())
+                rows+=size
+            self.not_full.notify_all()
+            return packets
+
+_queue=EvidenceQueue()
 _lock=threading.Lock()
 _thread=None
 
@@ -42,10 +76,15 @@ def normalize(scan_id,feed,rows,now):
     stamp=now.astimezone(timezone.utc).isoformat()
     return dict(batch=batch,day=day,at=stamp,scan_id=scan_id,feed=str(feed)[:20],rows=[clean[k] for k in canonical])
 
-def write(packet,*,dsn=None):
-    """One atomic batch; duplicate retries do not add observation counts."""
+def write_many(packets,*,dsn=None):
+    """Commit a bounded group on one connection; preserve each batch identity."""
+    packets=list(packets)
+    if not packets:return []
+    if len(packets)>32 or sum(len(p['rows']) for p in packets)>40000:
+        raise ValueError('WRITE_BATCH_LIMIT')
     from prior_day_priority_bus import connect
     from psycopg2.extras import execute_values
+    results=[]
     with closing(connect(dsn)) as conn, conn:
         with conn.cursor() as c:
             c.execute('''CREATE TABLE IF NOT EXISTS apex_scan_evidence_batches
@@ -55,41 +94,53 @@ def write(packet,*,dsn=None):
                  first_at TIMESTAMPTZ NOT NULL,last_at TIMESTAMPTZ NOT NULL,observations BIGINT NOT NULL,
                  first_json TEXT NOT NULL,last_json TEXT NOT NULL,
                  PRIMARY KEY(day,symbol,stage,reason))''')
-            c.execute('INSERT INTO apex_scan_evidence_batches VALUES (%s,%s) ON CONFLICT DO NOTHING RETURNING batch',
-                      (packet['batch'],packet['at']))
-            if not c.fetchone():return dict(state='DUPLICATE',rows=0)
-            grouped={}
-            for row in packet['rows']:
-                key=(row['symbol'],row['stage'],row['reason'])
-                # Same stage/reason appears once per batch, even if input repeats.
-                grouped.setdefault(key,row)
-            values=[]
-            for (symbol,stage,reason),row in grouped.items():
-                payload=json.dumps(dict(row,scan_id=packet['scan_id'],feed=packet['feed'],at=packet['at']),allow_nan=False)
-                values.append((packet['day'],symbol,stage,reason,packet['at'],packet['at'],1,payload,payload))
-            if values:
-                execute_values(c,'''INSERT INTO apex_scan_evidence VALUES %s
-                    ON CONFLICT(day,symbol,stage,reason) DO UPDATE SET
-                    first_json=CASE WHEN EXCLUDED.first_at<apex_scan_evidence.first_at THEN EXCLUDED.first_json ELSE apex_scan_evidence.first_json END,
-                    last_json=CASE WHEN EXCLUDED.last_at>=apex_scan_evidence.last_at THEN EXCLUDED.last_json ELSE apex_scan_evidence.last_json END,
-                    first_at=LEAST(apex_scan_evidence.first_at,EXCLUDED.first_at),
-                    last_at=GREATEST(apex_scan_evidence.last_at,EXCLUDED.last_at),
-                    observations=apex_scan_evidence.observations+1''',values,page_size=256)
+            for packet in packets:
+                c.execute('INSERT INTO apex_scan_evidence_batches VALUES (%s,%s) ON CONFLICT DO NOTHING RETURNING batch',
+                          (packet['batch'],packet['at']))
+                if not c.fetchone():
+                    results.append(dict(state='DUPLICATE',rows=0,scan_id=packet['scan_id']))
+                    continue
+                grouped={}
+                for row in packet['rows']:
+                    key=(row['symbol'],row['stage'],row['reason'])
+                    # Same stage/reason appears once per batch, even if input repeats.
+                    grouped.setdefault(key,row)
+                values=[]
+                for (symbol,stage,reason),row in grouped.items():
+                    payload=json.dumps(dict(row,scan_id=packet['scan_id'],feed=packet['feed'],at=packet['at']),allow_nan=False)
+                    values.append((packet['day'],symbol,stage,reason,packet['at'],packet['at'],1,payload,payload))
+                if values:
+                    execute_values(c,'''INSERT INTO apex_scan_evidence VALUES %s
+                        ON CONFLICT(day,symbol,stage,reason) DO UPDATE SET
+                        first_json=CASE WHEN EXCLUDED.first_at<apex_scan_evidence.first_at THEN EXCLUDED.first_json ELSE apex_scan_evidence.first_json END,
+                        last_json=CASE WHEN EXCLUDED.last_at>=apex_scan_evidence.last_at THEN EXCLUDED.last_json ELSE apex_scan_evidence.last_json END,
+                        first_at=LEAST(apex_scan_evidence.first_at,EXCLUDED.first_at),
+                        last_at=GREATEST(apex_scan_evidence.last_at,EXCLUDED.last_at),
+                        observations=apex_scan_evidence.observations+1''',values,page_size=256)
+                results.append(dict(state='SAVED',rows=len(values),scan_id=packet['scan_id']))
             # Time-bounded retained history, independent of research trial expiry.
             c.execute('DELETE FROM apex_scan_evidence WHERE day<%s',
-                      ((datetime.fromisoformat(packet['day']).date()-timedelta(days=14)).isoformat(),))
+                      ((max(datetime.fromisoformat(p['day']).date() for p in packets)-timedelta(days=14)).isoformat(),))
             c.execute("DELETE FROM apex_scan_evidence_batches WHERE seen_at<CURRENT_TIMESTAMP-INTERVAL '14 days'")
-    return dict(state='SAVED',rows=len(values))
+    return results
+
+def write(packet,*,dsn=None):
+    return write_many([packet],dsn=dsn)[0]
+
+def _work_once():
+    packets=_queue.get_batch()
+    try:
+        results=write_many(packets)
+        for result in results:
+            LOG.info('SCANNER_EVIDENCE_SAVED %s',json.dumps(result))
+    except Exception as exc:
+        LOG.warning('SCANNER_EVIDENCE_UNAVAILABLE %s packets=%s evidence_gap=true',
+                    type(exc).__name__,len(packets))
+    finally:
+        for _ in packets:_queue.task_done()
 
 def _work():
-    while True:
-        packet=_queue.get()
-        try:
-            result=write(packet)
-            LOG.info('SCANNER_EVIDENCE_SAVED %s',json.dumps(dict(result,scan_id=packet['scan_id'])))
-        except Exception as exc:
-            LOG.warning('SCANNER_EVIDENCE_UNAVAILABLE %s',type(exc).__name__)
-        finally:_queue.task_done()
+    while True:_work_once()
 
 def submit(scan_id,feed,rows):
     if not os.getenv('DATABASE_URL',''):return 'NO_SHARED_DATABASE'

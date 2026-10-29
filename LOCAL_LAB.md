@@ -24,3 +24,11 @@ This is an executable testing environment, not a second continuously running tra
 6. Do not weaken entry/risk/stop gates to generate samples. PAPER only; LIVE stays disabled.
 
 No automated merge or production deployment is configured by this lab.
+
+## OS-isolated execution
+
+Run `python tools/run_container_lab.py` with Docker, or use the **Offline laboratory** workflow on the lab branch. There is no fallback if Docker is unavailable. The trusted harness builds an image from reviewed dependency requirements and Python source only; it does not execute bot source during build. Dependency downloads happen during build. Tests run afterward with network `none`, a read-only root, UID 65532, no capabilities, no-new-privileges, no host bind mounts or credentials, 2 CPU/2 GiB/128 process limits, and a 256 MiB temporary filesystem. Container configuration and actual kernel restrictions are checked before the bot modules are loaded. The container is deleted afterward.
+
+The offline test suite still skips PostgreSQL checks: separate full CI uses a disposable PostgreSQL container. Do not connect the offline container to production to remove those skips.
+
+Trust/review this harness, its verification script, dependencies and workflow; do not let untrusted submissions replace them. No host Docker socket is mounted. This substantially strengthens process isolation but containers share the host kernel and are not a guarantee against hostile kernel exploits. Use disposable hosted runners for suspicious code. This workflow uses no Railway service or paid data API; GitHub Actions remains subject to your account's usage limits.

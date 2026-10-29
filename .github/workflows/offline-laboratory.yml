@@ -1,0 +1,17 @@
+name: Offline laboratory
+on:
+  push:
+    branches: [lab/paper-isolated]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  isolated-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build trusted dependencies and run offline container
+        run: python3 tools/run_container_lab.py

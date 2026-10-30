@@ -2815,6 +2815,22 @@ class Database:
             default=str,
         )
 
+        # These daily aggregate reports are retained in the research store.
+        # Avoid copying them into every decision event; preserve the caller's
+        # complete payload for scoring, publication and subsequent consumers.
+        if event_type == "APEX_RESEARCH_DECISION":
+            event_metadata = json.loads(metadata_json)
+            research = event_metadata
+            for key in ("jalwe", "metadata", "market_move_research"):
+                research = research.get(key) if isinstance(research, dict) else None
+            if isinstance(research, dict) and any(
+                key in research
+                for key in ("factor_benchmark", "historical_jump_profiles")
+            ):
+                research.pop("factor_benchmark", None)
+                research.pop("historical_jump_profiles", None)
+                metadata_json = json.dumps(event_metadata, default=str)
+
         with self.connection() as conn:
 
             conn.execute(
@@ -2841,3 +2857,4 @@ class Database:
 # ============================================================
 
 database = Database()
+

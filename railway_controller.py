@@ -301,12 +301,13 @@ def read_persistence_probe() -> dict[str, Any]:
 
 
 def storage_status_text() -> str:
+    from core.disk_monitor import storage_space_text
     payload = read_persistence_probe()
 
     if not payload:
         return (
             "💾 فحص التخزين\n\n"
-            "لا يوجد Persistence Probe حتى الآن."
+            "لا يوجد Persistence Probe حتى الآن.\n" + storage_space_text(DATA_DIR)
         )
 
     data_dir = str(
@@ -352,6 +353,8 @@ def storage_status_text() -> str:
 
     return (
         "💾 فحص التخزين الدائم\n\n"
+        + storage_space_text(DATA_DIR) + "\n"
+        +
         f"📁 DATA_DIR: {data_dir}\n"
         f"✅ المسار /app/data: {'نعم' if path_ok else 'لا'}\n"
         f"🆔 Probe ID: {probe_id}\n"
@@ -3094,6 +3097,10 @@ def main() -> None:
             f"Startup Telegram message failed: {exc}",
             flush=True,
         )
+
+    from core.disk_monitor import DiskMonitor
+    DiskMonitor(DATA_DIR, send_message, lambda: ERROR_ALERTS_ENABLED).start()
+    print("Disk monitor started: checks every 60s; thresholds 80/90/95%", flush=True)
 
     offset = 0
     telegram_conflict_started_at: Optional[float] = None

@@ -593,6 +593,23 @@ def read_packet(symbol=None, *, now=None, path=None):
         return None
 
 
+def priority_link_report_lines(link, now=None):
+    """Render saved publication separately from the trial's current lifetime."""
+    from prior_day_priority_bus import START, END
+    now = now if now is not None else datetime.now(timezone.utc)
+    expired = now >= utc(END)
+    if not link and not expired:
+        return []
+    current = ('انتهت التجربة' if expired else 'لم تبدأ التجربة' if now < utc(START)
+               else 'ضمن مدة التجربة؛ وصول الترشيحات الحالية غير متحقق هنا')
+    lines = [f'🔗 ربط تجربة العوامل بـAPEX — الحالة الحالية: {current}']
+    if link:
+        label = 'آخر نشر ناجح محفوظ' if link.get('state') == 'PUBLISHED' else 'آخر حالة محفوظة'
+        lines.append(f"  {label}: {link.get('state')} | مرشحة {link.get('eligible',link.get('signals',0))} | جلسة {link.get('session_day','غير متاحة')}")
+    lines.append('السجل المحفوظ تاريخي؛ لا يثبت وصول ترشيحات اليوم أو السماح بالشراء.')
+    return lines
+
+
 def report_text(packet):
     if packet is None:
         return '🔬 مسار أبحاث الحركات: ينتظر تقريرًا حديثًا.'
@@ -660,10 +677,7 @@ def report_text(packet):
         lines.append('الفترات التاريخية الأولى واللاحقة منفصلة، وتبقى بحثًا بأثر رجعي. العينات المستقبلية منفصلة؛ لا أفضلية مثبتة أو تطبيق تلقائي.')
     from market_factor_statistics import report_lines as statistics_report
     lines.extend(statistics_report(benchmark,packet.get('news_statistics',{})))
-    link=packet.get('priority_link',{})
-    if link:
-        lines.append(f"🔗 ربط الباحث بـAPEX: {link.get('state')} | مرشحة {link.get('eligible',link.get('signals',0))} | جلسة {link.get('session_day','غير متاحة')}")
-        lines.append('مقاعد محدودة داخل الرادار والتحليل العميق؛ لا تتجاوز فحوص الجودة أو تسمح بشراء مباشر.')
+    lines.extend(priority_link_report_lines(packet.get('priority_link', {})))
     entry=packet.get('entry_study',{})
     if entry:
         states=entry['states']; no_entry=sum(v for k,v in states.items() if k.startswith('NO_') or k=='INVALIDATED_BEFORE_ENTRY')

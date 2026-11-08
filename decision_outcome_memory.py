@@ -5,6 +5,7 @@ or proof that a rejection was wrong. No model weights or trading gates are chang
 """
 from __future__ import annotations
 
+from research_snapshots import compact, load
 import hashlib
 import json
 import logging
@@ -104,6 +105,7 @@ class DecisionOutcomeMemory:
         window_end = window_start + timedelta(minutes=self.HORIZON_MINUTES)
         feed = metadata.get("decision_data_feed") or (metadata.get("quality_inputs") or {}).get("feed")
         with self.db.connection() as conn:
+            stored_payload = compact(conn, payload)
             cursor = conn.execute("""
                 INSERT OR IGNORE INTO decision_outcome_memory (
                     decision_key, symbol, research_version, source_state, reason,
@@ -114,7 +116,7 @@ class DecisionOutcomeMemory:
                   str(decision.get("reason") or ""), decision.get("strategy"),
                   decision.get("market_regime"), decided_at.isoformat(),
                   window_start.isoformat(), window_end.isoformat(), reference, feed,
-                  json.dumps(payload, default=str, ensure_ascii=False),
+                  json.dumps(stored_payload, default=str, ensure_ascii=False),
                   "PENDING" if reference is not None else "UNOBSERVABLE"))
             if cursor.rowcount > 0:
                 self.experiments.record_candidates(conn, payload, key, research_version)
@@ -219,7 +221,7 @@ class DecisionOutcomeMemory:
                 bars = self._valid_bars(frame, start, end)
                 complete = len(bars) == self.HORIZON_MINUTES
                 baseline = float(row["reference_price"])
-                payload = json.loads(row["payload_json"])
+                payload = load(self.db, row["payload_json"])
                 result = {"scope": "OBSERVED_PRICE_PATH_NOT_EXECUTED_PNL",
                           "data_diagnostics": coverage_diagnostics(frame, bars, start, end),
                           "expected_bars": self.HORIZON_MINUTES,
@@ -361,7 +363,7 @@ class DecisionOutcomeMemory:
             if row["reason"] != "OpportunityEngine rejected the setup.":
                 continue
             try:
-                payload = json.loads(row["payload_json"])
+                payload = load(self.db, row["payload_json"])
                 evidence = ((payload.get("jalwe") or {}).get("metadata") or {}).get("opportunity_evidence") or {}
                 score, threshold = float(evidence["score"]), float(evidence["minimum_score"])
                 if math.isfinite(score) and math.isfinite(threshold) and evidence.get("approved") is False:

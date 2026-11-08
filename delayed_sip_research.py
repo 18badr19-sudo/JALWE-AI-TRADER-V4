@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from research_snapshots import compact, expand, load
 import hashlib
 import json
 import logging
@@ -133,7 +134,7 @@ class DelayedSipResearch:
                     try:
                         decided = _utc(row[timestamp])
                         if kind == "DECISION":
-                            decision = json.loads(row["payload_json"])["jalwe"]
+                            decision = expand(conn, json.loads(row["payload_json"]))["jalwe"]
                             reference = _price(row["reference_price"])
                             feed = row.get("data_feed") or "unknown"
                         else:
@@ -154,7 +155,7 @@ class DelayedSipResearch:
                          decision_json, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (obs_key, kind, row[key], row["symbol"], decided.isoformat(),
                          start.isoformat(), end.isoformat(), feed, reference,
-                         json.dumps(decision, default=str),
+                         json.dumps(compact(conn, {"jalwe": decision})["jalwe"], default=str),
                          "PENDING" if reference is not None else "UNOBSERVABLE"))
 
     def update_due(self, *, now=None):
@@ -225,7 +226,7 @@ class DelayedSipResearch:
                               mfe_pct=None if bars.empty else max(0., (float(bars["high"].max()) / baseline - 1) * 100),
                               mae_pct=None if bars.empty else min(0., (float(bars["low"].min()) / baseline - 1) * 100),
                               levels=DecisionOutcomeMemory._level_observation(
-                                  bars, json.loads(row["decision_json"]), complete))
+                                  bars, load(self.db, json.dumps({"jalwe": json.loads(row["decision_json"])}))["jalwe"], complete))
                 status = "COMPLETE" if complete else "PARTIAL_DATA" if terminal else "PENDING"
             except Exception as exc:
                 diagnostics = error_diagnostics(exc)

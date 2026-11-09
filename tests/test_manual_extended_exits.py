@@ -15,6 +15,7 @@ from core.models import BrokerOrder, OrderStatus, TradeSide
 from trading.trade_manager import TradeManager, TradeAction, TradeStage
 from trading.execution_engine import ExecutionEngine
 from trading.exit_sessions import exit_session, sell_limit, prepare_exit_context, settle_exit
+from trading.recovery_engine import RecoveryEngine
 import trading.exit_sessions as sessions
 import jalwe_research_watcher as watcher
 import railway_controller as controller
@@ -209,7 +210,7 @@ class ExtendedSessionTests(unittest.TestCase):
         reconciliation = Mock()
         reconciliation.wait_for_terminal_state.side_effect = [partial,terminal]
         execution = Mock()
-        actual = settle_exit(partial,execution,reconciliation,extended_hours=True)
+        actual = settle_exit(partial,execution,reconciliation)
         execution.broker.cancel_order.assert_called_once_with('x')
         trade = TradeManager().create_trade('TEST',11.66,8,11.58,11.79,11.92,12.05)
         manager = TradeManager()
@@ -218,6 +219,28 @@ class ExtendedSessionTests(unittest.TestCase):
         self.assertEqual(trade.remaining_quantity,6)
         self.assertEqual(trade.t1_realized_quantity,2)
         self.assertFalse(trade.has_pending_exit)
+
+    def test_cancel_error_still_reads_terminal_fill(self):
+        partial = BrokerOrder(symbol='TEST', side=TradeSide.SELL, quantity=3, order_id='race',
+                              status=OrderStatus.PARTIALLY_FILLED, filled_quantity=1, filled_price=11)
+        filled = replace(partial, status=OrderStatus.FILLED, filled_quantity=3)
+        execution, reconciliation = Mock(), Mock()
+        execution.broker.cancel_order.side_effect = RuntimeError('order already filled')
+        reconciliation.wait_for_terminal_state.side_effect = [partial, filled]
+
+        self.assertIs(settle_exit(partial, execution, reconciliation), filled)
+        execution.broker.cancel_order.assert_called_once_with('race')
+
+    def test_settlement_rejects_terminal_snapshot_that_loses_a_known_fill(self):
+        partial = BrokerOrder(symbol='TEST', side=TradeSide.SELL, quantity=3, order_id='stale',
+                              status=OrderStatus.PARTIALLY_FILLED, filled_quantity=1, filled_price=11)
+        execution, reconciliation = Mock(), Mock()
+        reconciliation.wait_for_terminal_state.return_value = replace(
+            partial, status=OrderStatus.CANCELED, filled_quantity=0,
+        )
+        with self.assertRaisesRegex(ValueError, 'cumulative exit fills decreased'):
+            settle_exit(partial, execution, reconciliation)
+        execution.broker.cancel_order.assert_not_called()
 
     def test_extended_preflight_failure_does_not_mark_submission(self):
         engine = ExecutionEngine.__new__(ExecutionEngine)
@@ -291,6 +314,115 @@ class WatcherIntegrationTests(unittest.TestCase):
         self.assertFalse(actual.has_pending_exit)
         self.assertEqual(sync.call_args.args[1].remaining_quantity, 6)
         self.assertAlmostEqual(self.db.get_strategy_realized_pnl_total(), 2.2)
+
+    def test_regular_target_timeout_rearms_after_late_fill_and_cancel(self):
+        sync_stop = watcher._sync_protective_stop
+        execution, reconciliation, market, _, sync = self.fixtures('REGULAR')
+        market.get_trade_range.return_value = {'last': 11.1, 'high': 11.1, 'count': 1}
+        partial = BrokerOrder(symbol='TEST', side=TradeSide.SELL, quantity=3, order_id='regular',
+                              status=OrderStatus.PARTIALLY_FILLED, filled_quantity=1, filled_price=11.1)
+        terminal = replace(partial, status=OrderStatus.CANCELED, filled_quantity=2)
+
+        def submit(**kwargs):
+            kwargs['before_submit']()
+            return partial
+
+        def arm_stop(**kwargs):
+            self.assertEqual(self.db.get_broker_order_row('regular')['status'], 'CANCELED')
+            self.assertEqual(kwargs['quantity'], 6)
+            kwargs['before_submit']()
+            return BrokerOrder(symbol='TEST', side=TradeSide.SELL, quantity=6, order_id='new-stop',
+                               status=OrderStatus.ACCEPTED)
+
+        execution.submit_exit.side_effect = submit
+        execution.submit_protective_stop.side_effect = arm_stop
+        sync.side_effect = sync_stop
+        reconciliation.wait_for_terminal_state.side_effect = [partial, terminal]
+        with patch.object(watcher, 'settings', replace(watcher.settings, BROKER_PROTECTIVE_STOP_ENABLED=True)):
+            watcher.manage_active_paper_trades({})
+
+        execution.broker.cancel_order.assert_called_once_with('regular')
+        trade = self.db.load_managed_trade('t')
+        self.assertFalse(trade.has_pending_exit)
+        self.assertEqual(trade.remaining_quantity, 6)
+        execution.submit_protective_stop.assert_called_once()
+        self.assertTrue(trade.metadata['protective_stop_active'])
+        self.assertEqual(trade.metadata['protective_stop_quantity'], 6)
+        self.assertEqual(self.db.get_broker_order_row('regular')['filled_quantity'], 2)
+        self.assertAlmostEqual(self.db.get_strategy_realized_pnl_total(), 2.2)
+
+    def test_unconfirmed_cancel_keeps_pending_until_restart_rearms_protection(self):
+        execution, reconciliation, market, _, sync = self.fixtures('REGULAR')
+        market.get_trade_range.return_value = {'last': 11.1, 'high': 11.1, 'count': 1}
+        partial = BrokerOrder(symbol='TEST', side=TradeSide.SELL, quantity=3, order_id='restart',
+                              status=OrderStatus.PARTIALLY_FILLED, filled_quantity=1, filled_price=11.1)
+        cancel_pending = replace(partial, metadata={'broker_raw_status': 'pending_cancel'})
+        terminal = replace(partial, status=OrderStatus.CANCELED, filled_quantity=2)
+
+        def submit(**kwargs):
+            kwargs['before_submit']()
+            return partial
+
+        execution.submit_exit.side_effect = submit
+        reconciliation.wait_for_terminal_state.side_effect = [partial, cancel_pending, terminal]
+        watcher.manage_active_paper_trades({})
+        pending = self.db.load_managed_trade('t')
+        self.assertTrue(pending.has_pending_exit)
+        self.assertEqual(pending.remaining_quantity, 7)
+        sync.assert_not_called()
+
+        recovery = RecoveryEngine.__new__(RecoveryEngine)
+        recovery.broker = execution.broker
+        recovery.reconciliation = reconciliation
+        recovery.trade_manager = TradeManager()
+        reconciliation.reconcile_order.return_value = cancel_pending
+        reconciliation.verify_position.return_value = {'exists': True, 'quantity': 6}
+        sync.return_value = {'active': True}
+        market.get_trade_range.reset_mock()
+        with patch('trading.recovery_engine.database', self.db):
+            self.assertTrue(recovery.recover_trade('t', pending)['recovered'])
+        watcher.manage_active_paper_trades({})
+
+        # A cancellation in progress is already owned. No second SELL is sent.
+        execution.broker.cancel_order.assert_called_once_with('restart')
+        execution.submit_exit.assert_called_once()
+        market.get_trade_range.assert_not_called()
+        restored = self.db.load_managed_trade('t')
+        self.assertFalse(restored.has_pending_exit)
+        self.assertEqual(sync.call_args.args[1].remaining_quantity, 6)
+        self.assertEqual(self.db.get_broker_order_row('restart')['status'], 'CANCELED')
+        self.assertAlmostEqual(self.db.get_strategy_realized_pnl_total(), 2.2)
+
+    def test_recovered_stop_price_rejection_keeps_software_stop_available(self):
+        class StopPriceRejected(RuntimeError):
+            status_code = 422
+
+        sync_stop = watcher._sync_protective_stop
+        execution, reconciliation, market, _, sync = self.fixtures('REGULAR')
+        self.trade.remaining_quantity = 6
+        self.trade.metadata.update(last_exit_order_id='previous', protective_stop_active=False)
+        self.db.save_managed_trade('t', self.trade)
+        market.get_trade_range.return_value = {'last': 8.8, 'high': 8.8, 'count': 1}
+        sync.side_effect = sync_stop
+        execution.submit_protective_stop.side_effect = StopPriceRejected(
+            '{"code":42210000,"message":"stop price must be less than current price"}',
+        )
+        filled = BrokerOrder(symbol='TEST', side=TradeSide.SELL, quantity=6, order_id='software-stop',
+                             status=OrderStatus.FILLED, filled_quantity=6, filled_price=8.8)
+
+        def submit(**kwargs):
+            kwargs['before_submit']()
+            return filled
+
+        execution.submit_exit.side_effect = submit
+        reconciliation.wait_for_terminal_state.return_value = filled
+        with patch.object(watcher, 'settings', replace(watcher.settings, BROKER_PROTECTIVE_STOP_ENABLED=True)):
+            watcher.manage_active_paper_trades({})
+
+        self.assertEqual(execution.submit_exit.call_args.kwargs['quantity'], 6)
+        closed = self.db.load_managed_trade('t')
+        self.assertEqual(closed.stage, TradeStage.CLOSED)
+        self.assertEqual(closed.metadata['last_exit_action'], TradeAction.EXIT_STOP.value)
 
     def test_closed_session_keeps_manual_request_and_protection(self):
         request = self.queue.prepare('t', 'owner')

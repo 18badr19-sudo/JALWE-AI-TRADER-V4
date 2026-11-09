@@ -13,6 +13,7 @@ from broker.alpaca_client import get_alpaca_client
 from core.database import database
 from core.models import BrokerOrder, OrderStatus, TradeSide
 from trading.reconciliation_engine import get_reconciliation_engine
+from trading.exit_sessions import cancel_unsettled_exit
 from trading.exit_submission import recover_exit_submission
 from core.lifecycle_audit import checkpoint
 from trading.protective_fills import apply_protective_stop_snapshot
@@ -41,7 +42,8 @@ class RecoveryEngine:
     - Never silently repair broker/database mismatches.
 
     Important:
-    - This engine never submits a new BUY or SELL order; it can cancel unresolved entries.
+    - This engine never submits a new BUY or SELL order. It can cancel unresolved
+      entries and interrupted exits already tracked by JALWE.
     - Active entry orders remain unresolved and block new entries.
     - A partially filled order that is still active remains blocked
       until it becomes terminal or is otherwise resolved.
@@ -288,7 +290,7 @@ class RecoveryEngine:
             side=TradeSide.SELL,
             quantity=quantity,
             order_id=order_id,
-            client_order_id=None,
+            client_order_id=(trade.metadata.get('exit_submission') or {}).get('client_order_id'),
             status=OrderStatus.SUBMITTED,
             requested_price=None,
             filled_price=None,
@@ -815,19 +817,20 @@ class RecoveryEngine:
             try:
                 local_order = self._build_pending_exit_order(trade)
                 broker_order = self.reconciliation.reconcile_order(local_order)
-                if trade.metadata.get('exit_submission', {}).get('extended_hours') and broker_order.status not in {OrderStatus.FILLED, OrderStatus.CANCELED, OrderStatus.REJECTED}:
-                    self.broker.cancel_order(broker_order.order_id)
-                    broker_order = self.reconciliation.reconcile_order(broker_order)
+                # The synchronous wait ended or was interrupted. Resolve the
+                # existing order before a replacement stop can be submitted.
+                broker_order = cancel_unsettled_exit(broker_order, self.broker, self.reconciliation)
+                action = self._value(trade.pending_action) or 'RECOVERED_EXIT'
                 reconciliation_result = self.trade_manager.apply_exit_reconciliation(trade, broker_order)
-                database.save_broker_order(broker_order)
                 new_fill_quantity = int(reconciliation_result.get('new_fill_quantity', 0) or 0)
                 if new_fill_quantity > 0:
                     cumulative_filled = int(reconciliation_result.get('cumulative_filled', 0) or 0)
                     event_key = f'{broker_order.order_id}:{cumulative_filled}'
                     filled_at = getattr(broker_order, 'filled_at', None)
                     event_time = filled_at.isoformat() if filled_at is not None else datetime.now(timezone.utc).isoformat()
-                    action = trade.metadata.get('last_exit_action') or 'RECOVERED_EXIT'
-                    database.record_strategy_pnl_event(trade_state=trade, event_key=event_key, trade_id=trade_id, order_id=broker_order.order_id, symbol=trade.symbol, action=str(action), quantity=new_fill_quantity, fill_price=reconciliation_result.get('fill_price'), entry_price=trade.entry_price, realized_pnl=float(reconciliation_result.get('realized_pnl_increment', 0.0) or 0.0), event_time=event_time, metadata={'source': 'RECOVERY_ENGINE', 'stage': trade.stage.value, 'remaining_quantity': trade.remaining_quantity})
+                    database.record_strategy_pnl_event(trade_state=trade, broker_order_snapshot=broker_order, event_key=event_key, trade_id=trade_id, order_id=broker_order.order_id, symbol=trade.symbol, action=str(action), quantity=new_fill_quantity, fill_price=reconciliation_result.get('fill_price'), entry_price=trade.entry_price, realized_pnl=float(reconciliation_result.get('realized_pnl_increment', 0.0) or 0.0), event_time=event_time, metadata={'source': 'RECOVERY_ENGINE', 'stage': trade.stage.value, 'remaining_quantity': trade.remaining_quantity})
+                elif reconciliation_result.get('updated'):
+                    database.save_broker_order(broker_order)
                 database.save_managed_trade(trade_id, trade)
                 result['pending_reconciled'] = True
                 result['pending_reconciliation'] = reconciliation_result

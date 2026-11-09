@@ -22,6 +22,10 @@ RULES = {
 LABELS = {'VOLUME_RANGE':'نشاط حجم مع نطاق واسع', 'RANGE_MOMENTUM':'نطاق واسع مع زخم يومي',
           'VOLUME_MOMENTUM':'تسارع حجم مع زخم يومي'}
 SPEC = hashlib.sha256(json.dumps(RULES,sort_keys=True).encode()).hexdigest()
+RANGE8_RESEARCH_RULE = 'PRIOR_DAY_RANGE8'
+RANGE8_RESEARCH_PROTOCOL = 'prior-day-range8-forward-v1'
+RANGE8_RESEARCH_CUTOFF = 'range8_forward_defined_at'
+RANGE8_RESEARCH_THRESHOLDS = {'range_pct': 8.}
 MIN_TRAIN_PAIRS, MIN_TRAIN_DAYS = 40, 10
 VALIDATION_DAYS, MIN_VALIDATION_PAIRS, MIN_MATCHED_DAYS = 20, 40, 10
 MIN_COVERAGE = .90
@@ -29,8 +33,9 @@ MIN_COVERAGE = .90
 
 def matches(features, rule):
     """Unavailable inputs stay unknown, not a negative/neutral feature."""
+    thresholds = RANGE8_RESEARCH_THRESHOLDS if rule == RANGE8_RESEARCH_RULE else RULES[rule]
     values = []
-    for key, threshold in RULES[rule].items():
+    for key, threshold in thresholds.items():
         raw = features.get(key)
         if isinstance(raw,bool) or not isinstance(raw,(int,float)) or not math.isfinite(raw):
             return None
@@ -44,8 +49,11 @@ def definition(store, now):
         conn.execute('INSERT OR IGNORE INTO move_state VALUES (?,?)',('pattern_definition',json.dumps(
             dict(protocol=PROTOCOL,spec_hash=SPEC,defined_at=now.isoformat(),rules=RULES))))
         result = json.loads(conn.execute("SELECT value FROM move_state WHERE key='pattern_definition'").fetchone()[0])
-    if result.get('protocol') != PROTOCOL or result.get('spec_hash') != SPEC:
-        raise ValueError('Pattern definition differs from this version')
+        if result.get('protocol') != PROTOCOL or result.get('spec_hash') != SPEC:
+            raise ValueError('Pattern definition differs from this version')
+        if RANGE8_RESEARCH_CUTOFF not in result:
+            result[RANGE8_RESEARCH_CUTOFF] = now.isoformat()
+            conn.execute("UPDATE move_state SET value=? WHERE key='pattern_definition'", (json.dumps(result),))
     return result
 
 
@@ -111,6 +119,19 @@ def qualified(evidence, pairs, days):
         and evidence['known_feature_coverage'] >= MIN_COVERAGE)
 
 
+def range8_forward_evidence(rows, fixed, now):
+    """Assess a fixed research candidate on pairs sealed after its definition."""
+    defined_at = fixed[RANGE8_RESEARCH_CUTOFF]
+    candidates = eligible_rows(rows, defined_at, fixed['defined_at'])
+    mature = [r for r in candidates if now >= utc(r['session']['close']) + timedelta(minutes=16)]
+    groups = paired(mature)
+    evidence = assessment(groups, RANGE8_RESEARCH_RULE)
+    return dict(protocol=RANGE8_RESEARCH_PROTOCOL, defined_at=defined_at,
+        state=('DESCRIPTIVE_COMPARISON_READY' if qualified(evidence, MIN_TRAIN_PAIRS, MIN_TRAIN_DAYS)
+               else 'COLLECTING_FORWARD_EVIDENCE'),
+        mature_pairs=len(groups), **evidence, automatic_application=False, execution_authority=False)
+
+
 def finalized(rows, now):
     return all(now >= utc(r['session']['close'])+timedelta(minutes=16)
         and r['status'] != 'PENDING' and (r['status']=='COMPLETE' or r['attempts']>=3
@@ -170,6 +191,7 @@ def register_frozen_validation(conn, values):
 
 def update(store, rows, now):
     fixed = definition(store,now)
+    range8 = range8_forward_evidence(rows, fixed, now)
     policy = store.state('pattern_policy')
     if policy is None:
         policy = dict(protocol=PROTOCOL,spec_hash=SPEC,generation=1,started_at=fixed['defined_at'],
@@ -178,7 +200,7 @@ def update(store, rows, now):
         raise ValueError('Pattern policy version mismatch')
     if policy['state'] in {'FAILED_VALIDATION','SUSPENDED','EXPIRED'}:
         if now < utc(policy['retired_at'])+timedelta(days=7):
-            return public_policy(policy)
+            return dict(public_policy(policy), range8_forward=range8)
         policy = dict(protocol=PROTOCOL,spec_hash=SPEC,generation=policy['generation']+1,
             started_at=now.isoformat(),state='COLLECTING_TRAINING',mode=MODE,rule=None)
     candidates = eligible_rows(rows,policy['started_at'],fixed['defined_at'])
@@ -230,7 +252,7 @@ def update(store, rows, now):
             policy.update(state='EXPIRED',retired_at=now.isoformat(),reason='POLICY_AGE_LIMIT')
     policy['updated_at'] = now.isoformat()
     store.state('pattern_policy',policy)
-    return public_policy(policy)
+    return dict(public_policy(policy), range8_forward=range8)
 
 
 def active_proof(model, now):

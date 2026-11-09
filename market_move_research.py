@@ -782,6 +782,10 @@ def report_text(packet):
         else:
             lines.append('قواعد مرشحة ثابتة: 3؛ نشاط الحجم، نطاق السعر والزخم من اليوم السابق.')
         lines.append('تعلم ارتباطات وصفية، وليس إثباتًا لأسباب الصعود. التطبيق يرتب الفحص فقط؛ الشراء يمر بالشروط الأصلية.')
+        from market_research_findings import range8_forward_line
+        range8 = range8_forward_line(patterns.get('range8_forward'))
+        if range8:
+            lines.append(range8)
     from core.config import settings
     from market_move_trial import status as trial_status
     trial = trial_status(datetime.now(timezone.utc),paper=settings.PAPER_TRADING,

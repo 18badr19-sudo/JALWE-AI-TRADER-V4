@@ -8,6 +8,7 @@ import tempfile
 
 SUITE = ['test_completed_bars', 'test_feature_freshness', 'test_breakout_bar_integrity', 'test_risk_input_integrity', 'test_entry_submission_phases', 'test_exit_submission_phases', 'test_restart_protective_stop_safety', 'test_target_touch_management', 'test_trade_chain_and_feature_integrity', 'test_paper_safety']
 SUITE.append('test_manual_extended_exits')
+SUITE.extend(['test_market_move_patterns', 'test_research_findings'])
 ROOT = Path(__file__).resolve().parents[1]
 GUARD = r'''import socket, sys
 

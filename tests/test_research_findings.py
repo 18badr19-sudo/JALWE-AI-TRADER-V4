@@ -50,6 +50,15 @@ class FindingsTests(unittest.TestCase):
         self.assertNotIn('None%',text)
         self.assertIn('لا توجد حزمة',findings_text(None))
 
+    def test_range8_candidate_reports_coverage_without_claiming_an_edge(self):
+        data = packet()
+        data['patterns']['range8_forward'] = dict(state='COLLECTING_FORWARD_EVIDENCE',
+            matched_pairs=2,mature_pairs=12,matched_days=1,daily_edge=1.)
+        text = findings_text(data)
+        self.assertIn('نطاق اليوم السابق ≥8% | اختبار مسبق مستقل: 2/12',text)
+        self.assertIn('ينتظر عينة كافية',text)
+        self.assertNotIn('+100.00',text)
+
     def test_prospective_cost_results_show_missing_paths_and_never_become_paper_profit(self):
         data=packet(); data['entry_study']=dict(total=20,
             states=dict(SIMULATED_EXIT=2,UNKNOWN_DATA=14,NO_ENTRY=3,PENDING=1),

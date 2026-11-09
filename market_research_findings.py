@@ -47,7 +47,7 @@ def findings(packet):
         training=dict(state=policy.get('state','UNAVAILABLE'),candidates=policy.get('candidates',{}),
             required_pairs=MIN_TRAIN_PAIRS,required_days=MIN_TRAIN_DAYS,required_coverage=MIN_COVERAGE,
             validation_sessions_seen=policy.get('validation_sessions_seen',0),
-            required_validation_sessions=VALIDATION_DAYS),
+            required_validation_sessions=VALIDATION_DAYS,range8_forward=policy.get('range8_forward')),
         daily_control_comparison=dict(
             retrospective=packet.get('factor_benchmark',{}).get('retrospective',{}).get('all_days',{}).get('rules',{}).get('ALL_THREE',{}),
             forward=packet.get('factor_benchmark',{}).get('forward',{}).get('evidence',{}).get('rules',{}).get('ALL_THREE',{})),
@@ -82,6 +82,18 @@ def controlled_factor_rows(packet):
     return result
 
 
+def range8_forward_line(evidence):
+    if not evidence:
+        return None
+    count = evidence['matched_pairs']
+    line = (f"🧪 نطاق اليوم السابق ≥8% | اختبار مسبق مستقل: {count}/{evidence['mature_pairs']} زوج قابل للمقارنة"
+            f" على {evidence['matched_days']} أيام.")
+    if evidence['state'] != 'DESCRIPTIVE_COMPARISON_READY':
+        return line + ' ينتظر عينة كافية.'
+    edge = evidence['daily_edge'] * 100
+    return line + f' فرق تكرار بلوغ +8% قبل −3%: {edge:+.2f} نقطة مئوية. النتيجة بحثية.'
+
+
 def findings_text(packet):
     if not packet: return '🧠 خلاصة الباحث: لا توجد حزمة بحث حديثة متاحة.'
     value=findings(packet); group=value['selected_jump_group']
@@ -104,6 +116,9 @@ def findings_text(packet):
     for code,row in training['candidates'].items():
         lines.append(f"  {code}: أزواج مؤثرة {row.get('matched_pairs',0)} | أيام {row.get('matched_days',0)} | تغطية {row.get('complete_pair_coverage',0):.1%}")
     lines.append(f"بعد اجتياز التدريب: اختبار على {training['required_validation_sessions']} جلسة جديدة؛ المسجلة حتى الآن {training['validation_sessions_seen']}. اكتمالها وحده لا يضمن اجتياز التقييم.")
+    range8 = range8_forward_line(training['range8_forward'])
+    if range8:
+        lines.append(range8)
     for key,label in (('retrospective','المقارنة اليومية التاريخية'),('forward','المقارنة اليومية المستقبلية')):
         pairs=value['daily_control_comparison'][key].get('pairs',{})
         complete=pairs.get('complete',0)

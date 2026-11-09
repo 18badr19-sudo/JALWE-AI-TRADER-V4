@@ -76,6 +76,33 @@ class PatternTests(unittest.TestCase):
         self.assertEqual(model['state'],'COLLECTING_TRAINING')
         self.assertTrue(all(v['matched_pairs']==0 for v in model['candidates'].values()))
 
+    def test_range8_migration_preserves_training_and_seals_a_new_cutoff(self):
+        old = self.store.state('pattern_definition')
+        del old[patterns.RANGE8_RESEARCH_CUTOFF]
+        self.store.state('pattern_definition',old)
+
+        model = self.train()
+        self.assertEqual(model['range8_forward']['defined_at'],self.train_at.isoformat())
+        self.assertEqual(model['range8_forward']['mature_pairs'],0)
+        self.assertEqual(self.store.state('pattern_definition')['defined_at'],self.defined)
+        self.assertNotIn(patterns.RANGE8_RESEARCH_RULE,model['candidates'])
+
+        day = '2026-09-16'
+        fresh = self.cohorts([day])
+        fresh[0]['result']['outcome'] = 'AMBIGUOUS'
+        fresh[2]['features'].pop('range_pct')
+        fresh[4]['features']['range_pct'] = 8.
+        model = patterns.update(self.store,self.rows+fresh,utc(day+'T21:00:00Z'))
+        result = model['range8_forward']
+        self.assertEqual(result['defined_at'],self.train_at.isoformat())
+        self.assertEqual(result['matched_pairs'],6)
+        self.assertEqual(result['mature_pairs'],8)
+        self.assertEqual(result['daily_edge'],1.)
+        self.assertEqual(result['state'],'COLLECTING_FORWARD_EVIDENCE')
+        self.assertFalse(result['execution_authority'])
+        self.assertFalse(result['automatic_application'])
+        self.assertNotIn('range8_forward',self.store.state('pattern_policy'))
+
     def test_winner_is_sealed_and_requires_twenty_fresh_session_cohorts(self):
         sealed = self.train(); rule = sealed['rule']
         days = pd.bdate_range('2026-09-16',periods=19).strftime('%Y-%m-%d').tolist()

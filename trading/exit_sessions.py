@@ -1,10 +1,15 @@
 """Pre/post-market eligibility and fresh executable SELL limits."""
+import logging
 import math
 from datetime import datetime, time, timezone
 from decimal import Decimal, ROUND_CEILING
 from zoneinfo import ZoneInfo
 
+from core.models import OrderStatus
+
 NY = ZoneInfo('America/New_York')
+logger = logging.getLogger(__name__)
+TERMINAL_EXIT_STATUSES = {OrderStatus.FILLED, OrderStatus.CANCELED, OrderStatus.REJECTED}
 
 
 def utc_now():
@@ -78,11 +83,29 @@ def prepare_exit_context(execution, market_data, trade, decision):
             'quote_at': quote['timestamp'].isoformat()}
 
 
-def settle_exit(order, execution, reconciliation, *, extended_hours=False):
-    from core.models import OrderStatus
-    settled = reconciliation.wait_for_terminal_state(order, timeout_seconds=30.0, poll_interval_seconds=1.0)
-    if extended_hours and settled.status not in {OrderStatus.FILLED, OrderStatus.CANCELED, OrderStatus.REJECTED}:
-        execution.broker.cancel_order(settled.order_id)
-        # Cancellation may race another fill; always fetch and apply its cumulative result.
-        settled = reconciliation.wait_for_terminal_state(settled, timeout_seconds=5.0, poll_interval_seconds=0.5)
+def cancel_unsettled_exit(order, broker, reconciliation):
+    """Cancel an owned exit's remainder, then confirm its cumulative fills."""
+    if order.status in TERMINAL_EXIT_STATUSES:
+        return order
+
+    observed_fills = order.filled_quantity
+    if order.metadata.get('broker_raw_status') != 'pending_cancel':
+        try:
+            broker.cancel_order(order.order_id)
+        except Exception as exc:
+            # A fill can win the race against cancellation. Read the broker
+            # again even if it did not accept the cancellation request.
+            logger.warning('Exit cancellation request failed | order_id=%s error_type=%s',
+                           order.order_id, type(exc).__name__)
+    settled = reconciliation.wait_for_terminal_state(order, timeout_seconds=5.0, poll_interval_seconds=0.5)
+    if settled.filled_quantity < observed_fills:
+        raise ValueError('Broker cumulative exit fills decreased after cancellation.')
     return settled
+
+
+def settle_exit(order, execution, reconciliation):
+    submitted_fills = order.filled_quantity
+    settled = reconciliation.wait_for_terminal_state(order, timeout_seconds=30.0, poll_interval_seconds=1.0)
+    if settled.filled_quantity < submitted_fills:
+        raise ValueError('Broker cumulative exit fills decreased during settlement.')
+    return cancel_unsettled_exit(settled, execution.broker, reconciliation)

@@ -1463,7 +1463,7 @@ class DecisionEngine:
                  'raw_score': c.metadata.get('raw_strategy_score'),
                  'adjustment': c.metadata.get('regime_adjustment'),
                  'routed_score': c.score}
-                for c in routed.candidates
+                for c in getattr(routed, 'candidates', [])
             ],
         }
 

@@ -207,10 +207,11 @@ class PatternTests(unittest.TestCase):
         opening=utc('2026-10-14T13:30:00Z')
         clock=Mock(side_effect=[opening-timedelta(seconds=1),opening])
         self.assertFalse(self.store.save_pattern_features(features,fixtures.session('2026-10-14'),
-            opening-timedelta(seconds=1),clock=clock))
+            opening-timedelta(seconds=1),clock=clock,prior_day='2026-10-13'))
         with self.store.connect() as conn:
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM move_pattern_features').fetchone()[0],0)
         self.assertIsNone(self.store.state('pattern_features:2026-10-14'))
+        self.assertIsNone(self.store.state('range8_watchlist'))
 
     def test_degradation_suspends_and_next_generation_uses_only_new_frozen_data(self):
         self.activate()

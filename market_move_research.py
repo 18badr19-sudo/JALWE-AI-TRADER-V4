@@ -14,6 +14,7 @@ import pandas as pd
 PROTOCOL = 'independent-market-moves-v1'
 NY = ZoneInfo('America/New_York')
 UP_PCT, DOWN_PCT = 8.0, 3.0
+RANGE8_WATCHLIST_LIMIT = 12
 
 
 def utc(value):
@@ -377,7 +378,7 @@ class MoveStore:
             row['result'] = json.loads(row['result_json'] or '{}')
         return rows
 
-    def save_pattern_features(self, features, session, now, *, clock=None):
+    def save_pattern_features(self, features, session, now, *, clock=None, prior_day=None):
         """Persist prior-day inputs once, before open, for all analysis candidates."""
         mark = 'pattern_features:'+session['date']
         with self.connect() as conn:
@@ -387,18 +388,31 @@ class MoveStore:
             stamp = clock() if clock else now
             if stamp >= utc(session['open']):
                 return False
+            available = [f for f in features if utc(f['available_after']) <= stamp]
             values = [(session['date'],f['symbol'],json.dumps(dict(features=f,session=session,
-                prepared_at=stamp.isoformat()),allow_nan=False)) for f in features
-                if utc(f['available_after']) <= stamp]
+                prepared_at=stamp.isoformat()),allow_nan=False)) for f in available]
             conn.executemany('INSERT INTO move_pattern_features VALUES (?,?,?)',values)
             conn.execute('INSERT INTO move_state VALUES (?,?)',(mark,json.dumps(dict(prepared_at=stamp.isoformat()))))
-            if clock and clock() >= utc(session['open']):
-                conn.rollback()
-                return False
+            if prior_day is not None:
+                from market_move_patterns import matches, RANGE8_RESEARCH_RULE
+                candidates = [f for f in available if f.get('evidence_day') == prior_day
+                              and f.get('source_feed') == 'sip' and matches(f,RANGE8_RESEARCH_RULE)
+                              and 0.5 <= f['close'] <= 100 and f['dollar_volume'] >= 100000]
+                candidates.sort(key=lambda f:(-f['dollar_volume'],f['symbol']))
+                shortlist = [{k:f[k] for k in ('symbol','range_pct','close','dollar_volume')}
+                             for f in candidates[:RANGE8_WATCHLIST_LIMIT]]
+                watchlist = dict(session_day=session['date'],prior_day=prior_day,prepared_at=stamp.isoformat(),
+                    session_close=session['close'],source_feed='sip',matched=len(candidates),symbols=shortlist,
+                    execution_authority=False)
+                conn.execute('INSERT OR REPLACE INTO move_state VALUES (?,?)',
+                             ('range8_watchlist',json.dumps(watchlist,allow_nan=False)))
             # Keep immutable pre-open inputs for nomination audits after the
             # next snapshot is prepared. Consumers still select exact days.
             cutoff=(utc(session['open'])-timedelta(days=30)).date().isoformat()
             conn.execute('DELETE FROM move_pattern_features WHERE session_day < ?',(cutoff,))
+            if clock and clock() >= utc(session['open']):
+                conn.rollback()
+                return False
         return True
 
     def retained_evidence(self, key, now):
@@ -513,6 +527,7 @@ class MoveStore:
                 frozen_features=r['features'], result=r['result']) for r in cases],
             diagnostics=aggregate(rows, now),
             patterns=patterns or {'state':'UNAVAILABLE'},
+            range8_watchlist=active_range8_watchlist(self.state('range8_watchlist'),now),
             factor_benchmark=self.state('daily_factor_benchmark') or {},
             news_statistics=news_summary(rows),
             priority_link=self.state('prior_day_bus_status') or {},
@@ -542,6 +557,12 @@ class MoveStore:
 def default_path():
     from core.storage import data_directory
     return data_directory() / 'market_move_research.db'
+
+
+def active_range8_watchlist(watchlist, now):
+    if watchlist and utc(watchlist['prepared_at']) <= now < utc(watchlist['session_close']):
+        return watchlist
+    return {}
 
 
 def read_packet(symbol=None, *, now=None, path=None):
@@ -574,6 +595,7 @@ def read_packet(symbol=None, *, now=None, path=None):
         result['focused_collection'] = packet.get('focused_collection', {})
         result['diagnostics'] = packet.get('diagnostics', {})
         result['patterns'] = packet.get('patterns', {})
+        result['range8_watchlist'] = active_range8_watchlist(packet.get('range8_watchlist'),now)
         result['findings'] = packet.get('findings', {})
         result['factor_benchmark'] = packet.get('factor_benchmark', {})
         result['news_statistics'] = packet.get('news_statistics', {})
@@ -629,6 +651,8 @@ def report_text(packet):
         f"عينات مجمدة قبل الجلسة: {packet['prospective_episodes']} | دراسات صعود لاحقة: {packet['hot_case_episodes']}",
         f"مكتملة: {counts.get('COMPLETE', 0)} | تنتظر: {counts.get('PENDING', 0)} | ناقصة/غير متاحة: {counts.get('PARTIAL_DATA',0)+counts.get('DATA_UNAVAILABLE',0)}",
         f"مقارنات مستقبلية مكتملة: {comp['complete_pairs']} على {comp['unique_days']} أيام | {comparisons.get(comp['state'], 'غير متاح')}"]
+    from market_research_findings import range8_watchlist_lines
+    lines.extend(range8_watchlist_lines(packet.get('range8_watchlist')))
     knowledge=packet.get('findings',{}).get('selected_jump_group',{})
     if knowledge.get('cases'):
         lines.append(f"🧠 صفات مشتركة بين {knowledge['cases']} قفزة مكتملة ≥{knowledge['min_rise_pct']}%:")

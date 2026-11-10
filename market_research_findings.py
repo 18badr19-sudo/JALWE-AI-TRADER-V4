@@ -9,6 +9,8 @@ import sqlite3
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from market_move_research import utc
+
 LABELS = {'VOLUME_BUILDUP':'تسارع الحجم قبل البداية المرصودة',
           'POSITIVE_PRE_MOVE':'زخم موجب قبل البداية المرصودة',
           'ABOVE_CONTEXT_VWAP':'السعر فوق VWAP قبل البداية المرصودة',
@@ -88,16 +90,36 @@ def range8_forward_line(evidence):
     count = evidence['matched_pairs']
     line = (f"🧪 نطاق اليوم السابق ≥8% | اختبار مسبق مستقل: {count}/{evidence['mature_pairs']} زوج قابل للمقارنة"
             f" على {evidence['matched_days']} أيام.")
+    if evidence['mature_pairs'] and 'complete_pair_coverage' in evidence and 'known_feature_coverage' in evidence:
+        line += (f" تغطية المسارات المكتملة وغير الملتبسة {evidence['complete_pair_coverage']:.0%}"
+                 f" | تغطية النطاق المعروف للطرفين {evidence['known_feature_coverage']:.0%}.")
     if evidence['state'] != 'DESCRIPTIVE_COMPARISON_READY':
         return line + ' ينتظر عينة كافية.'
     edge = evidence['daily_edge'] * 100
     return line + f' فرق تكرار بلوغ +8% قبل −3%: {edge:+.2f} نقطة مئوية. النتيجة بحثية.'
 
 
+def range8_watchlist_lines(watchlist, *, details=False):
+    if not watchlist:
+        return ['📋 رصد نطاق ≥8%: لا توجد قائمة محفوظة لجلسة نشطة.']
+    symbols = watchlist['symbols']
+    prepared = utc(watchlist['prepared_at']).astimezone(ZoneInfo('Asia/Riyadh'))
+    lines = [f"📋 رصد نطاق ≥8% لجلسة {watchlist['session_day']} | يوم القياس {watchlist['prior_day']}"
+             f" | حُفظت {prepared:%Y-%m-%d %H:%M} السعودية | {len(symbols)}/{watchlist['matched']} سهم."]
+    if details:
+        lines.append('النطاق = (الأعلى − الأدنى) ÷ الإغلاق. الرصد لإغلاقات بين 0.50 و100 دولار وقيمة تداول تقديرية من 100 ألف دولار، مرتبة بالأعلى سيولة.')
+        lines.extend(f"• {row['symbol']} | نطاق {row['range_pct']:.2f}% | إغلاق ${row['close']:.2f}"
+                     f" | قيمة تداول تقديرية ${row['dollar_volume']:,.0f}" for row in symbols)
+    elif symbols:
+        lines.append('للرصد: '+', '.join(row['symbol'] for row in symbols)+' | التفاصيل /research_findings')
+    return lines
+
+
 def findings_text(packet):
     if not packet: return '🧠 خلاصة الباحث: لا توجد حزمة بحث حديثة متاحة.'
     value=findings(packet); group=value['selected_jump_group']
     lines=['🧠 ماذا عرف الباحث؟']
+    lines.extend(range8_watchlist_lines(packet.get('range8_watchlist'),details=True))
     lines.append(f"قافزون ≥{group['min_rise_pct']}%: {group['cases']} سهم/جلسة مكتملة؛ اختيار بعد الحركة."
                  if group['cases'] else 'لا توجد عينة قفزات مكتملة في الحزمة المقروءة.')
     for row in sorted(group['factors'],key=lambda r:-(r['prevalence_pct'] or 0)):
@@ -191,12 +213,10 @@ def stock_research_text(symbol, day=None, *, path=None):
         profile=path_value.get('profile',{})
         lines=[f'🔎 ماذا عرف الباحث عن {symbol} — {day}؟',f"حالة الدراسة: {row['status']} | الشموع الصحيحة {result.get('observed_minutes','غير معلوم')}/{result.get('expected_minutes','غير معلوم')}"]
         if row.get('checked_at'):
-            from market_move_research import utc
             lines.append('وقت قراءة الدراسة: '+utc(row['checked_at']).astimezone(ZoneInfo('Asia/Riyadh')).strftime('%Y-%m-%d %H:%M')+' السعودية.')
         rise=path_value.get('observed_rise_pct')
         if type(rise) in (int,float) and math.isfinite(rise):
             lines.append(f"المسار المرصود: ${path_value['start_price']:.4f} → ${path_value['peak_price']:.4f} ({rise:+.2f}%).")
-            from market_move_research import utc
             lines.append('البداية المرصودة '+utc(path_value['start_at']).astimezone(ZoneInfo('Asia/Riyadh')).strftime('%H:%M')+
                          '، القمة '+utc(path_value['peak_at']).astimezone(ZoneInfo('Asia/Riyadh')).strftime('%H:%M')+' السعودية؛ ترتيب الحركة داخل الدقيقة غير معلوم.')
         prior=profile.get('prior_day_context',{})

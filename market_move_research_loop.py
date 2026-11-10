@@ -106,20 +106,8 @@ class MoveResearchWorker:
             self.store.state('daily_cache',cache)
         else:
             daily = cache['rows']
-        try:
-            from archival_entry_research import prepare as prepare_archive
-            logger.info('ARCHIVE_ENTRY_PREPARED %s',json.dumps(
-                prepare_archive(self.store,daily,sessions,now),sort_keys=True,allow_nan=False))
-        except Exception as exc:
-            logger.warning('ARCHIVE_ENTRY_UNAVAILABLE %s',type(exc).__name__)
         logger.info('MARKET_JUMP_HISTORY_LOADED %s',json.dumps(dict(
             latest_session=latest['date'],daily_symbols=len(daily),lookback_days=LOOKBACK_DAYS)))
-        # This scheduling-only overlay repairs requests seeded without daily
-        # metadata. It never changes the original episode features/results.
-        request_priority = requested_bounds(daily,closed,now)
-        self.store.state('jump_request_priority',dict(session=latest['date'],bounds=request_priority))
-        logger.info('MARKET_JUMP_REQUEST_PRIORITY %s',json.dumps(dict(
-            session=latest['date'],bounds=request_priority,scope='RETROSPECTIVE_READ_ORDER_ONLY')))
         features_before, features_latest, gains = [], [], []
         for symbol in symbols:
             bars = daily.get(symbol, [])
@@ -136,6 +124,23 @@ class MoveResearchWorker:
                 if (current['daily_return_pct'] >= 8 and before is not None
                         and 0.5 <= before['close'] <= 100 and before['dollar_volume'] >= 100000):
                     gains.append((current['daily_return_pct'],before))
+        # Seal tomorrow's research inputs before processing retrospective work.
+        future = next((s for s in sessions if utc(s['open']) > now), None)
+        preceding = sessions[sessions.index(future)-1] if future is not None and sessions.index(future) else None
+        if future is not None and preceding is not None and preceding['date']==latest['date']:
+            self.store.save_pattern_features(features_latest,future,now,clock=clock,prior_day=preceding['date'])
+        try:
+            from archival_entry_research import prepare as prepare_archive
+            logger.info('ARCHIVE_ENTRY_PREPARED %s',json.dumps(
+                prepare_archive(self.store,daily,sessions,now),sort_keys=True,allow_nan=False))
+        except Exception as exc:
+            logger.warning('ARCHIVE_ENTRY_UNAVAILABLE %s',type(exc).__name__)
+        # This scheduling-only overlay repairs requests seeded without daily
+        # metadata. It never changes the original episode features/results.
+        request_priority = requested_bounds(daily,closed,now)
+        self.store.state('jump_request_priority',dict(session=latest['date'],bounds=request_priority))
+        logger.info('MARKET_JUMP_REQUEST_PRIORITY %s',json.dumps(dict(
+            session=latest['date'],bounds=request_priority,scope='RETROSPECTIVE_READ_ORDER_ONLY')))
         # Retrospective examples are explicitly excluded from forward learning.
         history_mark = 'hot:'+latest['date']
         if self.store.state(history_mark) is None:
@@ -150,10 +155,6 @@ class MoveResearchWorker:
                     self.store.add(matches[0],latest,'CONTROL',pair,now,prospective=False)
             self.store.state(history_mark,{'created_at':now.isoformat(),'selection':'POST_SESSION_CASE_STUDY'})
         # Prepare the next session's cohorts before its open. No same-day retrofit.
-        future = next((s for s in sessions if utc(s['open']) > now), None)
-        preceding = sessions[sessions.index(future)-1] if future is not None and sessions.index(future) else None
-        if future is not None and preceding is not None and preceding['date']==latest['date']:
-            self.store.save_pattern_features(features_latest,future,now,clock=clock)
         if (future is not None and preceding is not None and preceding['date'] == latest['date']
                 and self.store.state('frozen:'+future['date']) is None):
             prepared_pairs = []

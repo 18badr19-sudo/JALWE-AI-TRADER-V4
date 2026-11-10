@@ -53,11 +53,24 @@ class FindingsTests(unittest.TestCase):
     def test_range8_candidate_reports_coverage_without_claiming_an_edge(self):
         data = packet()
         data['patterns']['range8_forward'] = dict(state='COLLECTING_FORWARD_EVIDENCE',
-            matched_pairs=2,mature_pairs=12,matched_days=1,daily_edge=1.)
+            matched_pairs=2,mature_pairs=12,matched_days=1,daily_edge=1.,
+            complete_pair_coverage=.25,known_feature_coverage=.75)
         text = findings_text(data)
         self.assertIn('نطاق اليوم السابق ≥8% | اختبار مسبق مستقل: 2/12',text)
+        self.assertIn('تغطية المسارات المكتملة وغير الملتبسة 25%',text)
+        self.assertIn('تغطية النطاق المعروف للطرفين 75%',text)
         self.assertIn('ينتظر عينة كافية',text)
         self.assertNotIn('+100.00',text)
+
+    def test_watchlist_details_show_previous_session_range_and_liquidity(self):
+        data = packet()
+        data['range8_watchlist'] = dict(session_day='2026-10-23',prior_day='2026-10-22',
+            prepared_at='2026-10-22T20:30:00Z',matched=20,
+            symbols=[dict(symbol='TEST',range_pct=8.5,close=10.,dollar_volume=125000.)])
+        text = findings_text(data)
+        self.assertIn('يوم القياس 2026-10-22',text)
+        self.assertIn('2026-10-22 23:30 السعودية | 1/20',text)
+        self.assertIn('TEST | نطاق 8.50% | إغلاق $10.00 | قيمة تداول تقديرية $125,000',text)
 
     def test_prospective_cost_results_show_missing_paths_and_never_become_paper_profit(self):
         data=packet(); data['entry_study']=dict(total=20,

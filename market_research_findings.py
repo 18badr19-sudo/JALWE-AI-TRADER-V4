@@ -177,8 +177,51 @@ def findings_text(packet):
     if value['pipeline']['native_pnl_available']:
         lines.append(f"PAPER المرتبط: {native.get('unique_trades',0)} صفقة لها مخارج مسجلة؛ المحقق قبل رسوم الوسيط ${native['realized_pnl_before_broker_fees']:+.2f}.")
     else: lines.append('PAPER المرتبط: لم يتوفر دليل خروج مرتبط؛ الربح غير معلوم وليس صفرًا.')
+    if packet.get('historical_jump_profiles',{}).get('pre_onset_study'):
+        lines.append('تفاصيل العوامل قبل القفزات في /jump_factors')
     lines.extend(['التعلم والمقارنة يستمران دون تغيير بوابات الشراء أو المخاطر تلقائيًا.',
                   'للسهم بالتفصيل: /research_stock SHFS 2026-10-22'])
+    return '\n'.join(lines)
+
+
+def jump_factors_text(packet, threshold=25):
+    from market_jump_profiles import VOLUME_TAIL
+    profiles = (packet or {}).get('historical_jump_profiles',{})
+    group = profiles.get('pre_onset_study',{}).get('groups',{}).get(str(threshold))
+    if group is None:
+        return 'دراسة ما قبل القفزة تنتظر حزمة بحث حديثة.'
+    if not group['cases']:
+        return f'لا توجد قفزات مكتملة ≥{threshold}% في نافذة البحث الحالية.'
+    minute_labels = {**LABELS, 'POSITIVE_PRE_MOVE':'ارتفاع السعر ≥1%',
+                     'ABOVE_CONTEXT_VWAP':'الإغلاق عند VWAP النافذة أو فوقه',
+                     'TIGHT_PRE_RANGE':'نطاق الحركة ≤2%'}
+    lines = [f"🔍 العوامل قبل قفزات ≥{threshold}% — {group['cases']} سهم/جلسة مكتملة",
+             'عينة آخر 30 يومًا. نوافذ الدقائق تنتهي قبل دقيقة البداية المرصودة.']
+    for minutes,tail in VOLUME_TAIL.items():
+        window = group['windows'][str(minutes)]
+        lines.append(f"آخر {minutes} دقائق — سياق محفوظ {window['context_cases']}"
+                     f" | بدأت مبكرًا {window['too_early']} | سياق غير متاح {window['unmeasured']}")
+        for factor in window['factors']:
+            code = factor['codes'][0]
+            label = (f'تسارع الحجم ≥2× (آخر {tail} مقابل أول {minutes-tail} دقائق)'
+                     if code=='VOLUME_BUILDUP' else minute_labels[code])
+            lines.append(f"• {label} — ظهر {factor['present']} من {factor['known']} قابل للقياس"
+                         f" | مجهول {factor['unknown']}")
+        shared = window['common_pair']
+        if shared:
+            label = ' + '.join(minute_labels[code] for code in shared['codes'])
+            lines.append(f"أكثر اجتماع مرصود — {label} في {shared['present']}/{shared['known']}"
+                         f" | مجهول {shared['unknown']}")
+    common = profiles.get('common_factors',{})
+    daily = (common.get('all_jumps',{}) if threshold==8 else next(
+        (g for g in common.get('large_jump_groups',[]) if g['min_rise_pct']==threshold),{}))
+    lines.append('عوامل آخر جلسة مكتملة قبل القفزة')
+    for factor in sorted(daily.get('factors',[]),key=lambda f:(-f['present'],-f['known'])):
+        code = factor['codes'][0]
+        if code.startswith('PRIOR_DAY_'):
+            lines.append(f"• {LABELS[code]} — ظهر {factor['present']} من {factor['known']} قابل للقياس"
+                         f" | مجهول {factor['unknown']}")
+    lines.append('القياس وصفي على قافزين اختيروا بعد الحركة. كل نافذة لها عيّنتها.')
     return '\n'.join(lines)
 
 

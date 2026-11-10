@@ -2713,6 +2713,7 @@ def help_text() -> str:
         "/storage - فحص التخزين الدائم /app/data\n"
         "/why_no_trade - تشخيص سبب عدم وجود صفقة\n"
         "/research_findings - خلاصة العوامل وما اجتاز الاختبار\n"
+        "/jump_factors - العوامل المشتركة قبل القفزات (8 أو 25 أو 50 أو 100)\n"
         "/research_archive - اختبار الأرشيف والعوامل مقابل أسهم المقارنة\n"
         "/research_stock SYMBOL YYYY-MM-DD - دراسة سهم وربطه بنتائج PAPER\n"
         "/rejections - أسباب الرفض والانتظار اليوم (تاريخ NY اختياري)\n"
@@ -2761,6 +2762,15 @@ def handle(text: str, requested_by=None) -> Any:
         from market_move_research import read_packet
         from market_research_findings import findings_text
         return findings_text(read_packet())
+
+    if low.split()[0:1] == ['/jump_factors']:
+        from market_jump_profiles import JUMP_THRESHOLDS
+        from market_move_research import read_packet
+        from market_research_findings import jump_factors_text
+        args = cmd.split()[1:]
+        if len(args)>1 or (args and args[0] not in map(str,JUMP_THRESHOLDS)):
+            return 'اختر عتبة قفزة 8 أو 25 أو 50 أو 100. مثال /jump_factors 50'
+        return jump_factors_text(read_packet(),int(args[0]) if args else 25)
 
     if low == '/research_archive':
         from market_move_research import read_packet

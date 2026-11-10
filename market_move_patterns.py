@@ -39,7 +39,9 @@ def matches(features, rule):
         raw = features.get(key)
         if isinstance(raw,bool) or not isinstance(raw,(int,float)) or not math.isfinite(raw):
             return None
-        values.append(raw >= threshold)
+        # A range computed from decimal quotes can land just below 8% in binary floats.
+        values.append(raw >= threshold or (rule == RANGE8_RESEARCH_RULE
+            and math.isclose(raw,threshold,rel_tol=0,abs_tol=1e-12)))
     return all(values)
 
 

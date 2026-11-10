@@ -103,7 +103,8 @@ class StoreTests(unittest.TestCase):
 
     def test_watchlist_ranks_only_available_prior_sip_and_expires_at_close(self):
         s = session()
-        base = dict(feature(),range_pct=8.)
+        # A 0.80 range on a $10 close lands a few float ULPs below 8.
+        base = dict(feature(),range_pct=100*(10.20-9.40)/10.)
         eligible = [dict(base,symbol=f'R{i:02}',dollar_volume=1000000.+i//2) for i in range(14)]
         ineligible = [
             dict(base,symbol='NARROW',range_pct=7.99),

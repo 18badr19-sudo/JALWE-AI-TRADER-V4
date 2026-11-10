@@ -10,6 +10,7 @@ SUITE = ['test_completed_bars', 'test_feature_freshness', 'test_breakout_bar_int
 SUITE.append('test_manual_extended_exits')
 SUITE.extend(['test_market_move_patterns', 'test_research_findings'])
 ROOT = Path(__file__).resolve().parents[1]
+SUITE.extend(['test_market_jump_profiles', 'test_market_jump_common'])
 GUARD = r'''import socket, sys
 
 def deny(*args, **kwargs):

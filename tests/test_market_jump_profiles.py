@@ -6,6 +6,7 @@ import unittest
 from market_jump_profiles import build_profile, summarize_profiles, upgrade_saved_profiles, PROTOCOL
 from market_jump_paths import jump_path
 from market_move_research import MoveStore, observe_session, utc, read_packet, report_text
+from market_research_findings import jump_factors_text
 import test_market_move_research as fixtures
 
 
@@ -38,6 +39,45 @@ class JumpProfileTests(unittest.TestCase):
         p = jump_path(data,fixtures.session(),full_session_complete=True)['profile']
         self.assertEqual(p['before_context']['status'],'UNAVAILABLE')
         self.assertTrue(all(f['state']=='UNKNOWN' for f in p['factors']))
+
+    def test_short_windows_use_exact_prior_minutes_and_exclude_onset(self):
+        data,path = self.evidence()
+        data.iloc[35:40,4] = [100.,100.,100.,400.,400.]
+        expected = build_profile(path,segment=data)['short_before_context']
+        self.assertEqual(expected['5']['volume_acceleration'],4.)
+        self.assertEqual(expected['5']['cutoff'],data.index[40].isoformat())
+        self.assertEqual(expected['10']['window_start'],data.index[30].isoformat())
+        after_peak = data.copy(); after_peak.iloc[71:,4] = 99999.
+        self.assertEqual(build_profile(path,segment=after_peak)['short_before_context'],expected)
+        with_gap = build_profile(path,segment=data.drop(data.index[31]))['short_before_context']
+        self.assertEqual(with_gap['5'],expected['5'])
+        self.assertEqual(with_gap['10']['status'],'UNAVAILABLE')
+
+    def test_pre_onset_report_separates_early_unmeasured_and_legacy_windows(self):
+        early_session = fixtures.session()
+        data = fixtures.frame(early_session)
+        data.iloc[5:7,4] = 400.
+        data.iloc[7] = [10.,10.,8.,9.,5000.]
+        data.iloc[12] = [10.,15.,9.9,12.,900.]
+        early_path = jump_path(data,early_session,full_session_complete=True)
+        early = dict(self.row('EARLY'),session=early_session,result={'jump_path':early_path})
+        legacy = dict(self.row('LEGACY'),session=early_session)
+        legacy['result']['jump_path']['profile'] = build_profile(legacy['result']['jump_path'])
+        late = dict(self.row('LATE'),session=early_session)
+        late['result']['jump_path']['profile']['short_before_context']['5']['cutoff'] = data.index[7].isoformat()
+        profiles = summarize_profiles([early,early,legacy,late,self.row('PARTIAL',partial=True)])
+        group = profiles['pre_onset_study']['groups']['25']
+        self.assertEqual(group['cases'],3)
+        self.assertEqual(group['windows']['5']['context_cases'],1)
+        self.assertEqual(group['windows']['5']['unmeasured'],2)
+        self.assertEqual(group['windows']['10']['too_early'],1)
+        self.assertEqual(group['windows']['20']['context_cases'],2)
+        tight = next(f for f in group['windows']['20']['factors'] if f['codes']==['TIGHT_PRE_RANGE'])
+        self.assertEqual((tight['known'],tight['unknown']),(1,2))
+        report = jump_factors_text({'historical_jump_profiles':profiles})
+        self.assertIn('آخر 5 دقائق — سياق محفوظ 1 | بدأت مبكرًا 0 | سياق غير متاح 2',report)
+        self.assertIn('تسارع الحجم ≥2× (آخر 2 مقابل أول 3 دقائق) — ظهر 1 من 1',report)
+        self.assertIn('عوامل آخر جلسة مكتملة',report)
 
     def test_same_minute_low_cannot_precede_its_high_in_milestones(self):
         data,path = self.evidence()
@@ -137,6 +177,7 @@ class JumpProfileTests(unittest.TestCase):
             store.publish(now,{'state':'READY','completed_session':'2026-10-13'})
             packet = read_packet(path=store.path,now=now)
             self.assertEqual(packet['historical_jump_profiles']['completed_profiles'],2)
+            self.assertEqual(packet['historical_jump_profiles']['pre_onset_study']['groups']['25']['cases'],2)
             self.assertEqual(packet['comparison']['complete_pairs'],0)
             self.assertIn('لا توجد مجموعة ضابطة',report_text(packet))
 

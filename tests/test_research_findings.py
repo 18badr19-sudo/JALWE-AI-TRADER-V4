@@ -102,6 +102,10 @@ class FindingsTests(unittest.TestCase):
               patch('prior_day_entry_study.stock_trace_text',return_value='saved chain') as chain,
               patch('stock_decision_evidence.stock_decision_text',return_value='saved decisions') as native):
             self.assertIn('ماذا عرف',controller.handle('/research_findings'))
+            with patch('market_research_findings.jump_factors_text',return_value='saved factors') as factors:
+                self.assertEqual(controller.handle('/jump_factors 50'),'saved factors')
+                self.assertEqual(factors.call_args.args[1],50)
+                self.assertIn('اختر عتبة',controller.handle('/jump_factors 60'))
             with patch('scanner_evidence.stock_scan_text',return_value='saved scan') as scan:
                 self.assertEqual(controller.handle('/research_stock TEST 2026-10-12'),'saved study\n\nsaved scan\n\nsaved decisions\n\nsaved chain')
                 scan.assert_called_once_with('TEST','2026-10-12')

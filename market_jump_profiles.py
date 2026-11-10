@@ -1,6 +1,7 @@
 """Evidence profiles for retrospective paths, never a predictive or trade score."""
 from collections import Counter
 from datetime import timedelta
+from itertools import combinations
 import math
 import json
 
@@ -12,6 +13,8 @@ PROTOCOL = 'historical-jump-profile-v1'
 COLS = ('open','high','low','close','volume')
 FACTORS = {'VOLUME_BUILDUP':'تسارع حجم قبل البداية', 'POSITIVE_PRE_MOVE':'زخم قبل البداية',
            'ABOVE_CONTEXT_VWAP':'إغلاق عند/فوق VWAP السياق السابق', 'TIGHT_PRE_RANGE':'نطاق سابق ضيق'}
+VOLUME_TAIL = {5:2, 10:3, 20:5}
+JUMP_THRESHOLDS = (8,25,50,100)
 
 
 def number(value):
@@ -55,27 +58,34 @@ def path_frame(path):
     return data
 
 
+def raw_before_context(segment, onset, minutes):
+    result = dict(status='UNAVAILABLE',cutoff=onset.isoformat())
+    expected = pd.date_range(onset-pd.Timedelta(minutes=minutes),periods=minutes,freq='min')
+    before = segment.loc[segment.index.isin(expected)]
+    if not before.index.equals(expected):
+        return result
+    total = float(before.volume.sum())
+    if not math.isfinite(total) or total<=0:
+        return dict(result,status='UNAVAILABLE_NONFINITE_AGGREGATES',bars=minutes)
+    typical = (before.high+before.low+before.close)/3
+    vwap = float((typical*(before.volume/total)).sum())
+    if not math.isfinite(vwap) or vwap<=0:
+        return dict(result,status='UNAVAILABLE_NONFINITE_AGGREGATES',bars=minutes)
+    tail = VOLUME_TAIL[minutes]
+    baseline = float(before.volume.head(minutes-tail).mean())
+    return dict(status=f'RAW_{minutes}M_COMPLETE',cutoff=onset.isoformat(),window_start=expected[0].isoformat(),
+        bars=minutes,return_pct=pct(float(before.close.iloc[-1]),float(before.open.iloc[0])),
+        volume_acceleration=number(float(before.volume.tail(tail).mean())/baseline) if baseline>0 else None,
+        close_above_vwap=bool(before.close.iloc[-1]>=vwap),
+        range_pct=number(100*float(before.high.max()-before.low.min())/float(before.close.iloc[-1])),
+        average_minute_volume=number(float(before.volume.mean())))
+
+
 def before_context(path, segment):
     onset = utc(path['start_at'])
-    result = dict(status='UNAVAILABLE',cutoff=onset.isoformat())
     if segment is not None:
-        expected = pd.date_range(onset-pd.Timedelta(minutes=20),onset-pd.Timedelta(minutes=1),freq='min')
-        before = segment.loc[segment.index.isin(expected)]
-        if before.index.equals(expected):
-            total = float(before.volume.sum())
-            if not math.isfinite(total) or total<=0:
-                return dict(status='UNAVAILABLE_NONFINITE_AGGREGATES',cutoff=onset.isoformat(),bars=20)
-            typical = (before.high+before.low+before.close)/3
-            vwap = float((typical*(before.volume/total)).sum())
-            if not math.isfinite(vwap) or vwap<=0:
-                return dict(status='UNAVAILABLE_NONFINITE_AGGREGATES',cutoff=onset.isoformat(),bars=20)
-            result.update(status='RAW_20M_COMPLETE',window_start=expected[0].isoformat(),bars=20,
-                return_pct=pct(float(before.close.iloc[-1]),float(before.open.iloc[0])),
-                volume_acceleration=float(before.volume.tail(5).mean()/before.volume.head(15).mean()),
-                close_above_vwap=bool(before.close.iloc[-1]>=vwap),
-                range_pct=100*float(before.high.max()-before.low.min())/float(before.close.iloc[-1]),
-                average_minute_volume=float(before.volume.mean()))
-        return result
+        return raw_before_context(segment,onset,20)
+    result = dict(status='UNAVAILABLE',cutoff=onset.isoformat())
     # Reuse only temporally marked derived evidence already saved by jump_path.
     # Do not pretend an unavailable raw pre-window has been recovered.
     saved = path.get('pre_jump_context',{})
@@ -84,6 +94,19 @@ def before_context(path, segment):
             return_pct=number(saved.get('return_pct')),volume_acceleration=number(saved.get('volume_acceleration')),
             close_above_vwap=saved.get('close_above_vwap') if type(saved.get('close_above_vwap')) is bool else None)
     return result
+
+
+def context_factors(before):
+    predicates = {'VOLUME_BUILDUP':('volume_acceleration',lambda v:v>=2),
+        'POSITIVE_PRE_MOVE':('return_pct',lambda v:v>=1),
+        'ABOVE_CONTEXT_VWAP':('close_above_vwap',lambda v:v is True),
+        'TIGHT_PRE_RANGE':('range_pct',lambda v:v<=2)}
+    factors = []
+    for code,(key,check) in predicates.items():
+        value = before.get(key)
+        factors.append(dict(code=code,state='UNKNOWN' if value is None else 'PRESENT' if check(value) else 'ABSENT',
+                            evidence_ref='before_context.'+key))
+    return factors
 
 
 def build_profile(path, *, segment=None):
@@ -108,18 +131,10 @@ def build_profile(path, *, segment=None):
             if not matching.index.equals(data.index) or not matching.eq(data).all(axis=None):
                 raise ValueError('CONTEXT_PATH_MISMATCH')
         before = before_context(path,segment)
-        for key in ('return_pct','volume_acceleration','range_pct','average_minute_volume'):
-            if key in before:
-                before[key] = number(before[key])
-        predicates = {'VOLUME_BUILDUP':('volume_acceleration',lambda v:v>=2),
-            'POSITIVE_PRE_MOVE':('return_pct',lambda v:v>=1),
-            'ABOVE_CONTEXT_VWAP':('close_above_vwap',lambda v:v is True),
-            'TIGHT_PRE_RANGE':('range_pct',lambda v:v<=2)}
-        factors = []
-        for code,(key,check) in predicates.items():
-            value = before.get(key)
-            factors.append(dict(code=code,state='UNKNOWN' if value is None else 'PRESENT' if check(value) else 'ABSENT',
-                                evidence_ref='before_context.'+key))
+        if segment is not None and path.get('status')=='COMPLETE' and path.get('strong_jump') is True:
+            onset = utc(path['start_at'])
+            result['short_before_context'] = {str(minutes):raw_before_context(segment,onset,minutes)
+                                              for minutes in (5,10)}
         total = float(data.volume.sum())
         if not math.isfinite(total):
             raise ValueError('NONFINITE_VOLUME')
@@ -159,7 +174,7 @@ def build_profile(path, *, segment=None):
         result.update(status='AVAILABLE',coverage='COMPLETE_SESSION' if path.get('full_session_complete') is True
                       and path.get('status')=='COMPLETE' else 'OBSERVED_SEGMENT_ONLY',
             evidence_source='CURRENT_SEGMENT_AND_SAVED_PATH' if segment is not None else 'SAVED_PATH_ONLY',
-            before_context=before,factors=factors,milestones=milestones,volume_phases=phases,
+            before_context=before,factors=context_factors(before),milestones=milestones,volume_phases=phases,
             max_prior_minute_peak_to_later_low_decline_pct=drawdown,
             decline_order='PRIOR_MINUTE_HIGH_TO_LATER_MINUTE_LOW_NO_INTRABAR_ASSUMPTION',
             phase_volume_scope='WHOLE_ONSET_TO_PEAK_MINUTE_BARS_NOT_EXACT_TICK_ONSET',
@@ -167,6 +182,63 @@ def build_profile(path, *, segment=None):
     except (ValueError,KeyError,TypeError,AttributeError,OverflowError,ZeroDivisionError):
         result['reason']='INVALID_OR_INSUFFICIENT_PROFILE_EVIDENCE'
     return result
+
+
+def pre_onset_case(row, profile):
+    """Only sealed minute windows entirely before the observed onset qualify."""
+    path = row['result']['jump_path']
+    observed = {}
+    try:
+        onset = utc(path['start_at'])
+        opening = utc(row['session']['open'])
+        if not opening <= onset < utc(row['session']['close']):
+            return observed
+    except (KeyError,TypeError,ValueError):
+        return observed
+    for minutes in VOLUME_TAIL:
+        expected_start = onset-timedelta(minutes=minutes)
+        if expected_start < opening:
+            observed[minutes] = None
+            continue
+        context = (profile.get('before_context',{}) if minutes==20
+                   else profile.get('short_before_context',{}).get(str(minutes),{}))
+        if context.get('cutoff') != onset.isoformat() or context.get('bars') != minutes:
+            continue
+        raw = (context.get('status') == f'RAW_{minutes}M_COMPLETE'
+               and context.get('window_start') == expected_start.isoformat())
+        derived = minutes==20 and context.get('status')=='SAVED_DERIVED_CONTEXT_ONLY'
+        if raw or derived:
+            safe = {key:number(context.get(key)) for key in ('volume_acceleration','return_pct','range_pct')}
+            if derived:
+                safe['range_pct'] = None
+            above = context.get('close_above_vwap')
+            safe['close_above_vwap'] = above if type(above) is bool else None
+            observed[minutes] = {f['code']:f['state'] for f in context_factors(safe)}
+    return observed
+
+
+def summarize_pre_onset(completed):
+    cases = [(gain,pre_onset_case(row,profile)) for row,profile in completed
+             if (gain:=number(row['result']['jump_path'].get('observed_rise_pct'))) is not None]
+    groups = {}
+    for threshold in JUMP_THRESHOLDS:
+        eligible = [windows for gain,windows in cases if gain >= threshold]
+        summaries = {}
+        for minutes in VOLUME_TAIL:
+            early = sum(minutes in windows and windows[minutes] is None for windows in eligible)
+            measured = [windows[minutes] for windows in eligible if windows.get(minutes)]
+            stats = []
+            for codes in [(code,) for code in FACTORS]+list(combinations(FACTORS,2)):
+                known = [window for window in measured if all(window[code]!='UNKNOWN' for code in codes)]
+                present = sum(all(window[code]=='PRESENT' for code in codes) for window in known)
+                stats.append(dict(codes=list(codes),present=present,known=len(known),unknown=len(eligible)-len(known)))
+            stats.sort(key=lambda s:(-s['present'],-s['known'],s['codes']))
+            shared = next((s for s in stats if len(s['codes'])==2 and s['known']>=5 and s['present']>=2),None)
+            summaries[str(minutes)] = dict(too_early=early,context_cases=len(measured),
+                unmeasured=len(eligible)-early-len(measured),
+                factors=[s for s in stats if len(s['codes'])==1],common_pair=shared)
+        groups[str(threshold)] = dict(cases=len(eligible),windows=summaries)
+    return dict(protocol='pre-onset-jump-factors-v1',groups=groups,execution_authority=False)
 
 
 def upgrade_saved_profiles(store, now, limit=24):
@@ -230,5 +302,6 @@ def summarize_profiles(rows):
     return dict(protocol=PROTOCOL,scope='RETROSPECTIVE_SELECTED_CASES_NO_PREDICTIVE_EDGE',
         completed_profiles=len(completed),partial_profiles=sum(p.get('coverage')!='COMPLETE_SESSION' for _,p in observed),
         conflicting_symbol_sessions=conflicts,factors=factors,common_factors=summarize_common(completed,FACTORS),
+        pre_onset_study=summarize_pre_onset(completed),
         automatic_application=False,execution_authority=False,control_group_count=0,
         trading_changes_require_separate_validation_and_approval=True)

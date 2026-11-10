@@ -6,6 +6,21 @@ from unittest.mock import Mock,patch
 import scanner_evidence as evidence
 
 class ScannerEvidenceTests(unittest.TestCase):
+    def test_broker_and_data_rejections_are_explained_from_saved_rows(self):
+        conn=Mock();conn.__enter__=Mock(return_value=conn);conn.__exit__=Mock(return_value=False)
+        cursor=Mock();cursor.__enter__=Mock(return_value=cursor);cursor.__exit__=Mock(return_value=False)
+        conn.cursor.return_value=cursor
+        stamp=datetime(2026,11,10,16,tzinfo=timezone.utc)
+        cursor.fetchall.return_value=[(stage,reason,stamp,stamp,1,'{}','{}') for stage,reason in
+            [('UNIVERSE','ASSET_NOT_TRADABLE'),('DATA','STALE_MINUTE_BAR')]]
+        with patch('prior_day_priority_bus.connect',return_value=conn):
+            text=evidence.stock_scan_text('OMH','2026-11-10',dsn='fake')
+        self.assertIn('غير قابل للتداول وقت الرصد',text)
+        self.assertIn('سبب تصنيف الوسيط غير محدد',text)
+        self.assertIn('شمعة الدقيقة أقدم',text)
+        self.assertIn('ASSET_NOT_TRADABLE',text)
+        self.assertIn('19:00:00',text)
+
     def row(self):return dict(symbol='QAUTC',stage='RADAR',reason='SELECTED_RADAR',rank=2,observed_price=10.,secret='never-save')
     def test_normalization_whitelists_and_deduplicates_without_mutating(self):
         row=self.row();p=evidence.normalize('scan','iex',[row,row],datetime(2026,10,28,1,tzinfo=timezone.utc))

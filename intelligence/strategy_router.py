@@ -283,8 +283,10 @@ class StrategyRouter:
                 "risk_multiplier": 0.50,
 
                 "adjustments": {
-                    StrategyName.MOMENTUM_BREAKOUT: -18.0,
-                    StrategyName.PULLBACK_CONTINUATION: -15.0,
+                    # Preserve the 90 threshold; only a perfect native score
+                    # can pass these two exceptional bearish-long routes.
+                    StrategyName.MOMENTUM_BREAKOUT: -10.0,
+                    StrategyName.PULLBACK_CONTINUATION: -10.0,
                     StrategyName.CATALYST_BREAKOUT: 2.0,
                     StrategyName.VWAP_RECLAIM: -5.0,
                 },

@@ -1458,6 +1458,13 @@ class DecisionEngine:
             'minimum_score': getattr(routed,'minimum_score',None),
             'market_regime': market_name, 'regime_confidence': market.confidence,
             'warnings': list(routed.warnings),
+            'candidates': [
+                {'strategy': c.strategy.value,
+                 'raw_score': c.metadata.get('raw_strategy_score'),
+                 'adjustment': c.metadata.get('regime_adjustment'),
+                 'routed_score': c.score}
+                for c in getattr(routed, 'candidates', [])
+            ],
         }
 
         # ====================================================

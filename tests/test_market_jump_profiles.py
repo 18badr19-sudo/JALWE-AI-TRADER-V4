@@ -156,6 +156,24 @@ class JumpProfileTests(unittest.TestCase):
         self.assertEqual(summary['conflicting_symbol_sessions'],1)
         self.assertFalse(summary['automatic_application'])
 
+    def test_deduplication_keeps_agreeing_legacy_and_new_profiles(self):
+        current = dict(self.row(),session=fixtures.session())
+        old = copy.deepcopy(current)
+        old['result']['jump_path']['profile'].pop('short_before_context')
+        summary = summarize_profiles([old,current])
+        self.assertEqual(summary['completed_profiles'],1)
+        self.assertEqual(summary['conflicting_symbol_sessions'],0)
+        self.assertEqual(summary['pre_onset_study']['groups']['25']['windows']['5']['context_cases'],1)
+
+        conflicting = copy.deepcopy(current)
+        conflicting['result']['jump_path']['profile']['short_before_context']['5']['range_pct'] = 10.
+        summary = summarize_profiles([old,current,conflicting])
+        self.assertEqual(summary['completed_profiles'],0)
+        self.assertEqual(summary['conflicting_symbol_sessions'],1)
+        conflicting = copy.deepcopy(old)
+        conflicting['result']['jump_path']['observed_rise_pct'] = 20.
+        self.assertEqual(summarize_profiles([current,conflicting])['conflicting_symbol_sessions'],1)
+
     def test_profile_only_upgrade_is_bounded_idempotent_and_preserves_decisions(self):
         now = utc('2026-10-14T08:00:00Z'); data,path = self.evidence(); path.pop('profile')
         with tempfile.TemporaryDirectory() as tmp:

@@ -287,8 +287,15 @@ def summarize_profiles(rows):
         groups.setdefault((r['symbol'],r['session_day']),[]).append((r,p))
     completed, conflicts = [], 0
     for group in groups.values():
-        if len({json.dumps(p,sort_keys=True) for _,p in group})==1:
-            completed.append(group[0])
+        path_fields = ('start_at','peak_at','start_price','peak_price','observed_rise_pct')
+        base_evidence = {json.dumps((
+            [r['result']['jump_path'].get(key) for key in path_fields],
+            {k:v for k,v in p.items() if k!='short_before_context'}),sort_keys=True) for r,p in group}
+        with_short_context = [(r,p) for r,p in group if 'short_before_context' in p]
+        short_evidence = {json.dumps(p['short_before_context'],sort_keys=True) for _,p in with_short_context}
+        # An older copy may lack the new windows while agreeing on the original evidence.
+        if len(base_evidence)==1 and len(short_evidence)<=1:
+            completed.append((with_short_context or group)[0])
         else:
             conflicts += 1
     factors = []

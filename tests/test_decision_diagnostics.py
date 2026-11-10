@@ -3,6 +3,15 @@ from core.decision_diagnostics import saudi_time, decision_details
 
 
 class DecisionDiagnosticsTests(unittest.TestCase):
+    def test_saved_candidate_adjustments_are_displayed_without_recalculation(self):
+        d = {'metadata': {'strategy_router_evidence': {'approved': False,
+             'candidates': [{'strategy': 'MOMENTUM_BREAKOUT', 'raw_score': 95,
+                             'adjustment': -18, 'routed_score': 77}]}}}
+        text = '\n'.join(decision_details(d))
+        self.assertIn('أصلية 95', text)
+        self.assertIn('-18', text)
+        self.assertIn('نهائية 77', text)
+
     def test_sql_utc_and_aware_timestamps_display_explicit_saudi_time(self):
         for value in ('2026-10-14 18:28:07','2026-10-14T18:28:07Z','2026-10-14T14:28:07-04:00'):
             self.assertEqual(saudi_time(value),'2026-10-14 21:28 السعودية')

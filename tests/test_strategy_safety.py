@@ -16,6 +16,21 @@ from market.market_regime import MarketRegime, MarketRegimeResult
 
 
 class StrategySafetyTests(unittest.TestCase):
+    def test_bear_exception_requires_perfect_native_score(self):
+        for strategy in (StrategyName.MOMENTUM_BREAKOUT, StrategyName.PULLBACK_CONTINUATION):
+            for score, approved in ((99.99, False), (100, True)):
+                opportunity = self.opportunity()
+                opportunity.strategy = strategy
+                opportunity.score = score
+                opportunity.candidates = [StrategyCandidate(strategy, score, 10, 9)]
+                result = StrategyRouter().route(opportunity,
+                    MarketRegimeResult(MarketRegime.BEAR_TREND, .9))
+                self.assertEqual(result.approved, approved)
+                self.assertEqual(result.minimum_score, 90)
+                self.assertLessEqual(result.final_risk_pct, .75)
+                self.assertEqual(result.candidates[0].metadata['raw_strategy_score'], score)
+                self.assertEqual(opportunity.candidates[0].score, score)
+
     def test_valid_setup_still_routes_and_confirms_entry(self):
         routed = StrategyRouter().route(self.opportunity(),
             MarketRegimeResult(MarketRegime.BULL_TREND, .9))

@@ -180,9 +180,15 @@ def stock_scan_text(symbol,day,*,dsn=None):
         def at(v):
             return datetime.fromisoformat(str(v).replace('Z','+00:00')).astimezone(ZoneInfo('Asia/Riyadh')).strftime('%H:%M:%S')
         lines=[title]
+        explanations = {
+            'ASSET_NOT_TRADABLE': 'الوسيط صنّف السهم غير قابل للتداول وقت الرصد؛ توفر سعره لا يثبت إمكانية شرائه. سبب تصنيف الوسيط غير محدد في هذا السجل.',
+            'STALE_MINUTE_BAR': 'شمعة الدقيقة أقدم من الحد المقبول وقت الفحص؛ ليست نتيجة تقييم جودة الفرصة.',
+        }
         labels={'observed_price':'السعر','min_price':'أدنى سعر مسموح','max_price':'أعلى سعر مسموح','rank':'الترتيب','deep_limit':'مقاعد التحليل','radar_limit':'مقاعد الرادار','pre_score':'درجة الفحص','bar_age_s':'عمر الشمعة بالثواني','bar_refresh':'حالة تحديث الشمعة'}
         for stage,reason,first,last,count,first_json,last_json in rows[:64]:
             lines.append(f'• {stage}: {reason} | أول {at(first)} | آخر {at(last)} السعودية | {count} رصد')
+            if reason in explanations:
+                lines.append('  '+explanations[reason])
             for label,encoded in [('أول رصد',first_json),('آخر رصد',last_json)]:
                 r=json.loads(encoded)
                 facts=[f'{name}: {r[k]}' for k,name in labels.items() if k in r and r[k] is not None]

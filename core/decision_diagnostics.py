@@ -41,6 +41,14 @@ def decision_details(decision):
         score,limit = numeric(router.get('score')),numeric(router.get('minimum_score'))
         if score is not None and limit is not None:
             lines.append(f'  الموجّه: درجة {score:.2f} | المطلوب {limit:g}')
+        candidates = router.get('candidates', [])
+        for c in candidates[:4] if isinstance(candidates, list) else []:
+            if not isinstance(c, dict):
+                continue
+            raw, adjustment, routed = (numeric(c.get(k)) for k in
+                                      ('raw_score', 'adjustment', 'routed_score'))
+            if raw is not None and adjustment is not None and routed is not None:
+                lines.append(f"  {str(c.get('strategy', ''))[:40]}: أصلية {raw:g} | تعديل السوق {adjustment:+g} | نهائية {routed:g}")
     if 'strategy router' in str(decision.get('reason','')).lower():
         regime = decision.get('market_regime')
         if isinstance(regime,str) and regime:

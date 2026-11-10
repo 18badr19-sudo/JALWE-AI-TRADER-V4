@@ -101,6 +101,36 @@ class StoreTests(unittest.TestCase):
         self.store = research.MoveStore(self.path)
         self.now = research.utc('2026-10-12T12:00:00Z')
 
+    def test_watchlist_ranks_only_available_prior_sip_and_expires_at_close(self):
+        s = session()
+        # A 0.80 range on a $10 close lands a few float ULPs below 8.
+        base = dict(feature(),range_pct=100*(10.20-9.40)/10.)
+        eligible = [dict(base,symbol=f'R{i:02}',dollar_volume=1000000.+i//2) for i in range(14)]
+        ineligible = [
+            dict(base,symbol='NARROW',range_pct=7.99),
+            dict(base,symbol='STALE',evidence_day='2026-10-08'),
+            dict(base,symbol='LATE',available_after=s['open']),
+            dict(base,symbol='OTHER',source_feed='iex'),
+            dict(base,symbol='ILLIQUID',dollar_volume=99999.),
+            dict(base,symbol='OUTSIDE',close=.49),
+        ]
+        self.assertTrue(self.store.save_pattern_features(ineligible+eligible[::-1],s,self.now,
+                                                        prior_day='2026-10-09'))
+        self.assertFalse(research.MoveStore(self.path).save_pattern_features(
+            [dict(base,symbol='REPLACEMENT')],s,self.now,prior_day='2026-10-09'))
+        watchlist = self.store.state('range8_watchlist')
+        self.assertEqual(watchlist['matched'],14)
+        self.assertEqual([r['symbol'] for r in watchlist['symbols']],
+                         [f'R{i:02}' for pair in range(6,0,-1) for i in (pair*2,pair*2+1)])
+        self.assertFalse(watchlist['execution_authority'])
+        close = research.utc(s['close'])
+        published = close-timedelta(minutes=1)
+        self.store.publish(published,{'state':'READY'})
+        active = research.read_packet(path=self.path,now=published)
+        self.assertEqual(active['range8_watchlist'],watchlist)
+        self.assertIn('R12, R13',research.report_text(active))
+        self.assertEqual(research.read_packet(path=self.path,now=close)['range8_watchlist'],{})
+
     def test_prospective_freeze_is_immutable_and_before_open(self):
         s, f = session(), feature()
         self.assertTrue(self.store.add(f, s, 'ACTIVITY', 'p', self.now, prospective=True))
@@ -275,7 +305,11 @@ class WorkerTests(unittest.TestCase):
 
     def test_forward_cohort_freezes_once_and_survives_restart(self):
         worker, _, daily = self.setup_worker()
-        worker.cycle(self.now)
+        packet = worker.cycle(self.now)
+        watchlist = packet['range8_watchlist']
+        self.assertEqual(watchlist['session_day'],'2026-10-12')
+        self.assertEqual(watchlist['prior_day'],'2026-10-09')
+        self.assertEqual([r['symbol'] for r in watchlist['symbols']],['CASE','CONTROL'])
         rows = [r for r in self.store.episodes() if r['prospective']]
         self.assertEqual(len(rows), 2); self.assertTrue(all(r['session_day']=='2026-10-12' for r in rows))
         worker.provider.daily.return_value = {'CONTROL': []}
@@ -288,6 +322,7 @@ class WorkerTests(unittest.TestCase):
         worker.cycle(research.utc('2026-10-12T15:00:00Z'))
         self.assertFalse(any(r['prospective'] for r in self.store.episodes()))
         self.assertIsNone(self.store.state('frozen:2026-10-13'))
+        self.assertIsNone(self.store.state('range8_watchlist'))
 
     def test_clock_crossing_open_does_not_freeze_late(self):
         worker, sessions, _ = self.setup_worker()

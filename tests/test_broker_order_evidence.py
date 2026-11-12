@@ -113,6 +113,21 @@ class BrokerOrderEvidenceTests(unittest.TestCase):
             engine._build_broker_order(self.raw(client_order_id='foreign'), 'TEST',
                 TradeSide.BUY, 5, 10, 'JALWE-ENTRY-test')
 
+    def test_reconciliation_cannot_erase_previously_confirmed_fills(self):
+        engine = ReconciliationEngine.__new__(ReconciliationEngine)
+        engine.broker = Mock()
+        for status in ('new', 'partially_filled', 'canceled', 'rejected'):
+            order = self.local()
+            order.status = OrderStatus.PARTIALLY_FILLED
+            order.filled_quantity = 2
+            order.filled_price = 10.0
+            before = copy.deepcopy(order)
+            engine.broker.get_order.return_value = self.raw(status=status,
+                filled_qty='1', filled_avg_price='10')
+            with self.subTest(status=status), self.assertRaises(ValueError):
+                engine.reconcile_order(order)
+            self.assertEqual(order, before)
+
     def test_incomplete_filled_stop_cannot_remove_protection_or_mutate_quantity(self):
         manager = TradeManager()
         for filled in ('0', '2'):

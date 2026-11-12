@@ -5,7 +5,7 @@ import time
 from datetime import datetime
 from typing import Any, Optional
 
-from broker.order_evidence import map_order_status, validate_order_snapshot
+from broker.order_evidence import map_order_status, validate_order_snapshot, whole_shares
 from broker.alpaca_client import get_alpaca_client
 from core.models import (
     BrokerOrder,
@@ -163,6 +163,11 @@ class ReconciliationEngine:
             broker_order, symbol=order.symbol, side=order.side, quantity=order.quantity,
             order_id=order.order_id, client_order_id=order.client_order_id,
         )
+        # A stale/contradictory response must not erase already confirmed fills,
+        # even when its status claims cancellation or rejection. Validate before
+        # mutating any part of the local order; a later poll can reconcile it.
+        if evidence['filled_quantity'] < whole_shares(order.filled_quantity, allow_zero=True):
+            raise ValueError('Broker cumulative fills moved backwards.')
 
         raw_status = getattr(
             broker_order,

@@ -101,6 +101,14 @@ class EntryQualityTests(unittest.TestCase):
     def test_fresh_healthy_activity_passes(self):
         self.assertTrue(self.assess()['approved'])
 
+    def test_invalid_limits_never_approve_entry(self):
+        for field in ('min_rvol', 'max_spread_pct', 'max_spread_r'):
+            for value in (float('nan'), float('inf'), -1, None, True):
+                with self.subTest(field=field, value=value):
+                    result = self.assess(**{field: value})
+                    self.assertFalse(result['approved'])
+                    self.assertEqual(result['reason'], 'INVALID_ENTRY_LIMITS')
+
     def test_thin_risk_distance_rejects_even_small_percentage_spread(self):
         result = self.assess(entry=6.45, stop=6.42)
         self.assertEqual(result['reason'], 'SPREAD_TOO_LARGE_FOR_RISK')

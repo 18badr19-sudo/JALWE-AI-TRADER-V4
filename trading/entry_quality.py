@@ -16,6 +16,19 @@ def assess_entry(features, quote, entry, stop, feed, *, now, min_rvol,
     result = {"approved": False, "scope": "NATIVE_ENTRY_CHECK", "feed": feed,
               "min_rvol": min_rvol, "max_spread_pct": max_spread_pct,
               "max_spread_r": max_spread_r, "reason": "INVALID_EVIDENCE"}
+    # NaN comparisons silently return False and would disable a risk limit.
+    # Reject missing/invalid policy inputs before comparing market evidence.
+    limits = (min_rvol, max_spread_pct, max_spread_r)
+    if any(isinstance(value, bool) for value in limits):
+        result['reason'] = 'INVALID_ENTRY_LIMITS'
+        return result
+    min_rvol, max_spread_pct, max_spread_r = (finite(value) for value in limits)
+    if (any(value is None for value in (min_rvol, max_spread_pct, max_spread_r))
+            or min_rvol <= 0 or max_spread_pct < 0 or max_spread_r < 0):
+        result['reason'] = 'INVALID_ENTRY_LIMITS'
+        return result
+    result.update(min_rvol=min_rvol, max_spread_pct=max_spread_pct,
+                  max_spread_r=max_spread_r)
     entry, stop = finite(entry), finite(stop)
     rvol = finite(getattr(features, "rvol", None))
     volume = finite(getattr(features, "volume", None))

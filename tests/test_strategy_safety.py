@@ -9,13 +9,59 @@ from intelligence.opportunity_engine import (
     OpportunityEngine, OpportunityAnalysis, OpportunityGrade,
     StrategyCandidate, StrategyName,
 )
-from intelligence.strategy_router import StrategyRouter
+from intelligence.strategy_router import StrategyRouter, get_strategy_router
 from intelligence.session_strategy_engine import SessionStrategyEngine, SessionStrategyCandidate, SessionStrategyName
 from intelligence.trigger_engine import TriggerEngine
 from market.market_regime import MarketRegime, MarketRegimeResult
 
 
 class StrategySafetyTests(unittest.TestCase):
+    def test_paper_bear_boundary_risk_and_evidence(self):
+        router = get_strategy_router(paper_trading=True, allow_live_trading=False)
+        for strategy in (StrategyName.MOMENTUM_BREAKOUT, StrategyName.PULLBACK_CONTINUATION):
+            for score, approved in ((58, False), (94.99, False), (95, True), (100, True)):
+                with self.subTest(strategy=strategy, score=score):
+                    opportunity = self.opportunity()
+                    opportunity.score = score
+                    opportunity.strategy = strategy
+                    opportunity.candidates = [StrategyCandidate(strategy, score, 10, 9)]
+                    original = copy.deepcopy(opportunity)
+                    result = router.route(opportunity, MarketRegimeResult(MarketRegime.BEAR_TREND, .9))
+                    self.assertEqual(result.approved, approved)
+                    self.assertEqual(result.minimum_score, 90)
+                    self.assertEqual(result.final_risk_pct, .5 if approved else 0)
+                    self.assertEqual(result.candidates[0].metadata['regime_adjustment'], -5)
+                    self.assertEqual(result.candidates[0].metadata['routing_policy'], 'PAPER_BEAR_95_V1')
+                    self.assertEqual(opportunity, original)
+
+    def test_paper_policy_never_leaks_to_live_or_ambiguous_config(self):
+        for paper, live in ((False, False), (True, True), (False, True), ('true', False), (True, 'false'), (1, 0)):
+            result = get_strategy_router(paper_trading=paper, allow_live_trading=live).route(
+                self.opportunity(), MarketRegimeResult(MarketRegime.BEAR_TREND, .9))
+            self.assertFalse(result.approved)
+        self.assertFalse(get_strategy_router().paper_bear_policy)
+
+    def test_paper_policy_preserves_other_regimes_and_rejection_gates(self):
+        router = StrategyRouter(paper_trading=True, allow_live_trading=False)
+        for regime in MarketRegime:
+            market = MarketRegimeResult(regime, .9)
+            if regime != MarketRegime.BEAR_TREND:
+                self.assertEqual(router.route(self.opportunity(), market),
+                                 StrategyRouter().route(self.opportunity(), market))
+            rejected = self.opportunity()
+            rejected.approved = False
+            self.assertFalse(router.route(rejected, market).approved)
+        for field, values in (('recommended_risk_pct', (0, float('nan'), float('inf'))),
+                              ('score', (float('nan'), float('inf')))):
+            for value in values:
+                opportunity = self.opportunity()
+                setattr(opportunity, field, value)
+                self.assertFalse(router.route(opportunity, MarketRegimeResult(MarketRegime.BEAR_TREND, .9)).approved)
+        opportunity = self.opportunity()
+        opportunity.recommended_risk_pct = .2
+        self.assertEqual(router.route(opportunity, MarketRegimeResult(MarketRegime.BEAR_TREND, .9)).final_risk_pct, .2)
+        self.assertFalse(router.route(self.opportunity(), MarketRegimeResult(MarketRegime.BEAR_TREND, .49)).approved)
+
     def test_bear_exception_requires_perfect_native_score(self):
         for strategy in (StrategyName.MOMENTUM_BREAKOUT, StrategyName.PULLBACK_CONTINUATION):
             for score, approved in ((99.99, False), (100, True)):

@@ -143,7 +143,10 @@ class DecisionEngine:
         )
         self.opportunity_engine = get_opportunity_engine()
         self.market_context_engine = get_market_context_engine()
-        self.strategy_router = get_strategy_router()
+        self.strategy_router = get_strategy_router(
+            paper_trading=settings.PAPER_TRADING,
+            allow_live_trading=settings.ALLOW_LIVE_TRADING,
+        )
         self.session_feature_engine = get_session_feature_engine()
         self.session_strategy_engine = get_session_strategy_engine()
         self.trigger_engine = get_trigger_engine()

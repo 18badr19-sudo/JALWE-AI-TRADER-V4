@@ -103,7 +103,10 @@ class NativeDecision:
         e.ai_engine.minimum_buy_score = settings.MIN_SIGNAL_SCORE
         e.ai_engine.learning = FrozenLearning(weights, data.bundle.learning_enabled)
         e.opportunity_engine = get_opportunity_engine()
-        e.strategy_router = get_strategy_router()
+        e.strategy_router = get_strategy_router(
+            paper_trading=settings.PAPER_TRADING,
+            allow_live_trading=settings.ALLOW_LIVE_TRADING,
+        )
         e.session_feature_engine = SessionFeatureEngine()
         e.session_strategy_engine = get_session_strategy_engine()
         e.trigger_engine = get_trigger_engine()

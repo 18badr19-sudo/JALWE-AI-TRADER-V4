@@ -74,8 +74,10 @@ class StrategyRouter:
     - RiskEngine remains final authority.
     """
 
-    def __init__(self) -> None:
-        pass
+    def __init__(self, *, paper_trading: bool = False,
+                 allow_live_trading: bool = True) -> None:
+        # Explicit booleans only: ambiguous configuration keeps the old policy.
+        self.paper_bear_policy = paper_trading is True and allow_live_trading is False
 
     # ========================================================
     # HELPERS
@@ -283,10 +285,9 @@ class StrategyRouter:
                 "risk_multiplier": 0.50,
 
                 "adjustments": {
-                    # Preserve the 90 threshold; only a perfect native score
-                    # can pass these two exceptional bearish-long routes.
-                    StrategyName.MOMENTUM_BREAKOUT: -10.0,
-                    StrategyName.PULLBACK_CONTINUATION: -10.0,
+                    # PAPER permits native 95+; other modes still require 100.
+                    StrategyName.MOMENTUM_BREAKOUT: -5.0 if self.paper_bear_policy else -10.0,
+                    StrategyName.PULLBACK_CONTINUATION: -5.0 if self.paper_bear_policy else -10.0,
                     StrategyName.CATALYST_BREAKOUT: 2.0,
                     StrategyName.VWAP_RECLAIM: -5.0,
                 },
@@ -431,6 +432,9 @@ class StrategyRouter:
         reasons.append(
             settings["reason"]
         )
+        paper_bear = self.paper_bear_policy and market.regime == MarketRegime.BEAR_TREND
+        if paper_bear:
+            reasons.append("PAPER_BEAR_95_V1: momentum/pullback native score >=95; risk capped at 0.50%.")
 
         # ====================================================
         # CRITICAL SAFETY GATE
@@ -716,6 +720,9 @@ class StrategyRouter:
             copied_candidate.metadata[
                 "routed_strategy_score"
             ] = adjusted_score
+            copied_candidate.metadata["routing_policy"] = (
+                "PAPER_BEAR_95_V1" if paper_bear else "STANDARD"
+            )
 
             routed_candidates.append(
                 copied_candidate
@@ -851,6 +858,8 @@ class StrategyRouter:
                 final_risk,
                 1.50,
             )
+            if paper_bear:
+                final_risk = min(final_risk, 0.50)
 
             final_risk = round(
                 max(
@@ -956,9 +965,13 @@ _strategy_router: Optional[
 
 
 def get_strategy_router(
+    *, paper_trading: bool = False, allow_live_trading: bool = True,
 ) -> StrategyRouter:
 
     global _strategy_router
+
+    if paper_trading is True and allow_live_trading is False:
+        return StrategyRouter(paper_trading=True, allow_live_trading=False)
 
     if _strategy_router is None:
         _strategy_router = (

@@ -92,6 +92,10 @@ class TelegramRateLimitTests(unittest.TestCase):
             stack.enter_context(patch.object(controller,'alpaca_ready',return_value=True))
             stack.enter_context(patch.object(controller,'update_persistence_probe',return_value={}))
             stack.enter_context(patch.object(controller,'status_text',return_value='ok'))
+            # main() starts a daemon disk monitor. Keep it out of this poll-loop
+            # test: mocked time.sleep would make the real thread spin, and it
+            # would outlive the patched Telegram transport when the test ends.
+            disk_start = stack.enter_context(patch('core.disk_monitor.DiskMonitor.start'))
             stack.enter_context(patch.object(controller.signal,'signal'))
             stack.enter_context(patch.object(controller.time,'monotonic',return_value=1000))
             stack.enter_context(patch.object(controller.time,'sleep'))
@@ -99,6 +103,7 @@ class TelegramRateLimitTests(unittest.TestCase):
             calls = stack.enter_context(patch.object(controller,'tg_call',side_effect=telegram))
             alert = stack.enter_context(patch.object(controller,'notify_error'))
             with self.assertRaises(EndLoop): controller.main()
+            disk_start.assert_called_once()
             self.assertEqual(monitor.call_count,3)
             self.assertEqual(sum(call.args[0]=='getUpdates' for call in calls.call_args_list),1)
             alert.assert_not_called()

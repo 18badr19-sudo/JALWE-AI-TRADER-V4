@@ -92,7 +92,7 @@ class TriggerEngine:
     ) -> Optional[float]:
 
         try:
-            if value is None:
+            if value is None or pd.api.types.is_bool(value):
                 return None
 
             value = float(value)
@@ -257,7 +257,9 @@ class TriggerEngine:
             current_price
         )
 
-        if current is None:
+        # Only an absent quote permits candle fallback. An explicitly supplied
+        # invalid quote must fail closed instead of using an older candle price.
+        if current_price is None:
             current = (
                 self._extract_last_price(
                     bars

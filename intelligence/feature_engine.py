@@ -367,6 +367,12 @@ class FeatureEngine:
             return ['EMPTY_INPUT']
         if not self.REQUIRED_COLUMNS.issubset(bars.columns): return ['MISSING_COLUMNS']
         if bars.columns.has_duplicates: return ['DUPLICATE_COLUMNS']
+        # Booleans are numeric in Python/pandas, but are not price or volume evidence.
+        if any(
+            bars[column].map(pd.api.types.is_bool).any()
+            for column in self.REQUIRED_COLUMNS
+        ):
+            return ['BOOLEAN_OHLCV']
         try:
             normalized=self._ensure_utc_index(bars)
             issues=[]

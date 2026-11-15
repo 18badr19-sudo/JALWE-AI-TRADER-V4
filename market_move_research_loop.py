@@ -332,6 +332,14 @@ class MoveResearchWorker:
                         combined_valid_minutes=result.get('observed_minutes',0),
                         latest_valid_minutes=latest.get('observed_minutes',0),
                         scope='SAME_SYMBOL_SPLIT_SIP_SESSION_ONLY_NOT_EXECUTED_PNL')
+                    if row['role'] in {'JUMP_CASE', 'ACTIVITY', 'CONTROL'}:
+                        from end_of_day_entry_review import evaluate as review_entry
+                        try:
+                            result['end_of_day_entry_review'] = review_entry(data, row['session'], now)
+                        except Exception as exc:
+                            result['end_of_day_entry_review'] = dict(
+                                protocol='end-of-day-entry-review-v1', state='REVIEW_UNAVAILABLE',
+                                error_type=type(exc).__name__, execution_authority=False)
                     if row['role']=='ENTRY_STUDY':
                         from prior_day_entry_study import simulate as simulate_entry
                         result['entry_study']=simulate_entry(data,row['session'])
@@ -468,3 +476,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

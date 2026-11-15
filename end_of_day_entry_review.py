@@ -71,15 +71,15 @@ def summary(rows, day):
 def report_lines(review):
     if not review:
         return []
-    lines = [f"🔬 اختبار الدخول بعد الإغلاق — {review.get('session_day')}"]
-    labels = {'RETROSPECTIVE_JUMPS': 'مرشحو القفزات المختارون بعد الحركة',
-              'FROZEN_ACTIVITY': 'عينة النشاط المجمدة', 'FROZEN_CONTROL': 'العينة الضابطة المجمدة'}
+    lines = [f"🔬 محاكاة ORB بعد الإغلاق — {review.get('session_day')}"]
+    labels = {'RETROSPECTIVE_JUMPS': 'مرشحو القفزات',
+              'FROZEN_ACTIVITY': 'نشاط مجمد', 'FROZEN_CONTROL': 'ضابطة مجمدة'}
     for key, group in review.get('groups', {}).items():
-        states = group['states']
-        lines.append(f"  {labels[key]}: {group['total']} | حالات التقييم {states}")
-        for bps, cost in group['costs'].items():
-            mean = cost['mean_net_r']
-            text = f'{mean:+.2f}R' if mean is not None else 'غير متاح'
-            lines.append(f"    تكلفة {int(bps)/100:.2f}% لكل جانب: مخارج {cost['evaluated']} | موجب {cost['positive']} | سالب {cost['negative']} | متوسط {text}")
-    lines.append('محاكاة ORB ثابتة وليست صفقات JALWE أو اختبارًا لكل استراتيجياته. نتائج القافزين وصفية؛ لا تثبت أفضلية ولا تغيّر الشراء تلقائيًا. الناقص غير محسوم.')
+        if not group['total']:
+            continue
+        cost = group['costs']['25']
+        mean = cost['mean_net_r']
+        text = f'{mean:+.2f}R' if mean is not None else 'غير متاح'
+        lines.append(f"{labels[key]}: {group['total']} | مخارج {cost['evaluated']} | متوسط {text}")
+    lines.append('تكلفة 0.25% لكل جانب؛ عينات منفصلة، الناقص غير محسوم، ولا تطبيق تلقائي.')
     return lines

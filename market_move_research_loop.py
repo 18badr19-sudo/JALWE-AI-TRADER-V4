@@ -433,6 +433,8 @@ class MoveResearchWorker:
             except Exception as exc:
                 logger.warning('ENTRY_QUALITY_STUDY_UNAVAILABLE %s',type(exc).__name__)
         key, packet = self.store.publish(published_at,health,patterns=patterns)
+        logger.info('END_OF_DAY_ENTRY_REVIEW %s', json.dumps(
+            packet.get('end_of_day_entry_review', {}), sort_keys=True, allow_nan=False))
         logger.info('MARKET_RESEARCH_FINDINGS %s',json.dumps(packet.get('findings',{}),
             sort_keys=True,allow_nan=False))
         logger.info('ARCHIVE_ENTRY_SUMMARY %s',json.dumps(packet.get('archive_study',{}),

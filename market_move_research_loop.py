@@ -332,6 +332,14 @@ class MoveResearchWorker:
                         combined_valid_minutes=result.get('observed_minutes',0),
                         latest_valid_minutes=latest.get('observed_minutes',0),
                         scope='SAME_SYMBOL_SPLIT_SIP_SESSION_ONLY_NOT_EXECUTED_PNL')
+                    if row['role'] in {'JUMP_CASE', 'ACTIVITY', 'CONTROL'}:
+                        from end_of_day_entry_review import evaluate as review_entry
+                        try:
+                            result['end_of_day_entry_review'] = review_entry(data, row['session'], now)
+                        except Exception as exc:
+                            result['end_of_day_entry_review'] = dict(
+                                protocol='end-of-day-entry-review-v1', state='REVIEW_UNAVAILABLE',
+                                error_type=type(exc).__name__, execution_authority=False)
                     if row['role']=='ENTRY_STUDY':
                         from prior_day_entry_study import simulate as simulate_entry
                         result['entry_study']=simulate_entry(data,row['session'])
@@ -425,6 +433,8 @@ class MoveResearchWorker:
             except Exception as exc:
                 logger.warning('ENTRY_QUALITY_STUDY_UNAVAILABLE %s',type(exc).__name__)
         key, packet = self.store.publish(published_at,health,patterns=patterns)
+        logger.info('END_OF_DAY_ENTRY_REVIEW %s', json.dumps(
+            packet.get('end_of_day_entry_review', {}), sort_keys=True, allow_nan=False))
         logger.info('MARKET_RESEARCH_FINDINGS %s',json.dumps(packet.get('findings',{}),
             sort_keys=True,allow_nan=False))
         logger.info('ARCHIVE_ENTRY_SUMMARY %s',json.dumps(packet.get('archive_study',{}),
@@ -468,3 +478,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

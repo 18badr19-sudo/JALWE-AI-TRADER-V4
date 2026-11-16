@@ -486,6 +486,7 @@ class MoveStore:
                                      (encoded,key,row['result_json'])).rowcount)
 
     def publish(self, now, health, *, patterns=None):
+        from end_of_day_entry_review import summary as eod_summary
         from prior_day_entry_study import summary as entry_summary
         from archival_entry_research import summary as archive_summary
         from market_factor_statistics import news_summary
@@ -531,6 +532,7 @@ class MoveStore:
             factor_benchmark=self.state('daily_factor_benchmark') or {},
             news_statistics=news_summary(rows),
             priority_link=self.state('prior_day_bus_status') or {},
+            end_of_day_entry_review=eod_summary(rows, day),
             entry_study=entry_summary(rows),
             archive_study=archive_summary(rows),
             priority_trace=self.state('prior_day_trace_summary') or {},
@@ -601,6 +603,7 @@ def read_packet(symbol=None, *, now=None, path=None):
         result['news_statistics'] = packet.get('news_statistics', {})
         result['priority_link'] = packet.get('priority_link', {})
         result['entry_study'] = packet.get('entry_study', {})
+        result['end_of_day_entry_review'] = packet.get('end_of_day_entry_review', {})
         result['archive_study'] = packet.get('archive_study', {})
         result['priority_trace'] = packet.get('priority_trace', {})
         result['priority_native_outcomes'] = packet.get('priority_native_outcomes', {})
@@ -702,6 +705,8 @@ def report_text(packet):
     from market_factor_statistics import report_lines as statistics_report
     lines.extend(statistics_report(benchmark,packet.get('news_statistics',{})))
     lines.extend(priority_link_report_lines(packet.get('priority_link', {})))
+    from end_of_day_entry_review import report_lines as eod_report_lines
+    lines.extend(eod_report_lines(packet.get('end_of_day_entry_review', {})))
     entry=packet.get('entry_study',{})
     if entry:
         states=entry['states']; no_entry=sum(v for k,v in states.items() if k.startswith('NO_') or k=='INVALIDATED_BEFORE_ENTRY')
@@ -854,3 +859,4 @@ def report_text(packet):
                     lines.append(f"  قبل الصعود في هذا الجزء: تغير {context['return_pct']:+.2f}% | تسارع حجم {context['volume_acceleration']:.2f}x")
     lines.append('عتبات الحركة 8%/3% بحثية؛ ليست أهداف صفقة أو أرباحًا فعلية. النتائج لا تغيّر بوابات الدخول تلقائيًا.')
     return '\n'.join(lines)
+

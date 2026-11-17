@@ -5,6 +5,9 @@ INTERVAL_SECONDS = 60
 WINDOW_SECONDS = 600
 RETRY_REASONS = {
     "OpportunityEngine rejected the setup.",
+    # A previously qualified setup may temporarily lose its routed score.
+    # Retry only within the original window; all gates run again.
+    "Market regime / strategy router rejected the setup.",
     "Feature freshness check failed.",
     "Breakout crossed the trigger but confirmation quality is not strong enough.",
     "AI signal is not BUY.",

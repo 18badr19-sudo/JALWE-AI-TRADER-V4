@@ -38,6 +38,20 @@ class RecheckTests(unittest.TestCase):
         update_recheck(state, "NAUT", "v1", "WATCHING", "", 220)
         self.assertFalse(recheck_due(state, "NAUT", "v1", 700))
 
+    def test_router_score_drop_keeps_bounded_retry_for_watched_report(self):
+        reason = "Market regime / strategy router rejected the setup."
+        state = {}
+        self.assertFalse(update_recheck(state, "SNAP", "v1", "REJECTED", reason, 0))
+        update_recheck(state, "SNAP", "v1", "WATCHING", "", 100)
+        self.assertTrue(update_recheck(state, "SNAP", "v1", "REJECTED", reason, 226))
+        state = json.loads(json.dumps(state))
+        self.assertFalse(recheck_due(state, "SNAP", "v1", 285))
+        self.assertTrue(recheck_due(state, "SNAP", "v1", 286))
+        self.assertFalse(recheck_due(state, "SNAP", "v2", 286))
+        self.assertEqual(state["rechecks"]["SNAP"]["expires"], 700)
+        self.assertFalse(update_recheck(state, "SNAP", "v1", "REJECTED", reason, 700))
+        self.assertFalse(recheck_due(state, "SNAP", "v1", 760))
+
     def test_hard_reject_and_execution_clear_retry(self):
         for status, reason in [("REJECTED", "Price reached the setup invalidation level before entry."),
                                ("REJECTED", "Risk rejected."), ("READY_FOR_PAPER_EXECUTION", "")]:

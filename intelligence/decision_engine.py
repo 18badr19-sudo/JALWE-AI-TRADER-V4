@@ -655,6 +655,27 @@ class DecisionEngine:
     # BOUNDED BREAKOUT CONFIRMATION LATCH
     # ========================================================
 
+    def _entry_trigger_price(self, symbol, metadata):
+        """Capture price and provenance together, including the unavailable case."""
+        try:
+            evidence = observe('market_data.get_entry_price_snapshot',
+                               self.market_data.get_entry_price_snapshot, symbol)
+            if not isinstance(evidence, dict):
+                raise ValueError("INVALID_PRICE_EVIDENCE")
+            metadata["trigger_price_evidence"] = evidence
+            metadata["trigger_price_source"] = evidence.get("source", "UNAVAILABLE")
+            logger.info("ENTRY_PRICE_EVIDENCE %s", json.dumps(evidence, default=str))
+            price = evidence.get("price")
+            if evidence.get("status") != "VALID" or isinstance(price, bool):
+                return None
+            price = float(price)
+            return price if math.isfinite(price) and price > 0 else None
+        except Exception as exc:
+            metadata["trigger_price_source"] = "UNAVAILABLE"
+            metadata["trigger_price_evidence"] = {"status": "UNAVAILABLE", "symbol": symbol,
+                                                   "error_type": type(exc).__name__}
+            return None
+
     def _resume_breakout_latch(
         self,
         *,
@@ -739,14 +760,13 @@ class DecisionEngine:
                                 gates=gates, warnings=warnings,
                                 metadata={**base_metadata, "refresh_error_type": type(exc).__name__})
 
-        try:
-            current_price = float(
-                observe('market_data.get_last_price', self.market_data.get_last_price, symbol)
-            )
-        except Exception:
-            current_price = float(
-                getattr(features, "price", 0.0)
-                or 0.0
+        current_price = self._entry_trigger_price(symbol, base_metadata)
+        if current_price is None:
+            gates["trigger"] = False
+            return self._watch(
+                symbol=symbol, reason="Fresh entry price unavailable; waiting for a timestamped refresh.",
+                gates=gates, warnings=warnings, metadata=base_metadata,
+                entry_price=trigger_price, stop_price=stop_price,
             )
 
         if current_price <= stop_price:
@@ -1598,36 +1618,19 @@ class DecisionEngine:
         # 10. TRIGGER
         # ====================================================
 
-        trigger_current_price = (
-            session.current_price
-        )
-
-        try:
-            live_last_price = float(
-                observe('market_data.get_last_price', self.market_data.get_last_price,
-                    symbol
-                )
+        trigger_current_price = self._entry_trigger_price(symbol, base_metadata)
+        if trigger_current_price is None:
+            gates["trigger"] = False
+            return self._watch(
+                symbol=symbol, reason="Fresh entry price unavailable; waiting for a timestamped refresh.",
+                gates=gates, warnings=warnings, metadata=base_metadata,
+                market_regime=market_name, strategy=session_strategy_name,
+                setup_grade=routed.grade.value, opportunity_score=routed.routed_score,
+                session_strategy_score=session_strategy.score,
+                ai_score=getattr(ai, "score", None),
+                entry_price=session_strategy.trigger_price,
+                stop_price=session_strategy.invalidation_price,
             )
-
-            if live_last_price > 0:
-                trigger_current_price = (
-                    live_last_price
-                )
-
-                base_metadata[
-                    "trigger_price_source"
-                ] = "ALPACA_LAST_PRICE"
-
-        except Exception as exc:
-            warnings.append(
-                "Latest-price trigger refresh failed; "
-                "using session price: "
-                + str(exc)
-            )
-
-            base_metadata[
-                "trigger_price_source"
-            ] = "SESSION_PRICE_FALLBACK"
 
         trigger = observe('trigger_engine.evaluate', self.trigger_engine.evaluate,
             session_strategy,
@@ -1913,4 +1916,3 @@ def get_decision_engine() -> DecisionEngine:
         _decision_engine = DecisionEngine()
 
     return _decision_engine
-

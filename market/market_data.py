@@ -630,6 +630,62 @@ class MarketData:
     # LAST PRICE
     # ========================================================
 
+    def get_entry_price_snapshot(self, symbol: str) -> dict:
+        """Timestamped entry evidence; management's legacy price API is separate."""
+        symbol = self._normalize_symbol(symbol)
+        failures = []
+
+        def validate(price, timestamp, source, max_age_seconds):
+            checked_at = datetime.now(timezone.utc)
+            if pd.api.types.is_bool(price):
+                raise ValueError("INVALID_PRICE")
+            price = float(price)
+            if not math.isfinite(price) or price <= 0:
+                raise ValueError("INVALID_PRICE")
+            if not isinstance(timestamp, (datetime, pd.Timestamp)) or pd.isna(timestamp):
+                raise ValueError("MISSING_TIMESTAMP")
+            if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+                raise ValueError("NAIVE_TIMESTAMP")
+            timestamp = timestamp.astimezone(timezone.utc)
+            age = (checked_at - timestamp).total_seconds()
+            if age < 0:
+                raise ValueError("FUTURE_TIMESTAMP")
+            if age > max_age_seconds:
+                raise ValueError("STALE_PRICE")
+            return {"status": "VALID", "symbol": symbol, "price": price,
+                    "timestamp": timestamp.isoformat(), "checked_at": checked_at.isoformat(),
+                    "age_seconds": age, "max_age_seconds": max_age_seconds,
+                    "source": source, "feed": self.get_feed_name(),
+                    "fallback_reasons": list(failures)}
+
+        try:
+            request = StockLatestTradeRequest(symbol_or_symbols=symbol, feed=self.feed)
+            trade = self.client.get_stock_latest_trade(request)[symbol]
+            return validate(trade.price, getattr(trade, "timestamp", None),
+                            "ALPACA_LATEST_TRADE", 120)
+        except Exception as exc:
+            failures.append({"source": "ALPACA_LATEST_TRADE",
+                             "reason": str(exc) if isinstance(exc, ValueError) else type(exc).__name__})
+        try:
+            bars = self.get_bars(symbol=symbol, timeframe="1m", limit=1)
+            timestamp = bars.index[-1]
+            # Use the bar START conservatively; never invent a last-trade time.
+            if not isinstance(timestamp, (datetime, pd.Timestamp)) or pd.isna(timestamp):
+                raise ValueError("MISSING_TIMESTAMP")
+            if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+                raise ValueError("NAIVE_TIMESTAMP")
+            if timestamp + timedelta(minutes=1) > datetime.now(timezone.utc):
+                raise ValueError("INCOMPLETE_BAR")
+            return validate(bars["close"].iloc[-1], timestamp,
+                            "ALPACA_COMPLETED_1M_BAR", 180)
+        except Exception as exc:
+            failures.append({"source": "ALPACA_COMPLETED_1M_BAR",
+                             "reason": str(exc) if isinstance(exc, ValueError) else type(exc).__name__})
+        return {"status": "UNAVAILABLE", "symbol": symbol, "price": None,
+                "source": "UNAVAILABLE", "feed": self.get_feed_name(),
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+                "fallback_reasons": failures}
+
     def get_last_price(
         self,
         symbol: str,
@@ -931,4 +987,3 @@ def get_market_data() -> MarketData:
         market_data = MarketData()
 
     return market_data
-

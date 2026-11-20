@@ -22,10 +22,15 @@ def valid_entry(entry, version):
     )
 
 
-def update_recheck(state, symbol, version, decision_state, reason, now):
+def update_recheck(state, symbol, version, decision_state, reason, now, *, first_priority_paper=False):
     entries = state.setdefault("rechecks", {})
     entry = entries.get(symbol)
-    if decision_state == "WATCHING":
+    initial_score_reject = (
+        first_priority_paper and decision_state == "REJECTED"
+        and reason in {"OpportunityEngine rejected the setup.",
+                       "Market regime / strategy router rejected the setup."}
+    )
+    if decision_state == "WATCHING" or initial_score_reject:
         # Do not extend the same report's window on every watcher poll.
         # Once a scheduled recheck actually runs, advance the next due
         # time so WATCHING remains on the intended 60-second cadence.

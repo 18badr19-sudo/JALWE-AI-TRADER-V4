@@ -23,6 +23,19 @@ class RecheckTests(unittest.TestCase):
         update_recheck(state, "NAUT", "v1", "WATCHING", "", 650)
         self.assertFalse(recheck_due(state, "NAUT", "v1", 700))
 
+    def test_priority_paper_first_rejection_can_mature(self):
+        for reason in ("OpportunityEngine rejected the setup.",
+                       "Market regime / strategy router rejected the setup."):
+            state = {}
+            self.assertTrue(update_recheck(state, "SVRA", "v1", "REJECTED", reason, 0,
+                                           first_priority_paper=True))
+            self.assertFalse(recheck_due(state, "SVRA", "v1", 59))
+            self.assertTrue(recheck_due(state, "SVRA", "v1", 60))
+            update_recheck(state, "SVRA", "v1", "REJECTED", reason, 60)
+            self.assertFalse(recheck_due(state, "SVRA", "v1", 600))
+        self.assertFalse(update_recheck({}, "SVRA", "v1", "REJECTED", "Risk rejected.", 0,
+                                        first_priority_paper=True))
+
     def test_watching_recheck_advances_on_sixty_second_cadence(self):
         state = {}
         update_recheck(state, "NAUT", "v1", "WATCHING", "", 100)

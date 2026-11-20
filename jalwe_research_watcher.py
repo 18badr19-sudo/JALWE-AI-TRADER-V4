@@ -3711,10 +3711,19 @@ def process_research(
             {},
         )
 
+        version = research_version(research)
         retry_active = update_recheck(
-            state, symbol, research_version(research), jalwe_state,
+            state, symbol, version, jalwe_state,
             str(safe_dict(payload.get("jalwe", {})).get("reason", "")),
             time.time(),
+            first_priority_paper=(
+                execution_result is not None
+                and settings.PAPER_TRADING is True
+                and settings.ALLOW_LIVE_TRADING is False
+                and payload["apex"]["verdict"] == "HIGH_PRIORITY_RESEARCH"
+                and bool(version)
+                and state.get("processed", {}).get(symbol) != version
+            ),
         )
         payload["recheck_notice"] = (
             "المتابعة: إعادة تقييم بعد 60 ثانية ضمن نافذة 10 دقائق من بدء المراقبة؛ بشرط بقاء التقرير حديثًا واجتياز جميع البوابات."

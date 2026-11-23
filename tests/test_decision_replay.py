@@ -44,6 +44,9 @@ class ReplayTests(unittest.TestCase):
             data_quality_ok=True,data_is_stale=False,rvol=2.,volume=1000,dollar_volume=10000.,liquidity_score=50.)
         if kind=='STALE': features.timestamp=self.now-timedelta(hours=2)
         e.market_data=NS(get_bars=Mock(return_value=frame),get_last_price=Mock(return_value=10.2),
+            get_entry_price_snapshot=Mock(return_value=dict(status="VALID",symbol="TEST",price=10.2,
+                timestamp=self.now.isoformat(),checked_at=self.now.isoformat(),age_seconds=0.,
+                max_age_seconds=120,source="ALPACA_LATEST_TRADE",feed="iex",fallback_reasons=[])),
             get_latest_quote=Mock(return_value=dict(bid=10.19,ask=10.2,timestamp=self.now,feed='iex')))
         e.feature_engine=NS(diagnose_input=Mock(return_value=dict(valid_rows=rows,required_rows=51,missing_columns=[])),
             build=Mock(return_value=features))
@@ -77,6 +80,52 @@ class ReplayTests(unittest.TestCase):
         e.risk_engine=NS(evaluate=Mock(return_value=RiskDecision(kind!='RISK_REJECT','recorded risk',
             quantity=2,risk_pct=1.,stop_price=9.1,target_1=12.4,target_2=13.5,target_3=14.6)))
         return e
+
+    def test_unavailable_entry_price_never_uses_session_fallback(self):
+        for payload in ({"status": "UNAVAILABLE", "price": None, "source": "UNAVAILABLE"},
+                        {"status": "VALID", "price": float("nan")},
+                        {"status": "VALID", "price": True}):
+            with self.subTest(payload=payload):
+                engine=self.engine()
+                engine.market_data.get_entry_price_snapshot.return_value=payload
+                decision=self.capture(engine)
+                self.assertEqual(decision.state,DecisionState.WATCHING)
+                self.assertFalse(decision.gates['trigger'])
+                self.assertFalse(decision.ready_for_execution)
+                engine.trigger_engine.evaluate.assert_not_called()
+                engine.risk_engine.evaluate.assert_not_called()
+                engine.market_data.get_last_price.assert_not_called()
+
+    def test_entry_refresh_failure_waits_without_session_price(self):
+        engine=self.engine()
+        engine.market_data.get_entry_price_snapshot.side_effect=RuntimeError('provider unavailable')
+        decision=self.capture(engine)
+        self.assertEqual(decision.state,DecisionState.WATCHING)
+        self.assertEqual(decision.metadata['trigger_price_source'],'UNAVAILABLE')
+        engine.trigger_engine.evaluate.assert_not_called()
+
+    def test_latched_entry_requires_fresh_price_before_breakout_recheck(self):
+        engine=self.engine('LATCH'); self.capture(engine)
+        self.assertIn('TEST',engine._breakout_latches)
+        engine.breakout_engine.evaluate.reset_mock()
+        engine.market_data.get_entry_price_snapshot.return_value={'status':'UNAVAILABLE','price':None}
+        decision=self.capture(engine)
+        self.assertEqual(decision.state,DecisionState.WATCHING)
+        self.assertFalse(decision.gates['trigger'])
+        self.assertIn('TEST',engine._breakout_latches)
+        engine.breakout_engine.evaluate.assert_not_called()
+        engine.risk_engine.evaluate.assert_not_called()
+
+    def test_completed_bar_fallback_keeps_its_actual_source_and_replays(self):
+        engine=self.engine()
+        engine.market_data.get_entry_price_snapshot.return_value.update(
+            source='ALPACA_COMPLETED_1M_BAR',age_seconds=90.,max_age_seconds=180,
+            timestamp=(self.now-timedelta(seconds=90)).isoformat())
+        decision=self.capture(engine)
+        self.assertEqual(decision.state,DecisionState.READY_FOR_PAPER_EXECUTION)
+        self.assertEqual(decision.metadata['trigger_price_source'],'ALPACA_COMPLETED_1M_BAR')
+        self.assertEqual(decision.metadata['trigger_price_evidence']['age_seconds'],90.)
+        self.assertEqual(audit.replay(self.capsules[-1])['state'],'MATCH')
 
     def capture(self,e):
         # Correctness cases must not depend on CI host scheduling. The dedicated

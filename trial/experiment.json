@@ -1,0 +1,15 @@
+{
+  "status": "PREPARING",
+  "mode": "OBSERVATION_AND_SIMULATION_ONLY",
+  "duration_hours": 240,
+  "started_at_utc": null,
+  "ends_at_utc": null,
+  "broker_orders_authorized": false,
+  "broker_credentials_allowed": false,
+  "telegram_messages_allowed": false,
+  "production_changes_allowed": false,
+  "promotion_requires_user_approval": true,
+  "base_sha": "2387c5f5c3827479fd045c4549afb3b5896856c3",
+  "runner": "tools/run_container_lab.py",
+  "notes": "User selected observation and simulation without orders. No independent trading service required for offline lab. Do not start live controller. Start duration only after verified first lab run and observation source. Mock tests do not establish market execution or profitability."
+}

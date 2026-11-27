@@ -1,0 +1,67 @@
+name: Trial standalone simulation
+on:
+  push:
+    branches: [trial/paper-10-days-2026-11-26]
+    paths: ['.github/workflows/trial-simulation.yml', 'research_lab/**', 'trial/**']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  simulate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      ALPACA_API_KEY: offline-no-credentials
+      ALPACA_SECRET_KEY: offline-no-credentials
+      ALPACA_BASE_URL: https://paper-api.alpaca.markets
+      PAPER_TRADING: 'true'
+      ALLOW_LIVE_TRADING: 'false'
+      JALWE_AUTO_PAPER_EXECUTION: 'false'
+      JALWE_BROKER_SUBMISSION: 'false'
+      JALWE_DECISION_REPLAY_ENABLED: 'false'
+      JALWE_LEARNING_ENABLED: 'false'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Generate explicitly synthetic engineering inputs
+        run: |
+          mkdir -p trial-results
+          PYTHONPATH=tests:. python - <<'PY'
+          import json
+          from pathlib import Path
+          from lab_fixture import ready_fixture
+          raw = ready_fixture()
+          raw['costs'] = dict(slippage_bps=2., fee_bps=10., per_share_fee=.001)
+          Path('trial-results/input.json').write_text(json.dumps(raw))
+          PY
+      - name: Replay native decisions in isolated no-network worker
+        run: python -m research_lab trial-results/input.json --output trial-results/simulation.json
+      - name: Verify virtual lifecycle and label results
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          report = json.loads(Path('trial-results/simulation.json').read_text())
+          assert report['state'] == 'SYNTHETIC_ENGINEERING_RUN'
+          assert report['execution_authority'] is False
+          arm = report['baseline']
+          assert arm['closed_trades'] >= 1, arm
+          assert arm['open_trades'] == 0, arm
+          summary = {'kind': report['state'], 'execution_authority': False,
+                     'closed_virtual_trades': arm['closed_trades'],
+                     'virtual_fills': len(arm['fills']), 'fees': arm['fees'],
+                     'market_validation': False, 'ten_day_clock_started': False}
+          Path('trial-results/summary.json').write_text(json.dumps(summary, indent=2))
+          print(json.dumps(summary))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: synthetic-simulation-evidence
+          path: trial-results/
+          retention-days: 30

@@ -1,7 +1,7 @@
 name: Offline laboratory
 on:
   push:
-    branches: [lab/paper-isolated]
+    branches: [lab/paper-isolated, trial/paper-10-days-2026-11-26]
   workflow_dispatch:
 permissions:
   contents: read

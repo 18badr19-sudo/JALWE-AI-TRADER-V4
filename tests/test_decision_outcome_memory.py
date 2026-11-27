@@ -267,7 +267,7 @@ class OutcomeMemoryTests(unittest.TestCase):
               "auto_paper_execution_ready": lambda: False,
               "get_paper_trade_orchestrator": Mock(side_effect=AssertionError("broker must not run")),
               "build_decision_payload": lambda *args: payload, "safe_dict": lambda d: d,
-              "update_recheck": lambda *args: False, "research_version": lambda r: "v1",
+              "update_recheck": lambda *args, first_priority_paper=False: False, "research_version": lambda r: "v1",
               "load_runtime_controls": lambda: {},
               "get_opportunity_performance_tracker": lambda: SimpleNamespace(start_from_payload=lambda *args: False),
               "get_decision_outcome_memory": lambda: broken_memory,
@@ -279,6 +279,7 @@ class OutcomeMemoryTests(unittest.TestCase):
         state = {}
         self.assertTrue(ns["process_research"](SimpleNamespace(symbol="TEST"), engine, state))
         engine.analyze.assert_called_once_with("TEST")
+        broken_memory.record.assert_called_once_with(payload, "v1")
         save.assert_called_once_with(payload)
         self.assertEqual(state["processed"]["TEST"], "v1")
         self.assertEqual(payload["jalwe"]["state"], "REJECTED")

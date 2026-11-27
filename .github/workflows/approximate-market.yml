@@ -1,0 +1,27 @@
+name: Approximate market replay
+on:
+  push:
+    branches: [trial/paper-10-days-2026-11-26]
+    paths: ['trial/**', '.github/workflows/approximate-market.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  observe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install yfinance
+      - run: python trial/approximate_market_replay.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: approximate-market-evidence
+          path: market-simulation/
+          retention-days: 30
